@@ -2,6 +2,8 @@
 
 This is an independent read of the original plan (the thesis, landscape, stack and roadmap that the [README](README.md) summarizes). I agree with the destination and disagree with several of the paths to it. This document is deliberately opinionated: where I diverge I say why, and where I'm unsure I say what experiment would settle it.
 
+> **Update:** the stack and language decisions here (§2 rows 6–7 and §8) are superseded by [docs/STACK.md](docs/STACK.md): Rust core and relay from day one, native SwiftUI and Compose on mobile, and Dioxus for web and desktop. The identity, Spaces, network, and roadmap positions below still stand, except that the language column and "TypeScript until v0.5" no longer apply.
+
 **How to read this.** Each section ends with a *Decision* or *Tripwire*. A decision is what I'd do today. A tripwire is the evidence that would make me change it.
 
 ---

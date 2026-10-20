@@ -32,16 +32,18 @@ Crypto natives, privacy-minded people, and Nostr/Farcaster users. They already h
 
 ## The road to 1.0
 
-Each release is a usable product on its own. Early versions are **TypeScript only**; Rust is added exactly once, in the core, at P2P/MLS.
+Each release is a usable product on its own. The core and relay are Rust from day one; clients are native to each platform (see [Architecture](#architecture)).
 
-| Version | Ships | Language |
-|:--|:--|:--|
-| **v0.1** | Key identity, local store, relay sync, 1:1 E2EE chat | TypeScript |
-| **v0.2** | Groups (MLS), media, push | TypeScript |
-| **v0.3** | Public profiles, follow graph, feed | TypeScript |
-| **v0.5** | Desktop polish, self-hostable relay, data export | TypeScript (+ minimal Rust) |
-| **v0.8** | P2P (iroh), Tor, relay blinding | Rust core |
-| **v1.0** | Local agent, light docs, payments (tipping) | TypeScript + Rust |
+| Version | Ships |
+|:--|:--|
+| **v0.1** | Key identity, local store, relay sync, 1:1 E2EE chat (a Space of two), push |
+| **v0.2** | Groups (MLS), media, member management, abuse controls |
+| **v0.3** | Public persona, profiles, follow graph, feed, Nostr bridge |
+| **v0.4** | Notes and documents, local search, capability-scoped local API |
+| **v0.5** | Desktop polish, one-command self-hostable relay, data export |
+| **v0.8** | P2P (iroh), Tor, relay blinding |
+| **v0.9** | Independent crypto and protocol review |
+| **v1.0** | Local agent, tipping via external wallets, stable versioned protocol |
 
 ### v0.1 — a sovereign 1:1 messenger
 
@@ -69,23 +71,27 @@ The point where the thesis is proven: sovereign *and* broad. v1.0 is the soverei
 
 ## Architecture
 
-**Principle: standards travel; platform APIs don't.** Implement the small, stable specs ourselves; depend only on the irreducible ones; keep crypto, storage, and transport behind interfaces so runtimes can be swapped per platform.
+**Principle: standards travel; platform APIs don't.** One Rust core owns every long-lived concern (identity, events, Spaces, sync, storage, transport). Clients are thin and native to their platform. Full detail, rationale, and proof spikes are in [docs/STACK.md](docs/STACK.md).
 
-**Shells:** Expo / React Native (iOS, Android) and Tauri (desktop), both consuming **one shared TypeScript core**. Native-first — no PWA for now, but a future web shell must be a swap, not a rewrite.
+| Piece | Choice |
+|:--|:--|
+| Core and relay | **Rust** |
+| iOS | SwiftUI, core via UniFFI |
+| Android | Jetpack Compose, core via UniFFI |
+| Web and desktop | Dioxus (Rust), core linked directly (WASM on web, native on desktop) |
 
 | Layer | Choice | Standard |
 |:--|:--|:--|
-| Identity | Passkeys + PRF → Ed25519; mandatory mnemonic fallback | WebAuthn |
-| Identifier | `did:key` | W3C DID |
-| Crypto | WebCrypto (native on desktop, quick-crypto on mobile) | Ed25519, X25519, AES-GCM, HKDF |
-| Data | DAG-CBOR + CID + signed Merkle DAG | IPLD / Multiformats |
-| CRDTs | LWW map, OR-Set, RGA (own implementation) | — |
-| Storage | SQLite + content-addressed blocks; keys in the OS keychain | — |
-| Transport | WebSocket relay now → `iroh` later | QUIC |
-| Group E2EE | MLS + HPKE | RFC 9420 / 9180 |
-| Payments | Lightning | BOLT11 / LNURL |
+| Identity | Random root seed + mnemonic; rotatable key-event log; passkeys unlock locally | WebAuthn (unlock only) |
+| Data | Deterministic CBOR, BLAKE3, signed per-device logs | RFC 8949, CDDL schemas |
+| Crypto | RustCrypto: Ed25519, X25519, ChaCha20-Poly1305/AES-GCM, HKDF | — |
+| Group E2EE | MLS (OpenMLS) + HPKE; every conversation is a Space | RFC 9420 / 9180 |
+| Documents | CRDT library (Loro or Automerge) for notes only | — |
+| Storage | SQLite + SQLCipher, FTS5 search, keys in the OS keystore | — |
+| Transport | WebSocket relay now → `iroh` → Tor, behind a trait | QUIC |
+| Payments | Tipping via external wallets (NWC, LNURL, Cashu); no embedded wallet | — |
 
-**Four irreducible dependencies:** an MLS implementation, a P2P transport, a SQLite driver, and a native passkey module. Everything else is spec-level and self-written.
+The wire formats, identity log, Spaces model, and relay design are described in [VISION.md](VISION.md).
 
 ## Hard problems
 
@@ -110,11 +116,11 @@ v1.0 is the proof, not the destination. The longer vision, in brief:
 | **v3.5** | Ecosystem & governance | Independent clients, spec stewardship, grants, audits, and governance that doesn't depend on any one founder. |
 | **v4.0+** | Ambient sovereignty | Device mesh, hardware keys, offline-first everything, one-click migration off Big Tech. |
 
-The rule that holds across every phase: **standards travel, platform APIs don't.** Keep the specs (DID, IPLD, MLS, WebAuthn), swap the runtime per platform, and add Rust exactly once — in the core, never in the UI.
+The rule that holds across every phase: **standards travel, platform APIs don't.** Keep the specs (DID, IPLD, MLS, WebAuthn), swap the runtime per platform, and keep the logic in the Rust core, never in the UI.
 
 ## References
 
 - [AnyType protocol](https://tech.anytype.io/any-sync/overview) · [`any-sync`](https://github.com/anyproto/any-sync)
-- [Expo](https://expo.dev/) · [Tauri](https://v2.tauri.app/) · [Iroh](https://docs.iroh.computer/about/faq)
+- [Dioxus](https://dioxuslabs.com/) · [UniFFI](https://mozilla.github.io/uniffi-rs/) · [Iroh](https://docs.iroh.computer/about/faq) · [OpenMLS](https://openmls.tech/)
 - [W3C DID](https://www.w3.org/TR/did-1.1/) · [IPLD](https://ipld.io/) · [MLS (RFC 9420)](https://www.rfc-editor.org/rfc/rfc9420.html)
 - [Nostr](https://nostr.com/) · [Macro](https://macro.com/) (landscape)
