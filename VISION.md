@@ -2,7 +2,7 @@
 
 This is an independent read of the original plan (the thesis, landscape, stack and roadmap that the [README](README.md) summarizes). I agree with the destination and disagree with several of the paths to it. This document is deliberately opinionated: where I diverge I say why, and where I'm unsure I say what experiment would settle it.
 
-> **Update:** the stack and language decisions here (§2 rows 6–7 and §8) are superseded by [docs/STACK.md](docs/STACK.md): Rust core and relay from day one, native SwiftUI and Compose on mobile, and Dioxus for web and desktop. The identity, Spaces, network, and roadmap positions below still stand, except that the language column and "TypeScript until v0.5" no longer apply.
+> **Aligned with [docs/STACK.md](docs/STACK.md).** The stack and language positions here were revised after the first draft: Rust core and relay from day one, native SwiftUI and Jetpack Compose on mobile, and Dioxus for web and desktop. Where this document and STACK.md disagree, STACK.md wins.
 
 **How to read this.** Each section ends with a *Decision* or *Tripwire*. A decision is what I'd do today. A tripwire is the evidence that would make me change it.
 
@@ -27,8 +27,8 @@ This is an independent read of the original plan (the thesis, landscape, stack a
 | 3 | "Anonymous" as a goal | Write a **threat model first**; promise *unlinkability by default, anonymity opt-in* | Anonymity is a property of transport + metadata, not of keys. Don't market what the architecture can't yet deliver. |
 | 4 | v0.1 = 1:1 chat, groups in v0.2 | Primitive = **Space** (an MLS group). 1:1 is a space of two | One code path from day one. No rewrite when groups arrive. |
 | 5 | Own CRDT implementations | **Signed append-only logs** for v1; adopt a CRDT library for documents | Chat and feeds are logs. Writing RGA yourself is a research project, not a v0.x task. |
-| 6 | Expo/RN **and** Tauri | Spike **Tauri 2 on mobile too**; decide in week two | Two shells means two sets of native-module pain, solo. |
-| 7 | Rust "exactly once, at v0.8" | Decide the core's language **now**, behind a conformance suite | The plan says TS-only to v0.5 but needs MLS at v0.2. That's a contradiction. |
+| 6 | Expo/RN **and** Tauri | **Native UI per platform** (SwiftUI, Compose) and **Dioxus** for web and desktop, all over one Rust core | Every cross-platform UI option needs workarounds (RN-web, WebView wrappers, extra shells). Native mobile gives the native feel, and thin UIs make three clients affordable. |
+| 7 | Rust "exactly once, at v0.8" | **Rust core and relay from day one**, behind a conformance suite | The plan says TS-only to v0.5 but needs MLS at v0.2. With agents writing most code, Rust's cost drops, and starting there avoids a mid-project rewrite. |
 | 8 | Push in v0.2 | Push is **v0.1** | A messenger without notifications is dead on arrival. |
 | 9 | Local agent (v1.0) and mini-apps (v2.0) as separate features | One **capability-scoped local API** from the start | The agent *is* the first mini-app. Design the permission model once. |
 | 10 | Payments via embedded Lightning | **Don't build a wallet.** Tipping via NWC / Cashu / LNURL | Custody, regulation, and mobile node UX will eat a solo dev. |
@@ -132,34 +132,29 @@ Borrowing from SimpleX's best idea: delivery uses **unidirectional, per-contact 
 
 ## 8. Platform and language
 
-### Shells: spike before committing
+Full detail, tooling, and proof spikes are in [docs/STACK.md](docs/STACK.md). The position in brief:
 
-The original picks **Expo/React Native + Tauri**. For a solo developer this means two runtimes (Hermes vs. system WebView), two crypto/passkey/storage integration surfaces, and two UI codebases or a lowest-common-denominator abstraction.
+| Piece | Choice |
+|:--|:--|
+| Core and relay | **Rust** (one implementation of identity, events, Spaces, sync, storage, transport) |
+| iOS | SwiftUI, core via UniFFI |
+| Android | Jetpack Compose, core via UniFFI |
+| Web and desktop | Dioxus (Rust), core linked directly: WASM on web, native on desktop |
 
-**Tauri 2 now targets iOS and Android.** A single Tauri shell gives:
-- one UI codebase (web tech, which a JavaScript dev ships fast in),
-- real WebCrypto on mobile (the original notes RN lacks it),
-- a **Rust backend available on every platform**, which is exactly where MLS, iroh and SQLite want to live anyway.
+**Why Rust from day one.** The roadmap needs MLS at v0.2 and a P2P transport by v0.8, so a TypeScript-first core meant a port later. With agents writing most of the code, Rust's learning curve costs little and its compiler is the best feedback loop an agent can have. One core also serves every platform, which is what makes a later web client a build target rather than a rewrite.
 
-Costs: Tauri mobile is younger than React Native; WebView scrolling and gesture feel can lag native; background execution and push plugins need work.
+**Why not one cross-platform UI.** I worked through Expo/React Native plus Tauri, Tauri everywhere, and React Native for Web. Each needs workarounds to reuse code, and none gives a clean story for web, desktop, and mobile at once. No Rust UI framework gives native mobile feel today either: they use a WebView or draw their own widgets. Native UI on mobile with a Rust core is the pattern Signal and Element X use.
 
-**Decision:** in week two, build the *same* conversation screen (list, composer, offline send, one push) in both shells and decide with a stopwatch and a feel test. My prior is Tauri-everywhere for 0.x, with the headless core letting RN replace the mobile shell later *if* UX demands it.
+**Why three clients is affordable.** The Rust core owns logic and state; each client renders query results and sends commands. Duplicated work is presentation only, which agents handle well, and design tokens are defined once and generated for all three.
 
-### Core language: decide now
+**Conformance suite stays.** Language-neutral golden vectors (events, signatures, key-log transitions, MLS transcripts) remain the real spec, so independent clients and relays can be built against it.
 
-The original says "TypeScript until v0.5, Rust once at v0.8", yet needs MLS in v0.2 and a P2P transport at v0.8. In practice you'll hit a Rust boundary much earlier or adopt a TS MLS library (e.g. `ts-mls`; verify its maturity and audit status before betting on it).
+**Relay.** Rust, `axum`, a single static binary or container image, SQLite by default. Self-hosting must be a one-command, ten-minute affair, or "sovereign" is marketing.
 
-My plan:
-
-1. **v0.x core in TypeScript** behind narrow interfaces (`Identity`, `Log`, `Store`, `Transport`, `Group`).
-2. **Language-neutral conformance vectors** from the first commit: golden bytes for events, signatures, key-log transitions, MLS interop transcripts. These are the real spec.
-3. **Port to Rust when a tripwire trips**, not on a calendar: MLS lib unmaintained or unaudited; iroh needed; performance on low-end Android. The vectors make the port mechanical and de-risk the "only add Rust once" rule.
-
-If the shell spike favors Tauri, the Rust side can host the crypto/transport sooner with zero extra distribution cost, so the tripwire may trip early. That's fine.
-
-### Relay
-
-TypeScript (Bun or Node), single binary/Docker image, SQLite by default. Self-hosting must be a one-command, ten-minute affair, or "sovereign" is marketing.
+**Tripwires:**
+- If Dioxus fails the maturity spike (stability, accessibility, IME, churn), swap the web/desktop UI framework. The core is unaffected.
+- If three clients prove too much for one person, fall back to Dioxus on mobile in a WebView and accept less native feel.
+- If OpenMLS fails its evaluation, that is the one result that threatens a locked decision, so it runs first.
 
 ## 9. Revised roadmap to 1.0
 
@@ -167,7 +162,7 @@ Same destination, different slicing. Principle: **ship the primitive that everyt
 
 | Phase | Goal | Contents |
 |:--|:--|:--|
-| **0: Foundations** (weeks) | De-risk | Threat model; identity/key-log spec; event + wire formats; conformance vectors; shell spike; MLS library evaluation; minimal relay. |
+| **0: Foundations** (weeks) | De-risk | Threat model; identity/key-log spec; event + wire formats; conformance vectors; proof spikes ([STACK.md §12](docs/STACK.md#12-proof-spikes-before-anything-is-final)), starting with the OpenMLS evaluation; minimal relay. |
 | **0.1: Sovereign messenger** | A stranger can use it in 30 seconds | Seed identity + mnemonic, device pairing, **Spaces (MLS)** with 1:1 UI, relay mailboxes, **content-free push**, offline-first, two devices, local search. |
 | **0.2: Groups & media** | Communities of friends | Group UI on the same Space primitive, encrypted media/blobs, member management, block/report, abuse controls. |
 | **0.3: Public persona** | Surface area | Separate public identity, profiles, follow graph, pull-based feed, **Nostr bridge** (read + cross-post). |
@@ -185,7 +180,7 @@ Notable shifts: groups ride on v0.1's primitive instead of arriving as a rebuild
 - **Pro features** run locally and are cheap to gate (larger vaults, more devices, priority relay).
 - **Self-hosting stays first-class** and free. That's both the ethos and the trust story.
 - **Grants** (NLnet, OTF and similar) fit this work well and don't dilute control. For a solo developer, they may be the best runway for the audit.
-- Consider a **foundation or stewardship structure** by 1.0: spec under permissive terms (CC0/MIT), reference implementations under a copyleft license (AGPL) so hosted forks can't quietly close it. Decide before outside contributors arrive; relicensing later is painful.
+- Consider a **foundation or stewardship structure** by 1.0: specs under CC0, core crates under Apache-2.0/MIT so others can build independent clients, and the relay and apps under AGPL-3.0 so hosted forks can't quietly close them (see [STACK.md §10](docs/STACK.md#10-licensing)). Decide before outside contributors arrive; relicensing later is painful.
 
 ## 11. Local AI agent
 
@@ -210,33 +205,38 @@ Don't build a wallet. A wallet means custody decisions, regulatory exposure, nod
 - **Deterministic simulation testing** for sync: a seeded network simulator (drops, reorders, partitions, clock skew) running many devices. Sync bugs are the ones that destroy trust, and they only show up under adversity.
 - **Property-based tests** for event validation and log merge; **golden vectors** for every wire format.
 - **Boring crypto only**: audited primitives (libsodium-class), no novel constructions, MLS rather than a bespoke ratchet. Anything custom goes to the reviewer first.
-- **Dependency budget**: the four irreducible dependencies from the original, plus a CRDT lib and a CBOR lib. Everything else is a justification in an ADR.
+- **Dependency budget**: the irreducible ones (an MLS implementation, a P2P transport, a SQLite driver), plus a CRDT library, a CBOR library, and the platform UI frameworks. Everything else is a justification in an ADR.
 - **Reproducible builds and signed releases** early. Sovereignty claims need verifiable binaries.
 
-Suggested layout:
+Suggested layout (full version in [STACK.md §11](docs/STACK.md#11-repository-layout)):
 
 ```
-packages/
-  identity/    key-event log, device delegation, recovery
-  events/      typed events, CBOR, hashing, signatures
-  spaces/      MLS groups, membership, ACLs
-  sync/        log merge, snapshots, cursors
-  store/       SQLite, blobs, FTS
-  transport/   interface + websocket (later iroh, tor)
-  capabilities/ grants, local API (agent & mini-apps use this)
-  app-core/    the headless client facade the shells call
-apps/
-  client/      Tauri (and/or RN) shell, UI only
-  relay/       the mailbox server
-docs/ spec/ adr/
-conformance/   language-neutral test vectors
+crates/
+  ambient-identity/   key-event log, device delegation, recovery
+  ambient-events/     typed events, CBOR, hashing, signatures
+  ambient-spaces/     MLS groups, membership, ACLs
+  ambient-sync/       log merge, snapshots, cursors
+  ambient-store/      SQLite, blobs, FTS
+  ambient-transport/  trait + websocket (later iroh, tor)
+  ambient-capabilities/ grants, local API (agent & mini-apps use this)
+  ambient-core/       the headless client facade
+  ambient-ffi/        UniFFI surface for Swift and Kotlin
+  ambient-relay/      the mailbox server
+clients/
+  web-desktop/        Dioxus
+  apple/              SwiftUI
+  android/            Compose
+design/tokens/        design tokens (generates Rust/Swift/Kotlin)
+conformance/          language-neutral test vectors
+docs/                 spec/ adr/ STACK.md
 ```
 
 ## 14. Where I could be wrong
 
 | My bet | What would prove me wrong |
 |:--|:--|
-| Tauri on mobile is good enough | The week-two spike feels laggy, or push/background work needs more native code than RN would. |
+| Native UI on each mobile platform is affordable for one person | Three clients drag, or the UIs aren't as thin as planned. (Fallback: Dioxus on mobile in a WebView, accepting less native feel.) |
+| Dioxus is ready for production web and desktop | The maturity spike shows churn, or accessibility and IME problems. (Swap the UI framework; the core is unaffected.) |
 | MLS for every Space, including 1:1 | The MLS library is immature, or the per-message overhead/complexity hurts offline 1:1 UX. |
 | A key-event log is worth its complexity | The spec balloons; users never use rotation. (Fallback in §4.) |
 | Logs over CRDTs | Real usage needs concurrent editing of structured data well beyond notes. |
@@ -263,7 +263,7 @@ The original landscape omits the projects closest to the *messaging and sync* la
 2. Draft identity key-event log spec with test vectors.
 3. Event format, hashing and signing, with golden vectors.
 4. MLS library bake-off: interop test, bundle size, maintenance, audit status.
-5. Shell spike: the same chat screen in Tauri-mobile and RN.
+5. Client spikes ([STACK.md §12](docs/STACK.md#12-proof-spikes-before-anything-is-final)): the core on iOS, Android, web, and desktop, and the Dioxus maturity check.
 6. A 200-line relay (put/get/subscribe) and a CLI client that exchanges one message between two identities.
 
 If step 6 works end to end over a real network, with two devices and an offline gap in the middle, the rest is execution.
