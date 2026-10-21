@@ -59,6 +59,7 @@ There is no JavaScript or TypeScript in the product. Small amounts of JS glue fo
 | `ambient-spaces` | Spaces as MLS groups, membership, ACL log |
 | `ambient-sync` | Per-device logs, merge, snapshots, cursors |
 | `ambient-store` | SQLite, encrypted blobs, FTS5 search |
+| `ambient-docs` | Creations: CRDT documents, collections, versions, Markdown parsing and styling spans, links and backlinks, creation references |
 | `ambient-transport` | `Transport` trait; WebSocket impl first |
 | `ambient-capabilities` | Scoped grants and the local API (agent and mini-apps use this) |
 | `ambient-core` | The app facade: commands in, reactive query streams out |
@@ -81,6 +82,7 @@ Protocol crates use `#![forbid(unsafe_code)]` and have no UI or platform depende
 | Search | SQLite FTS5 | |
 | Transport | WebSocket relay first → `iroh` (QUIC) → Tor | Behind a trait. |
 | CRDTs (documents only) | Loro or Automerge, selected by spike | Not hand-rolled. |
+| Markdown | `comrak` or `pulldown-cmark`, selected by spike | Parsing and styling spans live in the core, not in each client. |
 | Serialization at the FFI | UniFFI records and enums | No bespoke wire format. |
 | Errors / logging | `thiserror`, `tracing` | No user data in logs. |
 
@@ -184,7 +186,7 @@ crates/
   ambient-identity/   ambient-events/    ambient-spaces/
   ambient-sync/       ambient-store/     ambient-transport/
   ambient-capabilities/  ambient-core/   ambient-ffi/
-  ambient-relay/
+  ambient-docs/       ambient-relay/
 clients/
   web-desktop/        Dioxus (web + desktop targets)
   apple/              Xcode project, SwiftUI
@@ -208,8 +210,9 @@ Each spike has a pass condition. The architecture is final only when all pass.
 | 5 | End to end | Two identities on different platforms exchange messages through one relay, with an offline gap in the middle. |
 | 6 | OpenMLS | Interop test, bundle size, memory use inside an iOS extension, maintenance and audit status. |
 | 7 | Dioxus maturity | Build the real conversation screen; judge stability, accessibility, text input and IME, and upgrade churn. |
+| 8 | Editor | A Markdown editor on all three clients with core-owned text and styling spans: typing, selection, IME composition, undo/redo, and a 50,000-word document that stays responsive. |
 
-**If a spike fails:** iOS/Android/desktop failures change the binding or build approach, not the language choice. A Dioxus failure swaps the web/desktop UI framework (two-way door). OpenMLS failure is the only one that threatens a one-way door, so it runs first.
+**If a spike fails:** iOS/Android/desktop failures change the binding or build approach, not the language choice. A Dioxus failure swaps the web/desktop UI framework (two-way door). An editor failure changes the editor approach on that client (for example, embedding a web editor component on Dioxus), not the core. OpenMLS failure is the only one that threatens a one-way door, so it runs first.
 
 ## 13. What we are deliberately not using
 
@@ -238,5 +241,7 @@ Native feel matters most on mobile, but web is the fastest place to iterate, and
 2. Dioxus web client as the reference UI.
 3. iOS and Android clients on the same facade.
 4. Dioxus desktop, then iroh P2P (v0.8).
+
+Writing is a desktop and web experience first. The Dioxus client gets the full editor when creations land (v0.3); mobile starts with short notes, reading, commenting, and conversations, and gains long-form editing afterward.
 
 The architecture is declared up front; only the build order is flexible.

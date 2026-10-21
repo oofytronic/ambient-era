@@ -37,10 +37,11 @@ Each release is a usable product on its own. The core and relay are Rust from da
 | Version | Ships |
 |:--|:--|
 | **v0.1** | Key identity, local store, relay sync, 1:1 E2EE chat (a Space of two), push |
-| **v0.2** | Groups (MLS), media, member management, abuse controls |
-| **v0.3** | Public persona, profiles, follow graph, feed, Nostr bridge |
-| **v0.4** | Notes and documents, local search, capability-scoped local API |
-| **v0.5** | Desktop polish, one-command self-hostable relay, data export |
+| **v0.2** | Groups (MLS), encrypted media, member management, abuse controls |
+| **v0.3** | **Write:** creations (books, series, newsletters, notes), Markdown editor, media embeds, versions, links and backlinks, local search, export |
+| **v0.4** | **Weave:** chat about any creation, a creation-to-conversation sidebar, share a version into a conversation, capability-scoped local API |
+| **v0.5** | Desktop polish, one-command self-hostable relay, full data export and import |
+| **v0.6** | **Publish:** public persona, profiles, follow graph, feed of published creations, Nostr bridge |
 | **v0.8** | P2P (iroh), Tor, relay blinding |
 | **v0.9** | Independent crypto and protocol review |
 | **v1.0** | Local agent, tipping via external wallets, stable versioned protocol |
@@ -56,6 +57,10 @@ v0.1 is **not** an everything app. It's a private messenger you can start in 30 
 
 No groups, no feed, no P2P. Relay-only, and the relay is untrusted and self-hostable.
 
+### v0.3–v0.4 — write, then weave
+
+Creation comes before the social surface. v0.3 is a place to write: books, series, newsletters, and short notes in a Markdown editor with media, versions, and links between pieces. v0.4 interweaves it with conversation: from any chapter or note you can start a chat, pick an existing Space or create one, and the creation shows the conversations about it in a sidebar. Only after that does anything become public (v0.6), starting with publishing creations rather than bare posts.
+
 ### v1.0 — the complete product
 
 The point where the thesis is proven: sovereign *and* broad. v1.0 is the sovereign alternative to Signal, plus a lightweight public social network, plus an owned second brain, with a wallet.
@@ -64,8 +69,8 @@ The point where the thesis is proven: sovereign *and* broad. v1.0 is the soverei
 - Public profiles with a portable identity, follow graph, and feed
 - Direct P2P sync, so the relay becomes optional when peers are reachable
 - Tor / anonymity mode
-- A local AI agent that reads your encrypted data without sending it away
-- Light document objects and basic tipping
+- A local AI agent that helps you write and reads your encrypted data without sending it away
+- Long-form creations (books, series, newsletters, notes) with conversations woven in, and basic tipping
 
 **Explicitly out of scope for v1:** whiteboards, database UIs, algorithmic feeds, and very large groups. No ads, ever — sustainability comes from relay subscriptions, pro features, and self-hosting.
 

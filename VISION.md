@@ -164,15 +164,16 @@ Same destination, different slicing. Principle: **ship the primitive that everyt
 |:--|:--|:--|
 | **0: Foundations** (weeks) | De-risk | Threat model; identity/key-log spec; event + wire formats; conformance vectors; proof spikes ([STACK.md §12](docs/STACK.md#12-proof-spikes-before-anything-is-final)), starting with the OpenMLS evaluation; minimal relay. |
 | **0.1: Sovereign messenger** | A stranger can use it in 30 seconds | Seed identity + mnemonic, device pairing, **Spaces (MLS)** with 1:1 UI, relay mailboxes, **content-free push**, offline-first, two devices, local search. |
-| **0.2: Groups & media** | Communities of friends | Group UI on the same Space primitive, encrypted media/blobs, member management, block/report, abuse controls. |
-| **0.3: Public persona** | Surface area | Separate public identity, profiles, follow graph, pull-based feed, **Nostr bridge** (read + cross-post). |
-| **0.4: Notes & capabilities** | The "second brain" begins | Document objects (CRDT lib), FTS search across Spaces, **capability-scoped local API** (UCAN-style grants). The permission model future mini-apps and the agent share. |
+| **0.2: Groups & media** | Communities of friends | Group UI on the same Space primitive, encrypted media/blobs (reused by creations), member management, block/report, abuse controls. Keep it short: the Space primitive already supports N members. |
+| **0.3: Write** | A place to create | **Creations** (books, series, newsletters, notes), each its own Space; Markdown editor with core-owned text and styling; media embeds; named versions; wiki-links and backlinks; FTS across everything; Markdown export. Single-author first. |
+| **0.4: Weave** | Creation and conversation interwoven | "Chat about this" from any creation, chapter, or range; creation references in conversations; local creation-to-conversation index and sidebar; share a version into a chat; **capability-scoped local API** (UCAN-style grants), since sharing is a grant. |
 | **0.5: Own your infrastructure** | Sovereignty you can verify | Self-host relay (one command), multi-relay redundancy, full export/import, desktop polish. |
+| **0.6: Publish** | Surface area | Separate public identity, profiles, follow graph, pull-based feed of **published creations**, **Nostr bridge** (read + cross-post). |
 | **0.8: Transport hardening** | Anonymity becomes real | Iroh P2P, Tor/pluggable transports, relay blinding, token-gated anonymous relay payments. |
 | **0.9: Review** | Earn trust | Independent crypto/protocol audit; fix findings; publish spec + threat model. |
 | **1.0: Complete product** | Thesis proven | Local agent (a capability-scoped client of the 0.4 API), tipping via external wallets, docs, and a stable, versioned protocol. |
 
-Notable shifts: groups ride on v0.1's primitive instead of arriving as a rebuild; capabilities land before the agent so the agent isn't a special case; the audit gates 1.0; payments shrink to tipping.
+Notable shifts: groups ride on v0.1's primitive instead of arriving as a rebuild; creation and conversation are woven together (v0.3–v0.4) before anything is public, so the first public content is a published creation, not a bare post; capabilities land before the agent so the agent isn't a special case; the audit gates 1.0; payments shrink to tipping.
 
 ## 10. Monetization and sustainability
 
@@ -217,6 +218,7 @@ crates/
   ambient-spaces/     MLS groups, membership, ACLs
   ambient-sync/       log merge, snapshots, cursors
   ambient-store/      SQLite, blobs, FTS
+  ambient-docs/       creations: documents, collections, versions, links
   ambient-transport/  trait + websocket (later iroh, tor)
   ambient-capabilities/ grants, local API (agent & mini-apps use this)
   ambient-core/       the headless client facade
@@ -242,7 +244,8 @@ docs/                 spec/ adr/ STACK.md
 | Logs over CRDTs | Real usage needs concurrent editing of structured data well beyond notes. |
 | Unlinkable public/private personas | Users find two identities confusing and want one profile. (Then make linking a one-tap default-off choice.) |
 | Nostr bridge helps distribution | Cross-posting just leaks the audience out and nobody comes back. Measure retention, not signups. |
-| Messenger-first wedge | Signal, SimpleX and Session already satisfy this audience. If so, the *identity + Spaces + notes* combination is the wedge, and v0.4 should move up. |
+| Messenger-first wedge | Signal, SimpleX and Session already satisfy this audience. If so, the *identity + Spaces + creation* combination is the wedge, which is why writing (v0.3) and weaving (v0.4) now come before any social surface. |
+| Writing and weaving before social | With nothing public until v0.6, growth stalls and outsiders can't see the product. (Mitigate with Markdown export and a smaller v0.6; bring it forward if needed.) |
 
 That last row is the one I'd watch most. A sovereign 1:1 messenger on its own competes with excellent existing tools. The thing nobody else offers is **one portable identity across private chat, public presence and owned notes**. v0.1 is a means of getting people onto that identity, not the pitch itself.
 
