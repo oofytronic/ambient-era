@@ -24,7 +24,8 @@ Creations (books, series, newsletters, note collections) need to be written priv
 4. **Upgrading keeps the conversation.** A `CreationRef` that points at a share can later be "upgraded": the person is added to the creation Space and the same conversation now shows the live creation.
 5. **History for new members is a choice:** "from now on" or "with history" (a checkpoint sent to the new member). A new MLS member cannot read earlier epochs by default.
 6. **The creation-to-conversation sidebar is a local index** on each device. The relay never learns which chats are about which creation.
-7. **Shares are leased, not given.** Sharing a version creates a temporary share Space owned by the creation's owner. It holds one frozen version (content-addressed), carries an expiry chosen by the owner (for example 7 days, 30 days, or until revoked), and its recipients are view-only members. When the owner revokes, a recipient is removed, or the lease expires: the share Space closes, its blobs are deleted from relays (a retention policy that never reads content), honest clients purge cached plaintext, and the chat keeps a **placeholder** ("Shared "Chapter 3", no longer available") that is no longer linked. The conversation text itself stays, since chat messages belong to the participants.
+7. **Shares are leased, not given.** Sharing a version creates a temporary share Space owned by the creation's owner. It holds one frozen version (content-addressed), carries an expiry (**default 7 days**; the owner can set any custom duration, or choose "until I revoke it or delete the Space"), and its recipients are view-only members. When the owner revokes, a recipient is removed, or the lease expires: the share Space closes, its blobs are deleted from relays (a retention policy that never reads content), honest clients purge cached plaintext, and the chat keeps a **placeholder** ("Shared "Chapter 3", no longer available") that is no longer linked. The conversation text itself stays, since chat messages belong to the participants.
+8. **Comments outlive the lease; the creation does not.** Comments and other activity associated with a creation or share are kept when access ends. The shared content is no longer accessible. Comments store only their anchor (version hash and range), never a copy of the text they point at, so after expiry an anchored comment shows with a "text no longer available" placeholder instead of the passage.
 
 ## Consequences
 
@@ -44,7 +45,5 @@ Creations (books, series, newsletters, note collections) need to be written priv
 
 - Default for new members: "from now on" or "with history"?
 - Do comments live in the creation Space, in the conversation Space, or both?
-- Default lease length for a share?
-- Reader comments made during a lease: proposed that the owner keeps the comments they received and the reader keeps their own text.
 - A removed reader's cached copy is purged. For removed writers, proposed that their own authored contributions stay in the history.
 - Quoted excerpts in chat are chat content, not part of the lease. Proposed: allowed, never auto-quoted.
