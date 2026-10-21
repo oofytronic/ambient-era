@@ -1,0 +1,17 @@
+/target
+**/target/
+
+# Secrets and local config
+.env
+.env.*
+*.pem
+*.key
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log

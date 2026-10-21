@@ -1,0 +1,7 @@
+# Pinned so every contributor, agent, and CI run builds with the same compiler.
+# Bump deliberately (and update `rust-version` in Cargo.toml) in its own commit.
+[toolchain]
+channel = "1.97.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

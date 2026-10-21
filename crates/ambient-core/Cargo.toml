@@ -1,0 +1,22 @@
+[package]
+name = "ambient-core"
+description = "Core facade: the single entry point clients use (commands, reactive queries, events)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ambient-events = { workspace = true }
+ambient-identity = { workspace = true }
+ambient-spaces = { workspace = true }
+ambient-sync = { workspace = true }
+ambient-store = { workspace = true }
+ambient-transport = { workspace = true }
+ambient-capabilities = { workspace = true }
+ambient-docs = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "ambient-transport"
+description = "Transport: the `Transport` trait and its implementations (WebSocket first, then iroh and Tor)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ambient-events = { workspace = true }
+
+[lints]
+workspace = true

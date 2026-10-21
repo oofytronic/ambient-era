@@ -1,0 +1,10 @@
+# Production code may not unwrap/expect/panic/index; tests may.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-print-in-tests = true
+allow-dbg-in-tests = true
+
+# Proper nouns that doc comments use; ".." keeps clippy's built-in list.
+doc-valid-idents = ["SQLite", "SQLCipher", "OpenMLS", "UniFFI", "WebSocket", "BLAKE3", "FTS5", "Ed25519", "iOS", "macOS", ".."]

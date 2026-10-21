@@ -1,0 +1,15 @@
+[package]
+name = "ambient-docs"
+description = "Creations: CRDT documents, collections, versions, Markdown parsing and styling, links and backlinks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ambient-events = { workspace = true }
+
+[lints]
+workspace = true

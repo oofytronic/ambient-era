@@ -1,0 +1,16 @@
+[package]
+name = "ambient-capabilities"
+description = "Capabilities: scoped, revocable, expiring grants and the gate for the local API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ambient-events = { workspace = true }
+ambient-identity = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,41 @@
+# cargo-deny policy. Run with `just deny`. Rationale: docs/adr/0003-workspace-and-tooling.md.
+
+[graph]
+all-features = true
+
+[advisories]
+# Known vulnerabilities and unmaintained crates fail the check. To ignore one, add its id
+# below with a comment saying why it does not apply and when to revisit.
+ignore = []
+
+[licenses]
+# Permissive licenses only. Adding a license here is a deliberate decision: copyleft or
+# unusual terms in a dependency would constrain how this project can be licensed (ADR-0004).
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+]
+confidence-threshold = 0.93
+
+[licenses.private]
+# Workspace crates are `publish = false`; their own licenses (including the relay's AGPL)
+# are governed by LICENSING.md, not by this allow-list.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

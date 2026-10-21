@@ -1,0 +1,4 @@
+* text=auto eol=lf
+# Conformance vectors may contain raw bytes; never normalize them.
+*.cbor binary
+*.bin binary

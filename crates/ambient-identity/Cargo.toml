@@ -1,0 +1,15 @@
+[package]
+name = "ambient-identity"
+description = "Identity: signed key-event log, device delegation, recovery, and pairwise key derivation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ambient-events = { workspace = true }
+
+[lints]
+workspace = true

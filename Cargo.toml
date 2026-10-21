@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# Spikes are throwaway experiments with their own lockfiles; they are never part of the build.
+exclude = ["spikes"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/oofytronic/ambient-era"
+publish = false
+
+[workspace.dependencies]
+# Internal crates. External dependencies are added here, one at a time, with a reason
+# (see docs/adr/0003-workspace-and-tooling.md), then inherited with `workspace = true`.
+ambient-events = { path = "crates/ambient-events" }
+ambient-identity = { path = "crates/ambient-identity" }
+ambient-spaces = { path = "crates/ambient-spaces" }
+ambient-sync = { path = "crates/ambient-sync" }
+ambient-store = { path = "crates/ambient-store" }
+ambient-transport = { path = "crates/ambient-transport" }
+ambient-capabilities = { path = "crates/ambient-capabilities" }
+ambient-docs = { path = "crates/ambient-docs" }
+ambient-core = { path = "crates/ambient-core" }
+ambient-ffi = { path = "crates/ambient-ffi" }
+ambient-relay = { path = "crates/ambient-relay" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Untrusted input is the norm here: no panics in production code paths.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+indexing_slicing = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
