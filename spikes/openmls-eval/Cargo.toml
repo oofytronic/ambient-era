@@ -1,0 +1,23 @@
+[package]
+name = "openmls-eval"
+description = "Spike 6: evaluate OpenMLS for ambient-spaces (see docs/spikes/06-openmls.md). Not part of the workspace."
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+openmls = "=0.9.1"
+openmls_rust_crypto = "=0.6.0"
+openmls_basic_credential = "=0.6.0"
+
+# OpenMLS ships a `js` feature for browser builds (secure randomness and time via JS APIs).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+openmls = { version = "=0.9.1", features = ["js"] }
+# A transitive dependency still uses getrandom 0.2, which needs its own `js` feature.
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+# Detach from the repository workspace: spikes have their own lockfile and are never built by CI.
+[workspace]

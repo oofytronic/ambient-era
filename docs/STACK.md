@@ -208,7 +208,7 @@ Each spike has a pass condition. The architecture is final only when all pass.
 | 3 | Core on web | Dioxus WASM build runs the core, persists to SQLite on OPFS, survives reload, handles two tabs. |
 | 4 | Core on desktop | Dioxus desktop build with SQLCipher and OS keychain. |
 | 5 | End to end | Two identities on different platforms exchange messages through one relay, with an offline gap in the middle. |
-| 6 | OpenMLS | Interop test, bundle size, memory use inside an iOS extension, maintenance and audit status. |
+| 6 | OpenMLS | Interop test, bundle size, memory use inside an iOS extension, maintenance and audit status. **Partially done:** see [docs/spikes/06-openmls.md](spikes/06-openmls.md). |
 | 7 | Dioxus maturity | Build the real conversation screen; judge stability, accessibility, text input and IME, and upgrade churn. |
 | 8 | Editor | A Markdown editor on all three clients with core-owned text and styling spans: typing, selection, IME composition, undo/redo, and a 50,000-word document that stays responsive. |
 
