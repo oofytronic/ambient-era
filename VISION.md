@@ -182,7 +182,7 @@ Notable shifts: groups ride on v0.1's primitive instead of arriving as a rebuild
 - **Pro features** run locally and are cheap to gate (larger vaults, more devices, priority relay).
 - **Self-hosting stays first-class** and free. That's both the ethos and the trust story.
 - **Grants** (NLnet, OTF and similar) fit this work well and don't dilute control. For a solo developer, they may be the best runway for the audit.
-- Consider a **foundation or stewardship structure** by 1.0: specs under CC0, core crates under Apache-2.0/MIT so others can build independent clients, and the relay and apps under AGPL-3.0 so hosted forks can't quietly close them (see [STACK.md §10](docs/STACK.md#10-licensing)). Decide before outside contributors arrive; relicensing later is painful.
+- Consider a **foundation or stewardship structure** by 1.0: the licensing options are recorded in [ADR-0004](docs/adr/0004-licensing.md) (deferred; the leading idea is permissive specs and core crates, copyleft for the relay and apps). Decide before outside contributors arrive; relicensing later is painful.
 
 ## 11. Local AI agent
 

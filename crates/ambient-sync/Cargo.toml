@@ -4,7 +4,6 @@ description = "Sync: per-device signed logs, merge, snapshots and checkpoints, c
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
 repository.workspace = true
 publish.workspace = true
 

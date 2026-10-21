@@ -4,7 +4,6 @@ description = "Core facade: the single entry point clients use (commands, reacti
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
 repository.workspace = true
 publish.workspace = true
 

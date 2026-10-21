@@ -1,12 +1,12 @@
 # ADR-0004: Licensing
 
-**Status:** Proposed. Needs the project owner's confirmation before any outside contribution is accepted.
+**Status:** Deferred by the project owner. No license is declared; all rights are reserved until this is decided. It must be decided before the first outside contribution is accepted.
 
 ## Context
 
 Licensing is the hardest decision to reverse once others contribute, because relicensing needs every contributor's consent. We want independent clients and relays to exist (a stated long-term goal), and we do not want hosted forks to close the server or the apps.
 
-## Decision (proposed)
+## Leading proposal (not adopted)
 
 | Part | License |
 |:--|:--|

@@ -171,13 +171,7 @@ Design tokens (color, type scale, spacing, radii, motion) live once in `design/t
 
 ## 10. Licensing
 
-| Part | License |
-|:--|:--|
-| Specs and test vectors | CC0 |
-| Core crates | Apache-2.0 OR MIT |
-| Relay and client apps | AGPL-3.0 |
-
-Permissive core encourages independent clients; AGPL on the relay and apps prevents hosted forks from quietly closing. This is the hardest decision to reverse once contributors arrive, so confirm it before the first outside contribution.
+**Deferred.** No license is declared and all rights are reserved until the owner decides (see [ADR-0004](adr/0004-licensing.md) and [LICENSING.md](../LICENSING.md)). The decision must come before the first outside contribution, because it is the hardest one to reverse. The dependency policy in `deny.toml` accepts only permissive dependency licenses, which keeps every option open.
 
 ## 11. Repository layout
 

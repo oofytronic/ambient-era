@@ -19,4 +19,4 @@ Normative specifications for the wire formats and protocols. Code conforms to th
 - Schemas are written in **CDDL** (RFC 8610) alongside the prose.
 - Requirement words (MUST, SHOULD, MAY) follow RFC 2119.
 - Each document carries a version and a changelog. Formats evolve additively; breaking changes need an ADR.
-- Specs are licensed CC0-1.0 (see [LICENSING.md](../../LICENSING.md)).
+- Licensing is undecided (see [LICENSING.md](../../LICENSING.md)).

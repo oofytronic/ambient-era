@@ -24,8 +24,8 @@ allow = [
 confidence-threshold = 0.93
 
 [licenses.private]
-# Workspace crates are `publish = false`; their own licenses (including the relay's AGPL)
-# are governed by LICENSING.md, not by this allow-list.
+# Workspace crates are `publish = false` and currently declare no license (undecided, see
+# LICENSING.md), so this allow-list applies to external dependencies only.
 ignore = true
 
 [bans]

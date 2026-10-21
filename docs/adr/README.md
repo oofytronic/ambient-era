@@ -7,7 +7,7 @@ Decisions that are hard to reverse, or that others will wonder about later, are 
 | [0001](0001-creations-as-spaces.md) | Creations are Spaces, shared along an access ladder | Accepted |
 | [0002](0002-rust-core-native-clients.md) | Rust core, native mobile clients, Dioxus for web and desktop | Accepted, pending proof spikes |
 | [0003](0003-workspace-and-tooling.md) | Workspace layout, lints, dependency policy, and CI | Accepted |
-| [0004](0004-licensing.md) | Licensing | Proposed |
+| [0004](0004-licensing.md) | Licensing | Deferred |
 
 ## Template
 
