@@ -1,0 +1,13 @@
+# Security-sensitive paths need a code owner's review before merge.
+/crates/ambient-events/        @oofytronic
+/crates/ambient-identity/      @oofytronic
+/crates/ambient-spaces/        @oofytronic
+/crates/ambient-capabilities/  @oofytronic
+/crates/ambient-relay/         @oofytronic
+/docs/spec/                    @oofytronic
+/conformance/                  @oofytronic
+/docs/adr/                     @oofytronic
+/.github/                      @oofytronic
+/deny.toml                     @oofytronic
+/LICENSES/                     @oofytronic
+/LICENSING.md                  @oofytronic
