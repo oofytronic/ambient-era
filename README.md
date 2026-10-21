@@ -98,6 +98,27 @@ The point where the thesis is proven: sovereign *and* broad. v1.0 is the soverei
 
 The wire formats, identity log, Spaces model, and relay design are described in [VISION.md](VISION.md).
 
+## Repository and development
+
+The Rust workspace is scaffolded: eleven crates under `crates/` (core, protocol, and relay) with no behavior yet, built behind CI, lints, and a dependency policy. Specs and conformance vectors come before the behavior they describe.
+
+```
+crates/        Rust workspace: ambient-events, -identity, -spaces, -sync, -store,
+               -transport, -capabilities, -docs, -core, -ffi, -relay
+conformance/   language-neutral test vectors
+docs/          STACK.md, spec/, adr/
+spikes/        throwaway experiments (not part of the build)
+```
+
+You need [rustup](https://rustup.rs/) (the compiler version is pinned in `rust-toolchain.toml`), plus three tools:
+
+```
+cargo install --locked just cargo-nextest cargo-deny
+just ci        # format, lint, test, docs, wasm check, dependency policy
+```
+
+Contributor and agent rules are in [AGENTS.md](AGENTS.md). Decisions are recorded in [docs/adr/](docs/adr/). Licensing is in [LICENSING.md](LICENSING.md), and security reporting is in [SECURITY.md](SECURITY.md).
+
 ## Hard problems
 
 We're not pretending these are solved:
