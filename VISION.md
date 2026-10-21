@@ -90,6 +90,7 @@ One primitive, used everywhere.
 
 > **A Space is a membership-controlled group with an ordered, encrypted event stream.**
 
+- **A creation** (book, series, newsletter, note collection) is its own Space, shared along an access ladder from snapshot to live read, comment, write, and public. See [ADR-0001](docs/adr/0001-creations-as-spaces.md).
 - A 1:1 chat is a Space of two. A group is a Space of N. A personal notebook is a Space of one (multi-device). A public profile is a Space with open read.
 - **Encryption:** every private Space is an **MLS group** (RFC 9420). One code path; forward secrecy and post-compromise security come free; group size scales with the tree (O(log n) updates).
 - **Events** are small, typed, signed objects (deterministic CBOR) addressed by hash. Each device appends to **its own signed log**; a Space is the merge of its members' logs, ordered with causal references. This is the Secure Scuttlebutt / p2panda / Willow lineage, which I'd study closely before inventing anything.
