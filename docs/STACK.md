@@ -171,7 +171,7 @@ Design tokens (color, type scale, spacing, radii, motion) live once in `design/t
 
 ## 10. Licensing
 
-**Deferred.** No license is declared and all rights are reserved until the owner decides (see [ADR-0004](adr/0004-licensing.md) and [LICENSING.md](../LICENSING.md)). The decision must come before the first outside contribution, because it is the hardest one to reverse. The dependency policy in `deny.toml` accepts only permissive dependency licenses, which keeps every option open.
+**Deferred.** No license is declared and all rights are reserved until the owner decides (see [ADR-0004](adr/0004-licensing.md) and [LICENSING.md](../LICENSING.md)). The decision will be made before the first user other than the owner (and before any outside contribution), because it is the hardest one to reverse. The dependency policy in `deny.toml` accepts only permissive dependency licenses, which keeps every option open.
 
 ## 11. Repository layout
 

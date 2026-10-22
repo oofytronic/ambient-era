@@ -1,6 +1,6 @@
 # ADR-0004: Licensing
 
-**Status:** Deferred by the project owner. No license is declared; all rights are reserved until this is decided. It must be decided before the first outside contribution is accepted.
+**Status:** Deferred by the project owner. No license is declared; all rights are reserved until this is decided. The repository is private and the owner is the only user. Revisit before the first user other than the owner, and before any outside contribution.
 
 ## Context
 
