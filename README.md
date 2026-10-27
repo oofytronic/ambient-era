@@ -32,7 +32,7 @@ Crypto natives, privacy-minded people, and Nostr/Farcaster users. They already h
 
 ## The road to 1.0
 
-Each release is a usable product on its own. The core and relay are Rust from day one; clients are native to each platform (see [Architecture](#architecture)).
+Each release is a usable product on its own. The order, the exit test for v0.1, and what each version refuses to ship are in [ROADMAP.md](ROADMAP.md). The table below is the short form.
 
 | Version | Ships |
 |:--|:--|
@@ -109,6 +109,7 @@ conformance/   language-neutral test vectors
 docs/          STACK.md, spec/, adr/, TESTING.md
 spikes/        throwaway experiments (not part of the build)
 HISTORY.md     decision log
+ROADMAP.md     order of work
 THREAT_MODEL.md  what is promised
 ARCHITECTURE.md  system map and v0.1 fence
 CONTRIBUTING.md  how to change it
