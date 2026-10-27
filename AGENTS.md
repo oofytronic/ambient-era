@@ -5,9 +5,11 @@ Guidance for AI coding agents and human contributors. Each crate under `crates/`
 ## Read first
 
 1. [README.md](README.md): what this is.
-2. [docs/STACK.md](docs/STACK.md): the stack and why.
-3. [docs/adr/](docs/adr/): decisions already made. Do not re-litigate them in a code change.
-4. [VISION.md](VISION.md): design positions (identity, Spaces, relay, threat tiers).
+2. [THREAT_MODEL.md](THREAT_MODEL.md): what is actually promised.
+3. [docs/adr/](docs/adr/): decisions already made. Do not re-litigate them in a code change. [ADR-0005](docs/adr/0005-private-space-encryption.md) wins over any older sentence that says a Space is an MLS group.
+4. [docs/STACK.md](docs/STACK.md): the stack and why.
+5. [HISTORY.md](HISTORY.md): why the direction changed. Add an entry when a turn changes a locked choice.
+6. [VISION.md](VISION.md): background positions. Where it disagrees with an ADR or with STACK, the ADR or STACK wins.
 
 ## Commands
 
@@ -51,7 +53,7 @@ The relay never depends on the core, the store, or anything that holds a user's 
 - **Browser-compatible by default.** Protocol crates must keep passing `just wasm-check`. Platform-specific code goes behind traits in the crates built for it.
 - **Do not weaken checks.** Never disable, skip, or loosen a test, lint, or CI job to get green. Fix the cause. If a check is wrong, say so and propose the change separately.
 - **No telemetry, no user data in logs.** Ever.
-- **Honest claims.** Do not write docs, UI copy, or comments claiming a property the code does not yet provide (anonymity, unrecoverable deletion, and so on). See the threat tiers in `VISION.md`.
+- **Honest claims.** Do not write docs, UI copy, or comments claiming a property the code does not yet provide (anonymity, forward secrecy, unrecoverable deletion, and so on). See [THREAT_MODEL.md](THREAT_MODEL.md).
 - **Unsure about a security-relevant choice?** Stop and ask rather than guess.
 
 ## Conventions

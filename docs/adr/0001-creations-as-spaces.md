@@ -2,6 +2,8 @@
 
 **Status:** Accepted (model and leased shares); staging proposed.
 
+The access ladder stands. How a Space is encrypted, and how a new member receives history, is [ADR-0005](0005-private-space-encryption.md). That ADR supersedes the MLS-epoch wording in point 5 below. Do not implement an MLS group from this file.
+
 ## Context
 
 Creations (books, series, newsletters, note collections) need to be written privately, discussed with others, shared at different levels of trust, co-written, and eventually published. Conversations about a creation must stay attached to it. We want one mechanism for all of this, and we want the later social features to reuse it.

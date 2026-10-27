@@ -10,7 +10,7 @@ Normative specifications for the wire formats and protocols. Code conforms to th
 |:--|:--|:--|
 | 01 | `01-events.md` | Event structure, deterministic CBOR encoding, content IDs, signatures |
 | 02 | `02-identity-log.md` | Key-event log, device delegation, rotation, recovery |
-| 03 | `03-spaces.md` | Space membership and role log, MLS usage, share Spaces and expiry |
+| 03 | `03-spaces.md` | Space membership and role log, HPKE-to-members sealing ([ADR-0005](../adr/0005-private-space-encryption.md)), share Spaces and expiry |
 | 04 | `04-relay-api.md` | Relay put/get/delete/subscribe, mailbox addressing, retention |
 | 05 | `05-creations.md` | Documents, collections, versions, `CreationRef`, comment anchors |
 

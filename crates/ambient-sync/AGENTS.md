@@ -9,6 +9,7 @@ Turns each member's append-only logs into a consistent Space state, and lets new
 - Merge is commutative, associative, and idempotent. Cover it with property tests.
 - Output depends only on inputs: same events in any order give the same state.
 - Sync bugs destroy trust: anything touching merge must extend the deterministic simulation tests.
+- Do not require a total order from the relay. A cipher that forks when two members commit offline (MLS) is rejected by [ADR-0005](../../docs/adr/0005-private-space-encryption.md).
 
 ## Dependencies
 

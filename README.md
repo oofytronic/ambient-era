@@ -1,10 +1,10 @@
 # Ambient Era
 
-**An everything app you actually own.** Decentralized, local-first, anonymous, and end-to-end encrypted — talk, post, organize, and (eventually) transact on rails no company controls.
+**An everything app you actually own.** Decentralized, local-first, and end-to-end encrypted for private Spaces — talk, post, organize, and (eventually) transact on rails no company controls.
 
 > Signal's privacy, X's surface, AnyType's ownership — with an identity you hold as a key.
 
-**Status:** Pre-0.1, planning and scaffolding. **Current focus:** the road to v1.0.
+**Status:** Pre-0.1, planning and scaffolding. **Current focus:** a desktop Notes space and 1:1 conversations. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
 
 ---
 
@@ -36,43 +36,43 @@ Each release is a usable product on its own. The core and relay are Rust from da
 
 | Version | Ships |
 |:--|:--|
-| **v0.1** | Key identity, local store, relay sync, 1:1 E2EE chat (a Space of two), push |
-| **v0.2** | Groups (MLS), encrypted media, member management, abuse controls |
-| **v0.3** | **Write:** creations (books, series, newsletters, notes), Markdown editor, media embeds, versions, links and backlinks, local search, export |
+| **v0.1** | Key identity, a personal Notes space, relay sync across the owner's devices, 1:1 E2EE chat (a Space of two), local search. Desktop first. |
+| **v0.2** | Small private groups on the same sealing (not MLS), encrypted media, member management, abuse controls. Content-free push arrives with the first phone client. |
+| **v0.3** | **Write:** long-form creations (books, series, newsletters), each its own Space. Markdown editor, media embeds, versions, links and backlinks, export. Short notes already exist from v0.1. |
 | **v0.4** | **Weave:** chat about any creation, a creation-to-conversation sidebar, share a version into a conversation, capability-scoped local API |
-| **v0.5** | Desktop polish, one-command self-hostable relay, full data export and import |
+| **v0.5** | One-command self-hostable relay, multi-relay redundancy, full data export and import |
 | **v0.6** | **Publish:** public persona, profiles, follow graph, feed of published creations, Nostr bridge |
 | **v0.8** | P2P (iroh), Tor, relay blinding |
 | **v0.9** | Independent crypto and protocol review |
-| **v1.0** | Local agent, tipping via external wallets, stable versioned protocol |
+| **v1.0** | Local agent as a delegated key, tipping via external wallets, stable versioned protocol |
 
-### v0.1 — a sovereign 1:1 messenger
+### v0.1 — notes and a private 1:1
 
-v0.1 is **not** an everything app. It's a private messenger you can start in 30 seconds with no phone number, email, or account:
+v0.1 is **not** an everything app, and it does not run an agent. It is the owner's daily driver on desktop:
 
-1. Create an identity with a passkey
-2. Save your recovery phrase
-3. Add a contact by QR code
-4. Chat end-to-end encrypted — offline-capable, synced across two devices
+1. Create an identity. A passkey unlocks it. The recovery phrase is the backup.
+2. Write notes in one Notes space. They work with no network.
+3. Add the owner's other computer. Notes sync through a relay the owner runs.
+4. Add one contact by QR code and chat. The chat is a Space of two.
 
-No groups, no feed, no P2P. Relay-only, and the relay is untrusted and self-hostable.
+No groups, no feed, no P2P, no phone push yet. The relay is untrusted and self-hostable. What "encrypted" means, and what it does not mean, is [THREAT_MODEL.md](THREAT_MODEL.md).
 
-### v0.3–v0.4 — write, then weave
+### v0.3–v0.4 — long-form writing, then weave
 
-Creation comes before the social surface. v0.3 is a place to write: books, series, newsletters, and short notes in a Markdown editor with media, versions, and links between pieces. v0.4 interweaves it with conversation: from any chapter or note you can start a chat, pick an existing Space or create one, and the creation shows the conversations about it in a sidebar. Only after that does anything become public (v0.6), starting with publishing creations rather than bare posts.
+The notebook already exists. v0.3 adds creations that need their own membership: books, series, and newsletters, each its own Space, with versions and links between pieces. v0.4 interweaves that with conversation: from any chapter you can start a chat, and the creation shows those conversations in a sidebar. Copying a note into a chat copies the text. It does not hand over the Notes space. Only after that does anything become public (v0.6), starting with publishing creations rather than bare posts.
 
 ### v1.0 — the complete product
 
-The point where the thesis is proven: sovereign *and* broad. v1.0 is the sovereign alternative to Signal, plus a lightweight public social network, plus an owned second brain, with a wallet.
+The point where the thesis is proven: sovereign *and* broad. v1.0 is a private messenger for small Spaces, plus a lightweight public social network, plus an owned second brain. Tipping goes through an external wallet. The app does not hold funds.
 
-- Group chat on MLS, scaling to hundreds per group
-- Public profiles with a portable identity, follow graph, and feed
+- Private groups on the same sealing as 1:1. Not rooms of hundreds, and not MLS.
+- Public profiles with a portable identity, follow graph, and feed. Public Spaces are signed, not encrypted.
 - Direct P2P sync, so the relay becomes optional when peers are reachable
-- Tor / anonymity mode
-- A local AI agent that helps you write and reads your encrypted data without sending it away
-- Long-form creations (books, series, newsletters, notes) with conversations woven in, and basic tipping
+- Tor / anonymity mode, which is the first time "anonymous" is an honest word
+- A local agent that is a delegated key with a grant. It does not see a shared Space unless every member agreed.
+- Long-form creations with conversations woven in, and basic tipping
 
-**Explicitly out of scope for v1:** whiteboards, database UIs, algorithmic feeds, and very large groups. No ads, ever — sustainability comes from relay subscriptions, pro features, and self-hosting.
+**Explicitly out of scope for v1:** whiteboards, database UIs, algorithmic feeds, and very large encrypted groups. No ads, ever — sustainability comes from relay subscriptions, pro features, and self-hosting.
 
 ## Architecture
 
@@ -89,14 +89,14 @@ The point where the thesis is proven: sovereign *and* broad. v1.0 is the soverei
 |:--|:--|:--|
 | Identity | Random root seed + mnemonic; rotatable key-event log; passkeys unlock locally | WebAuthn (unlock only) |
 | Data | Deterministic CBOR, BLAKE3, signed per-device logs | RFC 8949, CDDL schemas |
-| Crypto | RustCrypto: Ed25519, X25519, ChaCha20-Poly1305/AES-GCM, HKDF | — |
-| Group E2EE | MLS (OpenMLS) + HPKE; every conversation is a Space | RFC 9420 / 9180 |
-| Documents | CRDT library (Loro or Automerge) for notes only | — |
+| Crypto | RustCrypto: Ed25519, X25519, ChaCha20-Poly1305, HKDF, HPKE | RFC 9180 for sealing |
+| Private Spaces | HPKE to each member device's current key. Not MLS. | [ADR-0005](docs/adr/0005-private-space-encryption.md) |
+| Documents | CRDT library (Loro or Automerge) for document bodies only | — |
 | Storage | SQLite + SQLCipher, FTS5 search, keys in the OS keystore | — |
 | Transport | WebSocket relay now → `iroh` → Tor, behind a trait | QUIC |
 | Payments | Tipping via external wallets (NWC, LNURL, Cashu); no embedded wallet | — |
 
-The wire formats, identity log, Spaces model, and relay design are described in [VISION.md](VISION.md).
+The wire formats, identity log, Spaces model, and relay design are described in [VISION.md](VISION.md). Where that document still mentions MLS as the cipher, [ADR-0005](docs/adr/0005-private-space-encryption.md) wins.
 
 ## Repository and development
 
@@ -108,6 +108,8 @@ crates/        Rust workspace: ambient-events, -identity, -spaces, -sync, -store
 conformance/   language-neutral test vectors
 docs/          STACK.md, spec/, adr/
 spikes/        throwaway experiments (not part of the build)
+HISTORY.md     decision log
+THREAT_MODEL.md  what is promised
 ```
 
 You need [rustup](https://rustup.rs/) (the compiler version is pinned in `rust-toolchain.toml`), plus three tools:
@@ -142,11 +144,11 @@ v1.0 is the proof, not the destination. The longer vision, in brief:
 | **v3.5** | Ecosystem & governance | Independent clients, spec stewardship, grants, audits, and governance that doesn't depend on any one founder. |
 | **v4.0+** | Ambient sovereignty | Device mesh, hardware keys, offline-first everything, one-click migration off Big Tech. |
 
-The rule that holds across every phase: **standards travel, platform APIs don't.** Keep the specs (DID, IPLD, MLS, WebAuthn), swap the runtime per platform, and keep the logic in the Rust core, never in the UI.
+The rule that holds across every phase: **standards travel, platform APIs don't.** Keep the specs (events, identity, Spaces, mailboxes), swap the runtime per platform, and keep the logic in the Rust core, never in the UI.
 
 ## References
 
 - [AnyType protocol](https://tech.anytype.io/any-sync/overview) · [`any-sync`](https://github.com/anyproto/any-sync)
-- [Dioxus](https://dioxuslabs.com/) · [UniFFI](https://mozilla.github.io/uniffi-rs/) · [Iroh](https://docs.iroh.computer/about/faq) · [OpenMLS](https://openmls.tech/)
-- [W3C DID](https://www.w3.org/TR/did-1.1/) · [IPLD](https://ipld.io/) · [MLS (RFC 9420)](https://www.rfc-editor.org/rfc/rfc9420.html)
+- [Dioxus](https://dioxuslabs.com/) · [UniFFI](https://mozilla.github.io/uniffi-rs/) · [Iroh](https://docs.iroh.computer/about/faq) · [HPKE (RFC 9180)](https://www.rfc-editor.org/rfc/rfc9180.html)
+- [W3C DID](https://www.w3.org/TR/did-1.1/) · [IPLD](https://ipld.io/) · [SimpleX](https://simplex.chat/) (mailbox prior art, not the data model)
 - [Nostr](https://nostr.com/) · [Macro](https://macro.com/) (landscape)

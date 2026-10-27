@@ -1,6 +1,6 @@
 # ambient-docs
 
-Everything needed to write books, series, newsletters, and notes, with the logic in the core so each client's editor stays thin (`docs/STACK.md` section 6).
+Document bodies: notes in the personal Notes space, and later books, series, and newsletters. The logic stays in the core so each client's editor stays thin (`docs/STACK.md` section 6).
 
 **Public API (planned):** Document and collection model, versions, Markdown parse to styled spans, edit application, links, `CreationRef`.
 
@@ -8,7 +8,8 @@ Everything needed to write books, series, newsletters, and notes, with the logic
 
 - Parsing is total: arbitrary input never panics. Keep a fuzz target for it.
 - A comment stores its anchor (version hash and range), never a copy of the text it points at (ADR-0001).
-- Use an existing CRDT library (Loro or Automerge); do not write one.
+- The Space log is not a CRDT. The document body is. Use an existing CRDT library (Loro or Automerge) so two of the owner's devices can edit one note offline. Do not write one.
+- v0.1 notes live in the owner's Notes space. A creation becomes its own Space only when it needs its own membership (ADR-0001). Copying a note into a chat copies the text. It does not grant access to the note.
 
 ## Dependencies
 

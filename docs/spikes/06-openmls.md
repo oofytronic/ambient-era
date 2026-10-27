@@ -1,6 +1,8 @@
 # Spike 6: OpenMLS evaluation
 
-**Date:** 2026-10-21 · **Status:** Partially complete. Provisional recommendation: proceed with OpenMLS behind a trait in `ambient-spaces`, and close the open items below before v0.1 depends on it.
+**Date:** 2026-10-21 · **Status:** Not adopted. Evaluated, then rejected by [ADR-0005](../adr/0005-private-space-encryption.md) on 2026-10-27. Kept as evidence. Do not add OpenMLS to the workspace from this spike.
+
+The notes below are the evaluation as it stood. The provisional "proceed" recommendation at the bottom is historical and is not the decision.
 
 **Code:** [`spikes/openmls-eval`](../../spikes/openmls-eval) (throwaway, own lockfile, not part of the workspace build).
 

@@ -2,9 +2,9 @@
 
 This is an independent read of the original plan (the thesis, landscape, stack and roadmap that the [README](README.md) summarizes). I agree with the destination and disagree with several of the paths to it. This document is deliberately opinionated: where I diverge I say why, and where I'm unsure I say what experiment would settle it.
 
-> **Aligned with [docs/STACK.md](docs/STACK.md).** The stack and language positions here were revised after the first draft: Rust core and relay from day one, native SwiftUI and Jetpack Compose on mobile, and Dioxus for web and desktop. Where this document and STACK.md disagree, STACK.md wins.
+> **Aligned with [docs/STACK.md](docs/STACK.md) and the ADRs.** The stack and language positions here were revised after the first draft: Rust core and relay from day one, native SwiftUI and Jetpack Compose on mobile, and Dioxus for web and desktop. **MLS is not the current cipher.** [ADR-0005](docs/adr/0005-private-space-encryption.md) superseded every decision below that makes a private Space an MLS group. Where this document disagrees with an ADR or with STACK.md, the ADR or STACK.md wins.
 
-**How to read this.** Each section ends with a *Decision* or *Tripwire*. A decision is what I'd do today. A tripwire is the evidence that would make me change it.
+**How to read this.** Each section ends with a *Decision* or *Tripwire*. A decision was what this note recommended when it was written. A tripwire is the evidence that would change it. The MLS tripwire in §14 has fired.
 
 ---
 
@@ -25,10 +25,10 @@ This is an independent read of the original plan (the thesis, landscape, stack a
 | 1 | `did:key` identity | A **rotatable identity log**; `did:key` only for device keys | `did:key` can't rotate. A lost or leaked key is a lost identity, which contradicts "an identity that moves anywhere". |
 | 2 | Passkey PRF → Ed25519 root | Random root seed + mnemonic; passkeys only **unlock** it | PRF support is uneven, and synced passkeys quietly tie identity to an Apple/Google account. |
 | 3 | "Anonymous" as a goal | Write a **threat model first**; promise *unlinkability by default, anonymity opt-in* | Anonymity is a property of transport + metadata, not of keys. Don't market what the architecture can't yet deliver. |
-| 4 | v0.1 = 1:1 chat, groups in v0.2 | Primitive = **Space** (an MLS group). 1:1 is a space of two | One code path from day one. No rewrite when groups arrive. |
+| 4 | v0.1 = 1:1 chat, groups in v0.2 | Primitive = **Space** (membership + merged logs). 1:1 is a space of two. Personal notes are a space of the owner's devices. Sealing is HPKE, not MLS ([ADR-0005](docs/adr/0005-private-space-encryption.md)). | One membership model from day one. No rewrite when a third person arrives. MLS was the earlier way to get that and lost to offline merge. |
 | 5 | Own CRDT implementations | **Signed append-only logs** for v1; adopt a CRDT library for documents | Chat and feeds are logs. Writing RGA yourself is a research project, not a v0.x task. |
 | 6 | Expo/RN **and** Tauri | **Native UI per platform** (SwiftUI, Compose) and **Dioxus** for web and desktop, all over one Rust core | Every cross-platform UI option needs workarounds (RN-web, WebView wrappers, extra shells). Native mobile gives the native feel, and thin UIs make three clients affordable. |
-| 7 | Rust "exactly once, at v0.8" | **Rust core and relay from day one**, behind a conformance suite | The plan says TS-only to v0.5 but needs MLS at v0.2. With agents writing most code, Rust's cost drops, and starting there avoids a mid-project rewrite. |
+| 7 | Rust "exactly once, at v0.8" | **Rust core and relay from day one**, behind a conformance suite | The plan said TS-only to v0.5 and then a port. With agents writing most code, Rust's cost drops, and starting there avoids a mid-project rewrite. |
 | 8 | Push in v0.2 | Push is **v0.1** | A messenger without notifications is dead on arrival. |
 | 9 | Local agent (v1.0) and mini-apps (v2.0) as separate features | One **capability-scoped local API** from the start | The agent *is* the first mini-app. Design the permission model once. |
 | 10 | Payments via embedded Lightning | **Don't build a wallet.** Tipping via NWC / Cashu / LNURL | Custody, regulation, and mobile node UX will eat a solo dev. |
@@ -41,7 +41,7 @@ The rest of this document expands on these.
 
 ## 3. Start with a threat model, not a feature list
 
-"Decentralized, local-first, anonymous, E2EE" are four different properties with four different costs. I'd write `THREAT_MODEL.md` before any code and tier the promises:
+"Decentralized, local-first, anonymous, E2EE" are four different properties with four different costs. The tiers below are now normative in [THREAT_MODEL.md](THREAT_MODEL.md). This section is the reasoning.
 
 | Tier | Promise | Ships |
 |:--|:--|:--|
@@ -92,7 +92,7 @@ One primitive, used everywhere.
 
 - **A creation** (book, series, newsletter, note collection) is its own Space, shared along an access ladder from snapshot to live read, comment, write, and public. See [ADR-0001](docs/adr/0001-creations-as-spaces.md).
 - A 1:1 chat is a Space of two. A group is a Space of N. A personal notebook is a Space of one (multi-device). A public profile is a Space with open read.
-- **Encryption:** every private Space is an **MLS group** (RFC 9420). One code path; forward secrecy and post-compromise security come free; group size scales with the tree (O(log n) updates).
+- **Encryption:** a private Space seals each event with **HPKE** to every member device's current key ([ADR-0005](docs/adr/0005-private-space-encryption.md)). This replaced an earlier decision that every private Space would be an MLS group. MLS commits are totally ordered and fork when two members are offline; the sync rule is that merge is commutative. Public Spaces are signed and not sealed.
 - **Events** are small, typed, signed objects (deterministic CBOR) addressed by hash. Each device appends to **its own signed log**; a Space is the merge of its members' logs, ordered with causal references. This is the Secure Scuttlebutt / p2panda / Willow lineage, which I'd study closely before inventing anything.
 - **Identifiers:** BLAKE3 content hashes internally. Wrap in CIDs only at interoperability edges. Full IPLD/multiformats everywhere is more machinery than a solo dev needs on day one.
 - **Documents and notes** (the "second brain") are the *one* place that wants real CRDTs. Use **Loro or Automerge** inside an event, not a hand-rolled RGA. Revisit owning it only if performance or size forces it.
@@ -123,8 +123,9 @@ Borrowing from SimpleX's best idea: delivery uses **unidirectional, per-contact 
 
 | Dimension | Approach |
 |:--|:--|
-| **Small groups (≤ ~200)** | MLS in a single Space; relay provides ordering. |
-| **Large communities** | A *different primitive*: public, signed, unencrypted channels with moderator roles. E2EE doesn't scale socially past a certain size; admitting that early avoids contorting MLS. |
+| **Your devices and 1:1** | One private Space. HPKE to current member device keys. The relay does not order the log. |
+| **Small private groups** | The same Space and the same sealing. A handful of members. Not a claim of hundreds. |
+| **Large or public** | A different primitive: public, signed, unencrypted channels with moderator roles. E2EE does not scale socially past a small group, and this design does not pretend it does. |
 | **Social feed** | Pull-based. You fetch followed authors' logs from their declared relays. No global timeline index. **Discovery is an optional market** of indexers/curators that users can swap, never a built-in algorithm. |
 | **History size** | Periodic signed **snapshots/checkpoints** per Space so new devices don't replay everything; blobs fetched lazily. |
 | **Devices** | Device keys are delegated by the identity log; cap at ~5 in v1, lift later. Sync is just "read my other devices' logs." |
@@ -142,20 +143,20 @@ Full detail, tooling, and proof spikes are in [docs/STACK.md](docs/STACK.md). Th
 | Android | Jetpack Compose, core via UniFFI |
 | Web and desktop | Dioxus (Rust), core linked directly: WASM on web, native on desktop |
 
-**Why Rust from day one.** The roadmap needs MLS at v0.2 and a P2P transport by v0.8, so a TypeScript-first core meant a port later. With agents writing most of the code, Rust's learning curve costs little and its compiler is the best feedback loop an agent can have. One core also serves every platform, which is what makes a later web client a build target rather than a rewrite.
+**Why Rust from day one.** A TypeScript-first core would have been a port later, once the protocol and the relay were real. With agents writing most of the code, Rust's learning curve costs little and its compiler is the best feedback loop an agent can have. One core also serves every platform, which is what makes a later web client a build target rather than a rewrite.
 
 **Why not one cross-platform UI.** I worked through Expo/React Native plus Tauri, Tauri everywhere, and React Native for Web. Each needs workarounds to reuse code, and none gives a clean story for web, desktop, and mobile at once. No Rust UI framework gives native mobile feel today either: they use a WebView or draw their own widgets. Native UI on mobile with a Rust core is the pattern Signal and Element X use.
 
 **Why three clients is affordable.** The Rust core owns logic and state; each client renders query results and sends commands. Duplicated work is presentation only, which agents handle well, and design tokens are defined once and generated for all three.
 
-**Conformance suite stays.** Language-neutral golden vectors (events, signatures, key-log transitions, MLS transcripts) remain the real spec, so independent clients and relays can be built against it.
+**Conformance suite stays.** Language-neutral golden vectors (events, signatures, key-log transitions, space membership, HPKE sealing) remain the real spec, so independent clients and relays can be built against it.
 
 **Relay.** Rust, `axum`, a single static binary or container image, SQLite by default. Self-hosting must be a one-command, ten-minute affair, or "sovereign" is marketing.
 
 **Tripwires:**
 - If Dioxus fails the maturity spike (stability, accessibility, IME, churn), swap the web/desktop UI framework. The core is unaffected.
 - If three clients prove too much for one person, fall back to Dioxus on mobile in a WebView and accept less native feel.
-- If OpenMLS fails its evaluation, that is the one result that threatens a locked decision, so it runs first.
+- The OpenMLS tripwire in §14 fired. ADR-0005 records the outcome. Do not treat MLS as a pending spike.
 
 ## 9. Revised roadmap to 1.0
 
@@ -163,8 +164,8 @@ Same destination, different slicing. Principle: **ship the primitive that everyt
 
 | Phase | Goal | Contents |
 |:--|:--|:--|
-| **0: Foundations** (weeks) | De-risk | Threat model; identity/key-log spec; event + wire formats; conformance vectors; proof spikes ([STACK.md §12](docs/STACK.md#12-proof-spikes-before-anything-is-final)), starting with the OpenMLS evaluation; minimal relay. |
-| **0.1: Sovereign messenger** | A stranger can use it in 30 seconds | Seed identity + mnemonic, device pairing, **Spaces (MLS)** with 1:1 UI, relay mailboxes, **content-free push**, offline-first, two devices, local search. |
+| **0: Foundations** | De-risk | [THREAT_MODEL.md](THREAT_MODEL.md); identity and event specs; space and mailbox specs; conformance vectors; minimal relay. No MLS bake-off. |
+| **0.1: Notes and 1:1** | The owner can use it daily on desktop | Seed identity + mnemonic, device pairing, Notes space, 1:1 Space, relay mailboxes, offline-first, two devices, local search. Phone push is not in this slice. |
 | **0.2: Groups & media** | Communities of friends | Group UI on the same Space primitive, encrypted media/blobs (reused by creations), member management, block/report, abuse controls. Keep it short: the Space primitive already supports N members. |
 | **0.3: Write** | A place to create | **Creations** (books, series, newsletters, notes), each its own Space; Markdown editor with core-owned text and styling; media embeds; named versions; wiki-links and backlinks; FTS across everything; Markdown export. Single-author first. |
 | **0.4: Weave** | Creation and conversation interwoven | "Chat about this" from any creation, chapter, or range; creation references in conversations; local creation-to-conversation index and sidebar; share a version into a chat; **capability-scoped local API** (UCAN-style grants), since sharing is a grant. |
@@ -206,8 +207,8 @@ Don't build a wallet. A wallet means custody decisions, regulatory exposure, nod
 - **Spec in the repo**, written before or alongside code: `docs/spec/` (identity, events, spaces, relay API), `THREAT_MODEL.md`, `docs/adr/` for decisions.
 - **Deterministic simulation testing** for sync: a seeded network simulator (drops, reorders, partitions, clock skew) running many devices. Sync bugs are the ones that destroy trust, and they only show up under adversity.
 - **Property-based tests** for event validation and log merge; **golden vectors** for every wire format.
-- **Boring crypto only**: audited primitives (libsodium-class), no novel constructions, MLS rather than a bespoke ratchet. Anything custom goes to the reviewer first.
-- **Dependency budget**: the irreducible ones (an MLS implementation, a P2P transport, a SQLite driver), plus a CRDT library, a CBOR library, and the platform UI frameworks. Everything else is a justification in an ADR.
+- **Boring crypto only**: audited primitives, no novel constructions, HPKE to member keys rather than a bespoke ratchet or MLS. Anything custom goes to the reviewer first.
+- **Dependency budget**: the irreducible ones (HPKE and the RustCrypto crates, a P2P transport when it arrives, a SQLite driver), plus a CRDT library, a CBOR library, and the platform UI frameworks. An MLS implementation is not in the budget. Everything else is a justification in an ADR.
 - **Reproducible builds and signed releases** early. Sovereignty claims need verifiable binaries.
 
 Suggested layout (full version in [STACK.md §11](docs/STACK.md#11-repository-layout)):
@@ -216,7 +217,7 @@ Suggested layout (full version in [STACK.md §11](docs/STACK.md#11-repository-la
 crates/
   ambient-identity/   key-event log, device delegation, recovery
   ambient-events/     typed events, CBOR, hashing, signatures
-  ambient-spaces/     MLS groups, membership, ACLs
+  ambient-spaces/     membership, roles, HPKE sealing
   ambient-sync/       log merge, snapshots, cursors
   ambient-store/      SQLite, blobs, FTS
   ambient-docs/       creations: documents, collections, versions, links
@@ -240,7 +241,7 @@ docs/                 spec/ adr/ STACK.md
 |:--|:--|
 | Native UI on each mobile platform is affordable for one person | Three clients drag, or the UIs aren't as thin as planned. (Fallback: Dioxus on mobile in a WebView, accepting less native feel.) |
 | Dioxus is ready for production web and desktop | The maturity spike shows churn, or accessibility and IME problems. (Swap the UI framework; the core is unaffected.) |
-| MLS for every Space, including 1:1 | The MLS library is immature, or the per-message overhead/complexity hurts offline 1:1 UX. |
+| MLS for every Space, including 1:1 | **This tripwire fired.** The library was immature for our bar, and totally ordered commits fight offline merge. ADR-0005. |
 | A key-event log is worth its complexity | The spec balloons; users never use rotation. (Fallback in §4.) |
 | Logs over CRDTs | Real usage needs concurrent editing of structured data well beyond notes. |
 | Unlinkable public/private personas | Users find two identities confusing and want one profile. (Then make linking a one-tap default-off choice.) |
@@ -263,12 +264,12 @@ The original landscape omits the projects closest to the *messaging and sync* la
 
 ## 16. First two weeks
 
-1. `THREAT_MODEL.md` and ADR-0001 (Spaces + logs + MLS).
+1. `THREAT_MODEL.md` (done) and the Spaces model in ADR-0001, with encryption in ADR-0005.
 2. Draft identity key-event log spec with test vectors.
 3. Event format, hashing and signing, with golden vectors.
-4. MLS library bake-off: interop test, bundle size, maintenance, audit status.
-5. Client spikes ([STACK.md §12](docs/STACK.md#12-proof-spikes-before-anything-is-final)): the core on iOS, Android, web, and desktop, and the Dioxus maturity check.
-6. A 200-line relay (put/get/subscribe) and a CLI client that exchanges one message between two identities.
+4. Space membership and HPKE sealing vectors. Not an MLS bake-off.
+5. Client spikes ([STACK.md §12](docs/STACK.md#12-proof-spikes-before-anything-is-final)): the core on desktop first, then iOS, Android, and web, and the Dioxus maturity check.
+6. A small relay (put/get/subscribe) and a CLI client that syncs one Notes space between two devices, then one 1:1 message.
 
 If step 6 works end to end over a real network, with two devices and an offline gap in the middle, the rest is execution.
 

@@ -12,7 +12,7 @@
 |:--|:--|
 | Rust core and relay | Web/desktop UI framework (Dioxus → Leptos or other Rust UI) |
 | Wire and data formats (deterministic CBOR, BLAKE3, Ed25519) | Transport implementations (WebSocket → iroh → Tor) |
-| Identity key-event log; MLS for every Space | Relay storage backend |
+| Identity key-event log; HPKE sealing of private Spaces ([ADR-0005](adr/0005-private-space-encryption.md)) | Relay storage backend |
 | On-disk store format and migration rules | CI provider, hosting, task runner |
 | Native UI on iOS and Android | Linters, formatters, test helpers |
 | Licensing | Individual crate dependencies behind traits |
@@ -23,7 +23,7 @@ The clients are two-way because they are thin: they render query results and sen
 
 ```
           ┌────────────────────────── Rust core ──────────────────────────┐
-          │ identity · events · spaces(MLS) · sync · store · transport     │
+          │ identity · events · spaces · sync · store · transport          │
           │ capabilities · app facade (commands + reactive queries)        │
           └───────┬──────────────────────┬─────────────────────┬──────────┘
                   │ UniFFI               │ UniFFI              │ direct crate link
@@ -56,7 +56,7 @@ There is no JavaScript or TypeScript in the product. Small amounts of JS glue fo
 |:--|:--|
 | `ambient-identity` | Key-event log, device delegation, recovery, pairwise key derivation |
 | `ambient-events` | Typed events, deterministic CBOR, BLAKE3 hashing, signatures |
-| `ambient-spaces` | Spaces as MLS groups, membership, ACL log |
+| `ambient-spaces` | Space membership, role log, HPKE sealing to member devices |
 | `ambient-sync` | Per-device logs, merge, snapshots, cursors |
 | `ambient-store` | SQLite, encrypted blobs, FTS5 search |
 | `ambient-docs` | Creations: CRDT documents, collections, versions, Markdown parsing and styling spans, links and backlinks, creation references |
@@ -76,7 +76,7 @@ Protocol crates use `#![forbid(unsafe_code)]` and have no UI or platform depende
 | Signatures / KX | `ed25519-dalek`, `x25519-dalek` | RustCrypto family. |
 | AEAD / KDF | `chacha20poly1305`, `aes-gcm`, `hkdf` | |
 | Hash | `blake3` | CIDs only at interop edges. |
-| Group E2EE | **OpenMLS** (RFC 9420), HPKE (RFC 9180) | Verify audit/maturity in §12. |
+| Private Spaces | HPKE (RFC 9180) to each member device key | Not MLS. See [ADR-0005](adr/0005-private-space-encryption.md). |
 | Encoding | Deterministic CBOR (RFC 8949 §4.2) via `ciborium` | Schemas in CDDL. |
 | Storage | SQLite via `rusqlite` + SQLCipher (native) | Web storage: see §7. |
 | Search | SQLite FTS5 | |
@@ -202,14 +202,15 @@ Each spike has a pass condition. The architecture is final only when all pass.
 | 3 | Core on web | Dioxus WASM build runs the core, persists to SQLite on OPFS, survives reload, handles two tabs. |
 | 4 | Core on desktop | Dioxus desktop build with SQLCipher and OS keychain. |
 | 5 | End to end | Two identities on different platforms exchange messages through one relay, with an offline gap in the middle. |
-| 6 | OpenMLS | Interop test, bundle size, memory use inside an iOS extension, maintenance and audit status. **Partially done:** see [docs/spikes/06-openmls.md](spikes/06-openmls.md). |
+| 6 | OpenMLS | **Not adopted** ([ADR-0005](adr/0005-private-space-encryption.md)). The writeup remains at [docs/spikes/06-openmls.md](spikes/06-openmls.md) as evidence. Do not block other work on it. |
 | 7 | Dioxus maturity | Build the real conversation screen; judge stability, accessibility, text input and IME, and upgrade churn. |
 | 8 | Editor | A Markdown editor on all three clients with core-owned text and styling spans: typing, selection, IME composition, undo/redo, and a 50,000-word document that stays responsive. |
 
-**If a spike fails:** iOS/Android/desktop failures change the binding or build approach, not the language choice. A Dioxus failure swaps the web/desktop UI framework (two-way door). An editor failure changes the editor approach on that client (for example, embedding a web editor component on Dioxus), not the core. OpenMLS failure is the only one that threatens a one-way door, so it runs first.
+**If a spike fails:** iOS/Android/desktop failures change the binding or build approach, not the language choice. A Dioxus failure swaps the web/desktop UI framework (two-way door). An editor failure changes the editor approach on that client (for example, embedding a web editor component on Dioxus), not the core. OpenMLS is not on this list anymore. ADR-0005 already took the tripwire.
 
 ## 13. What we are deliberately not using
 
+- **MLS as the v0.1 cipher:** evaluated in spike 6 and rejected. See ADR-0005. A later group ratchet needs its own ADR.
 - **TypeScript, React, React Native, Expo, Tauri, Electron:** no JS runtime in the product.
 - **Flutter, Kotlin Multiplatform:** own renderer or extra bridge, and no gain over native UI with a Rust core.
 - **Go:** a second systems language that doesn't fit the Rust core.
@@ -222,7 +223,7 @@ Each spike has a pass condition. The architecture is final only when all pass.
 |:--|:--|
 | Dioxus is pre-1.0 and may churn | UI is thin; spike #7; Leptos is the fallback; core is unaffected. |
 | Three client codebases for one person | UIs are thin; shared tokens and component spec; agents write most UI; ship order below. |
-| OpenMLS maturity and audit status | Run spike #6 first; pin versions; budget for external review. |
+| HPKE fanout grows with member devices | Private Spaces stay small. The spaces spec sets a cap before groups ship. |
 | iOS extension memory limits | Spike #1; keep the core's idle footprint small; content-free push as fallback. |
 | Web storage and trust limits | Documented in §7; web is a T0–T2 client by design. |
 | Rust build times | `sccache`, workspace splits, `cargo check` in agent loops. |
