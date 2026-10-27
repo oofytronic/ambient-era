@@ -1,0 +1,11 @@
+{
+  "description": "Version 1 encoded as a non-minimal integer.",
+  "spec": "docs/spec/01-events.md#encoding",
+  "generator": "conformance/tools/generate.py",
+  "input": {
+    "bytes": "a7011801025820cfa4741c2b6ee3fd1e2cd644e281039a81743d3c2e86244d9d9f4f59da71810903f604f605f6066a69642e67656e65736973074ea1016b616d6269656e742d657261"
+  },
+  "expect": {
+    "error": "noncanonical"
+  }
+}

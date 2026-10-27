@@ -2,7 +2,7 @@
 
 Normative specifications for the wire formats and protocols. Code conforms to these documents, and [conformance vectors](../../conformance/README.md) check that it does.
 
-**Status:** none written yet. They come first, before the behavior they describe.
+**Status:** 01 through 04 are version 1, written for v0.1. 05 is not written. No crate implements these yet. Vectors exist for the envelope, identity derivation, and one HPKE blob. They are provisional until a second implementation reproduces them.
 
 ## Planned documents
 
@@ -12,7 +12,7 @@ Normative specifications for the wire formats and protocols. Code conforms to th
 | 02 | `02-identity-log.md` | Key-event log, device delegation, rotation, recovery |
 | 03 | `03-spaces.md` | Space membership and role log, HPKE-to-members sealing ([ADR-0005](../adr/0005-private-space-encryption.md)), share Spaces and expiry |
 | 04 | `04-relay-api.md` | Relay put/get/delete/subscribe, mailbox addressing, retention |
-| 05 | `05-creations.md` | Documents, collections, versions, `CreationRef`, comment anchors |
+| 05 | `05-creations.md` | Not written. Documents, collections, versions, `CreationRef`, comment anchors. After v0.1. |
 
 ## Conventions
 

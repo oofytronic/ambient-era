@@ -8,7 +8,7 @@ Document bodies: notes in the personal Notes space, and later books, series, and
 
 - Parsing is total: arbitrary input never panics. Keep a fuzz target for it.
 - A comment stores its anchor (version hash and range), never a copy of the text it points at (ADR-0001).
-- The Space log is not a CRDT. The document body is. Use an existing CRDT library (Loro or Automerge) so two of the owner's devices can edit one note offline. Do not write one.
+- The Space log is not a CRDT. v0.1 note bodies are `text-snapshot-v1` as specified in `docs/spec/03-spaces.md`: concurrent edits are kept, not merged. A CRDT codec (Loro or Automerge) is a later type string, chosen by a spike, not by this crate in advance. Do not write a CRDT.
 - v0.1 notes live in the owner's Notes space. A creation becomes its own Space only when it needs its own membership (ADR-0001). Copying a note into a chat copies the text. It does not grant access to the note.
 
 ## Dependencies

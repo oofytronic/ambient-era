@@ -59,7 +59,7 @@ There is no JavaScript or TypeScript in the product. Small amounts of JS glue fo
 | `ambient-spaces` | Space membership, role log, HPKE sealing to member devices |
 | `ambient-sync` | Per-device logs, merge, snapshots, cursors |
 | `ambient-store` | SQLite, encrypted blobs, FTS5 search |
-| `ambient-docs` | Creations: CRDT documents, collections, versions, Markdown parsing and styling spans, links and backlinks, creation references |
+| `ambient-docs` | Document bodies and, later, collections, versions, links. v0.1 notes are snapshots, not a CRDT. |
 | `ambient-transport` | `Transport` trait; WebSocket impl first |
 | `ambient-capabilities` | Scoped grants and the local API (agent and mini-apps use this) |
 | `ambient-core` | The app facade: commands in, reactive query streams out |

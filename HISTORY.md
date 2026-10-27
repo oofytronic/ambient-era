@@ -4,6 +4,19 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-10-27 — v0.1 specs, before any protocol code
+
+Wrote the four v0.1 specs and the first conformance vectors.
+
+- [docs/spec/01-events.md](docs/spec/01-events.md): canonical CBOR envelope, BLAKE3 ids, Ed25519 over the unsigned bytes, per-signer chains.
+- [docs/spec/02-identity-log.md](docs/spec/02-identity-log.md): root seed, HKDF to an identity key, a seal key, and a recovery mailbox. Device keys are not derived. Pairing does not copy the root.
+- [docs/spec/03-spaces.md](docs/spec/03-spaces.md): Notes and conversation Spaces, HPKE to member keys, `text-snapshot-v1` with an explicit conflict rule. Not a CRDT, and not MLS.
+- [docs/spec/04-relay-api.md](docs/spec/04-relay-api.md): mailbox id is the capability. The relay stores opaque blobs.
+
+Also added [ARCHITECTURE.md](ARCHITECTURE.md), [CONTRIBUTING.md](CONTRIBUTING.md), and [docs/TESTING.md](docs/TESTING.md). Rewrote [SECURITY.md](SECURITY.md) so it points at the threat model.
+
+Not done: a second implementation of the vectors, and any crate behavior. Spec 05 (long-form creations) is intentionally unwritten.
+
 ## 2026-10-27 — Spaces stay, MLS does not
 
 The owner and Grok reconciled the written plan (README, VISION, STACK, ADR-0001 through ADR-0004, the OpenMLS spike) with a later decision against MLS.

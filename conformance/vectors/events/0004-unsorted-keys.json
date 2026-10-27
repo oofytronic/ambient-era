@@ -1,0 +1,11 @@
+{
+  "description": "A map with keys out of canonical byte order.",
+  "spec": "docs/spec/01-events.md#encoding",
+  "generator": "conformance/tools/generate.py",
+  "input": {
+    "bytes": "a2025820cfa4741c2b6ee3fd1e2cd644e281039a81743d3c2e86244d9d9f4f59da7181090101"
+  },
+  "expect": {
+    "error": "noncanonical"
+  }
+}

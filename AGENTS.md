@@ -5,11 +5,13 @@ Guidance for AI coding agents and human contributors. Each crate under `crates/`
 ## Read first
 
 1. [README.md](README.md): what this is.
-2. [THREAT_MODEL.md](THREAT_MODEL.md): what is actually promised.
-3. [docs/adr/](docs/adr/): decisions already made. Do not re-litigate them in a code change. [ADR-0005](docs/adr/0005-private-space-encryption.md) wins over any older sentence that says a Space is an MLS group.
-4. [docs/STACK.md](docs/STACK.md): the stack and why.
-5. [HISTORY.md](HISTORY.md): why the direction changed. Add an entry when a turn changes a locked choice.
-6. [VISION.md](VISION.md): background positions. Where it disagrees with an ADR or with STACK, the ADR or STACK wins.
+2. [ARCHITECTURE.md](ARCHITECTURE.md): the v0.1 fence and the crate map.
+3. [THREAT_MODEL.md](THREAT_MODEL.md): what is actually promised.
+4. [docs/spec/](docs/spec/): the wire formats. Code follows these.
+5. [docs/adr/](docs/adr/): decisions already made. Do not re-litigate them in a code change. [ADR-0005](docs/adr/0005-private-space-encryption.md) wins over any older sentence that says a Space is an MLS group.
+6. [docs/STACK.md](docs/STACK.md): the stack and why.
+7. [HISTORY.md](HISTORY.md): why the direction changed. Add an entry when a turn changes a locked choice.
+8. [VISION.md](VISION.md): background. Where it disagrees with an ADR, the spec, or STACK, those win.
 
 ## Commands
 

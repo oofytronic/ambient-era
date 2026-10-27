@@ -1,0 +1,11 @@
+{
+  "description": "An indefinite-length byte string.",
+  "spec": "docs/spec/01-events.md#encoding",
+  "generator": "conformance/tools/generate.py",
+  "input": {
+    "bytes": "5f4100ff"
+  },
+  "expect": {
+    "error": "noncanonical"
+  }
+}

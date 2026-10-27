@@ -1,0 +1,11 @@
+{
+  "description": "The genesis wire with the last signature byte flipped.",
+  "spec": "docs/spec/01-events.md#signatures",
+  "generator": "conformance/tools/generate.py",
+  "input": {
+    "bytes": "82a70101025820cfa4741c2b6ee3fd1e2cd644e281039a81743d3c2e86244d9d9f4f59da71810903f604f605f6066a69642e67656e65736973074ea1016b616d6269656e742d6572615840415cab530d68773486682a67dd306b4c9088f6812aa7dc6bd493ffa4759048bc18f46ced90f1df30131c08143243b03a5aca892c99f8ce7173e4d7b398aef508"
+  },
+  "expect": {
+    "error": "bad_signature"
+  }
+}

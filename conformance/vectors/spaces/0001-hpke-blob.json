@@ -1,0 +1,20 @@
+{
+  "description": "The plaintext hello sealed to one device key with a fixed ephemeral secret.",
+  "spec": "docs/spec/03-spaces.md#sealing",
+  "generator": "conformance/tools/generate.py",
+  "input": {
+    "ephemeral_secret": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dc",
+    "recipient_secret": "091623303d4a5764717e8b98a5b2bfccd9e6f3000d1a2734414e5b6875828f9c",
+    "mailbox": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "plaintext": "68656c6c6f"
+  },
+  "expect": {
+    "ok": {
+      "recipient_public": "8344397780de3e2add150c06052386de1d6b22722c18c2c55fdbf6834946515e",
+      "hint": "d20cbc98d8fde161",
+      "enc": "bb50ff9e82a574cfbf820e97f60fb9c143ec7415cf514f8cfd98eff59e059614",
+      "ciphertext": "b268897ce433c2cdfa5cce48f840f66764573da6c5",
+      "blob": "a201010281a30148d20cbc98d8fde161025820bb50ff9e82a574cfbf820e97f60fb9c143ec7415cf514f8cfd98eff59e0596140355b268897ce433c2cdfa5cce48f840f66764573da6c5"
+    }
+  }
+}

@@ -91,7 +91,7 @@ The point where the thesis is proven: sovereign *and* broad. v1.0 is a private m
 | Data | Deterministic CBOR, BLAKE3, signed per-device logs | RFC 8949, CDDL schemas |
 | Crypto | RustCrypto: Ed25519, X25519, ChaCha20-Poly1305, HKDF, HPKE | RFC 9180 for sealing |
 | Private Spaces | HPKE to each member device's current key. Not MLS. | [ADR-0005](docs/adr/0005-private-space-encryption.md) |
-| Documents | CRDT library (Loro or Automerge) for document bodies only | — |
+| Documents | v0.1 note body is a snapshot with an explicit conflict rule. A CRDT library (Loro or Automerge) is a later codec, not a v0.1 dependency. | [03-spaces.md](docs/spec/03-spaces.md) |
 | Storage | SQLite + SQLCipher, FTS5 search, keys in the OS keystore | — |
 | Transport | WebSocket relay now → `iroh` → Tor, behind a trait | QUIC |
 | Payments | Tipping via external wallets (NWC, LNURL, Cashu); no embedded wallet | — |
@@ -106,10 +106,13 @@ The Rust workspace is scaffolded: eleven crates under `crates/` (core, protocol,
 crates/        Rust workspace: ambient-events, -identity, -spaces, -sync, -store,
                -transport, -capabilities, -docs, -core, -ffi, -relay
 conformance/   language-neutral test vectors
-docs/          STACK.md, spec/, adr/
+docs/          STACK.md, spec/, adr/, TESTING.md
 spikes/        throwaway experiments (not part of the build)
 HISTORY.md     decision log
 THREAT_MODEL.md  what is promised
+ARCHITECTURE.md  system map and v0.1 fence
+CONTRIBUTING.md  how to change it
+SECURITY.md    how to report a vulnerability
 ```
 
 You need [rustup](https://rustup.rs/) (the compiler version is pinned in `rust-toolchain.toml`), plus three tools:
@@ -119,7 +122,7 @@ cargo install --locked just cargo-nextest cargo-deny
 just ci        # format, lint, test, docs, wasm check, dependency policy
 ```
 
-Contributor and agent rules are in [AGENTS.md](AGENTS.md). Decisions are recorded in [docs/adr/](docs/adr/). Licensing is in [LICENSING.md](LICENSING.md), and security reporting is in [SECURITY.md](SECURITY.md).
+Contributor and agent rules are in [AGENTS.md](AGENTS.md). The system map is [ARCHITECTURE.md](ARCHITECTURE.md). Decisions are recorded in [docs/adr/](docs/adr/). How to work is in [CONTRIBUTING.md](CONTRIBUTING.md). Licensing is in [LICENSING.md](LICENSING.md), and security reporting is in [SECURITY.md](SECURITY.md).
 
 ## Hard problems
 
