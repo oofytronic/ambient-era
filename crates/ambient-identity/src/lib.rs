@@ -1,4 +1,10 @@
-//! Identity: signed key-event log, device delegation, recovery, and pairwise key derivation.
+//! Identity derivation and the genesis event.
 //!
-//! Scaffold only: there is no behavior yet. The rules for working on this crate are in
-//! `AGENTS.md`; the design is in `docs/STACK.md`.
+//! Behavior follows `docs/spec/02-identity-log.md`. The root seed is not a
+//! passkey. Device add, revoke, and pairing are not implemented yet.
+
+mod error;
+mod identity;
+
+pub use error::IdentityError;
+pub use identity::{Identity, derive};

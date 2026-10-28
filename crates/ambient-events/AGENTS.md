@@ -2,7 +2,7 @@
 
 The wire and storage format for everything in the system. Defines events, their canonical encoding, content IDs, and signature verification.
 
-**Public API:** `verify`, `encode_unsigned`, `EventId`, `VerifiedEvent`, `EventError`. Schemas live in `docs/spec/01-events.md`; this crate conforms to the vectors in `conformance/vectors/events/`.
+**Public API:** `verify`, `sign_wire`, `encode_unsigned`, `signing_public`, `EventId`, `VerifiedEvent`, `EventError`. Schemas live in `docs/spec/01-events.md`; this crate conforms to the vectors in `conformance/vectors/events/`.
 
 ## Invariants
 

@@ -2,7 +2,7 @@
 
 Owns the root seed derivation tree and the rotatable identity log described in `VISION.md` section 4.
 
-**Public API (planned):** Key-event log types and validation, device certificates, recovery flows, per-contact key derivation.
+**Public API:** `derive` and `Identity::genesis_wire`. Device add, revoke, and pairing are not implemented yet. The derivation vector is `conformance/vectors/identity/0001-genesis.json`.
 
 ## Invariants
 

@@ -8,4 +8,4 @@ mod error;
 mod event;
 
 pub use error::EventError;
-pub use event::{EventId, VerifiedEvent, encode_unsigned, verify};
+pub use event::{EventId, VerifiedEvent, encode_unsigned, sign_wire, signing_public, verify};

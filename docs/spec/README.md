@@ -2,7 +2,7 @@
 
 Normative specifications for the wire formats and protocols. Code conforms to these documents, and [conformance vectors](../../conformance/README.md) check that it does.
 
-**Status:** 01 through 04 are version 1, written for v0.1. 05 is not written. `ambient-events` implements the envelope in spec 01 and reproduces `conformance/vectors/events/`. Identity, Spaces, and the relay are not implemented yet. Their vectors are still single-implementation.
+**Status:** 01 through 04 are version 1, written for v0.1. 05 is not written. `ambient-events` implements the envelope. `ambient-identity` derives the root and signs `id.genesis`. Device membership, Spaces, and the relay are not implemented. The HPKE vector is still single-implementation.
 
 ## Planned documents
 

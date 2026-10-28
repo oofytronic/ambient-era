@@ -27,7 +27,7 @@ Two further values use the same salt and input, with different info strings:
 
 Device keys and per-contact keys are generated on the device, not derived from the root. A mnemonic recreates the identity key, the seal key, and the recovery mailbox. It does not recreate device keys. Those are re-paired.
 
-Vector `conformance/vectors/identity/0001-genesis.json` pins all three derivations for root seed `00 01 .. 1f`.
+Vector `conformance/vectors/identity/0001-genesis.json` pins all three derivations for root seed `00 01 .. 1f`. `ambient-identity` reproduces it.
 
 ## Where the root lives
 

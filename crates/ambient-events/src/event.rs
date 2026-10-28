@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
 use crate::cbor::{self, Parsed, Value};
 use crate::error::EventError;
@@ -96,6 +96,32 @@ pub fn encode_unsigned(
     push_uint(&mut out, 7);
     push_bstr(&mut out, payload);
     Ok(out)
+}
+
+/// Sign canonical unsigned-event bytes with an Ed25519 seed and wrap the wire form.
+///
+/// # Errors
+///
+/// Returns the same errors as [`verify`] when the bytes are not a canonical event
+/// signed by this seed. The seed is not a random generator. The caller supplies it.
+#[must_use = "a failed sign is not a wire event"]
+pub fn sign_wire(unsigned: &[u8], seed: &[u8; 32]) -> Result<Vec<u8>, EventError> {
+    let key = SigningKey::from_bytes(seed);
+    let signature = key.sign(unsigned);
+    let mut wire = Vec::with_capacity(unsigned.len().saturating_add(66));
+    wire.push(0x82);
+    wire.extend_from_slice(unsigned);
+    wire.push(0x58);
+    wire.push(0x40);
+    wire.extend_from_slice(&signature.to_bytes());
+    verify(&wire)?;
+    Ok(wire)
+}
+
+/// Ed25519 public key for a signing seed.
+#[must_use]
+pub fn signing_public(seed: &[u8; 32]) -> [u8; 32] {
+    SigningKey::from_bytes(seed).verifying_key().to_bytes()
 }
 
 /// Verify a wire event: canonical CBOR, then the Ed25519 signature.

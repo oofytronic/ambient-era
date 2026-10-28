@@ -6,7 +6,7 @@ No dates. A stage starts when the previous one is actually in use, not when the 
 
 ## Where this is
 
-Specs 01 through 04 are written. `ambient-events` reproduces the event vectors. The identity and HPKE vectors are still single-implementation. Every other crate has no protocol behavior. Spec 05 (long-form creations) is intentionally unwritten.
+Specs 01 through 04 are written. `ambient-events` reproduces the event vectors. `ambient-identity` derives the root and signs genesis. Device add, revoke, Spaces, and the relay are not implemented. The HPKE vector is still single-implementation. Spec 05 (long-form creations) is intentionally unwritten.
 
 ## v0.1 — notes and a private 1:1
 
@@ -17,7 +17,7 @@ Build in this order. Do not skip ahead.
 | Step | Work | Done when |
 |:--|:--|:--|
 | 1 | `ambient-events` reproduces the event vectors | Done. Canonical CBOR, ids, and signatures match `conformance/vectors/events/` |
-| 2 | Identity log | Genesis, device add, revoke-by-ancestor, and the recovery seal match spec 02 |
+| 2 | Identity log | Derivation and `id.genesis` match the vector. Still to do: device add, revoke-by-ancestor, pairing. |
 | 3 | Local store and notes | A CLI creates, edits, and searches notes with the network off |
 | 4 | Desktop app | The same notes, in a window, still with the network off |
 | 5 | Relay and a second device | Notes written on one machine show up on the other. The relay never sees plaintext |
