@@ -20,6 +20,14 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "CC0-1.0",
+    # The desktop window links the system webview through Dioxus. These are not
+    # protocol dependencies. MPL-2.0 here is the file-level license on the Servo
+    # HTML pieces inside the webview (cssparser, selectors) and on option-ext.
+    "MPL-2.0",
+    # target-lexicon, via the GTK system-deps crate.
+    "Apache-2.0 WITH LLVM-exception",
+    # libfuzzer-sys, via rav1e, via the image crate the window uses for icons.
+    "NCSA",
 ]
 confidence-threshold = 0.93
 

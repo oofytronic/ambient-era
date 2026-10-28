@@ -6,7 +6,7 @@ No dates. A stage starts when the previous one is actually in use, not when the 
 
 ## Where this is
 
-Specs 01 through 04 are written. `ambient-events` reproduces the event vectors. `ambient-identity` derives the root, signs genesis, and projects device add, inbox rotation, and revoke-by-ancestor. `ambient-spaces` projects a Notes space, including a conflict between two devices. The `ambient` CLI creates, edits, and searches notes with the network off. The notes file is sealed with ChaCha20-Poly1305. It is not SQLCipher. HPKE to other devices, the recovery seal, and the desktop window are not implemented. Spec 05 is intentionally unwritten.
+Specs 01 through 04 are written. `ambient-events` reproduces the event vectors. `ambient-identity` derives the root, signs genesis, and projects device add, inbox rotation, and revoke-by-ancestor. `ambient-spaces` projects a Notes space, including a conflict between two devices. The `ambient` CLI and the `ambient-desktop` window create, edit, and search notes with the network off. The notes file is sealed with ChaCha20-Poly1305. It is not SQLCipher, and the key file is not the OS keystore. HPKE to other devices and the recovery seal are not implemented. Spec 05 is intentionally unwritten.
 
 ## v0.1 — notes and a private 1:1
 
@@ -19,7 +19,7 @@ Build in this order. Do not skip ahead.
 | 1 | `ambient-events` reproduces the event vectors | Done. Canonical CBOR, ids, and signatures match `conformance/vectors/events/` |
 | 2 | Identity log | Derivation, genesis, device add, inbox rotation, revoke-by-ancestor, and the pairing-offer bytes are in. The recovery seal is not. |
 | 3 | Local store and notes | The `ambient` CLI creates, edits, and searches notes offline. The store is an encrypted file, not SQLCipher yet. |
-| 4 | Desktop app | The same notes, in a window, still with the network off |
+| 4 | Desktop app | `ambient-desktop` opens the same folder as the CLI. Still no network. Not the OS keystore. |
 | 5 | Relay and a second device | Notes written on one machine show up on the other. The relay never sees plaintext |
 | 6 | 1:1 | A QR invite, a conversation Space, text sealed to per-contact keys |
 | 7 | Devices, activity, copy | Revoke a device. See which device did what. Copy a note into a chat as text, not as a grant |

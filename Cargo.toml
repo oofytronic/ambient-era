@@ -25,6 +25,7 @@ ambient-docs = { path = "crates/ambient-docs" }
 ambient-core = { path = "crates/ambient-core" }
 ambient-ffi = { path = "crates/ambient-ffi" }
 ambient-relay = { path = "crates/ambient-relay" }
+ambient-cli = { path = "crates/ambient-cli" }
 # BLAKE3-256 is the event id (docs/spec/01-events.md). Default features stay off
 # so the browser target does not pull native SIMD.
 blake3 = { version = "1.8.7", default-features = false }
@@ -40,8 +41,10 @@ x25519-dalek = { version = "2.0.1", default-features = false, features = ["stati
 zeroize = { version = "1.9.1", default-features = false }
 # ChaCha20-Poly1305 seals the local notes file. Not a wire format.
 chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
-# OS randomness for the CLI only. Protocol crates do not depend on it.
+# OS randomness for the CLI and the desktop window. Protocol crates do not depend on it.
 getrandom = { version = "0.2.16" }
+# Desktop window. Web and mobile features stay off. Pinned so the window API does not drift.
+dioxus = { version = "=0.7.10", default-features = false }
 # Test-only reader for conformance vectors.
 serde_json = { version = "1.0.154" }
 

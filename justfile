@@ -1,8 +1,8 @@
 # One entry point for every check CI runs. `just ci` before you commit.
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# Crates that cannot target wasm: the relay (server), the FFI layer, and the CLI.
-wasm_excludes := "--exclude ambient-relay --exclude ambient-ffi --exclude ambient-cli"
+# Crates that cannot target wasm: the relay, the FFI layer, the CLI, and the desktop window.
+wasm_excludes := "--exclude ambient-relay --exclude ambient-ffi --exclude ambient-cli --exclude ambient-desktop"
 
 default:
     @just --list

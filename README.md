@@ -4,7 +4,7 @@
 
 > Signal's privacy, X's surface, AnyType's ownership — with an identity you hold as a key.
 
-**Status:** Pre-0.1, planning and scaffolding. **Current focus:** a desktop Notes space and 1:1 conversations. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
+**Status:** Pre-0.1. An offline notes CLI and desktop window exist. No relay, no second device, no chat. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
 
 ---
 
