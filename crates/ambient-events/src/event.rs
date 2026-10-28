@@ -4,7 +4,7 @@ use crate::cbor::{self, Parsed, Value};
 use crate::error::EventError;
 
 /// BLAKE3-256 of the canonical unsigned event.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct EventId(pub [u8; 32]);
 
 impl EventId {

@@ -1,4 +1,11 @@
-//! Storage: SQLite, encrypted blobs, FTS5 search, forward-only migrations.
+//! An encrypted local log of opaque wire bytes.
 //!
-//! Scaffold only: there is no behavior yet. The rules for working on this crate are in
-//! `AGENTS.md`; the design is in `docs/STACK.md`.
+//! This is not SQLCipher and not a search index. The file holds ciphertext.
+//! Search happens after the caller decrypts and projects. The key is an argument,
+//! never a row.
+
+mod error;
+mod log;
+
+pub use error::StoreError;
+pub use log::{open_log, read_log, seal_log, write_log};

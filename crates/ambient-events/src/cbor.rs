@@ -98,7 +98,6 @@ fn parse_map<'a>(cursor: &mut Cursor<'a>, pairs: u64) -> Result<Value<'a>, Event
 }
 
 fn parse_simple(argument: u64, width: u8) -> Result<Value<'static>, EventError> {
-    // Only null, and only in its one-byte form (major 7, additional info 22).
     if width == 0 && argument == 22 {
         Ok(Value::Null)
     } else {
@@ -111,7 +110,6 @@ fn remaining(cursor: &Cursor<'_>) -> Result<u64, EventError> {
     u64::try_from(left).map_err(|_| EventError::Truncated)
 }
 
-/// Reads a CBOR head. `width` is the additional-info class that carried the argument.
 fn read_header(cursor: &mut Cursor<'_>) -> Result<(u8, u64, u8), EventError> {
     let first = read_byte(cursor)?;
     let major = first >> 5;
@@ -178,4 +176,144 @@ fn read_slice<'a>(cursor: &mut Cursor<'a>, len: u64) -> Result<&'a [u8], EventEr
         .ok_or(EventError::Truncated)?;
     cursor.pos = end;
     Ok(slice)
+}
+
+/// A canonical CBOR value this profile allows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Cbor {
+    /// Unsigned integer.
+    Uint(u64),
+    /// Byte string.
+    Bytes(Vec<u8>),
+    /// UTF-8 text.
+    Text(String),
+    /// Null.
+    Null,
+    /// Definite array.
+    Array(Vec<Cbor>),
+    /// Map. Encoding sorts keys by their canonical bytes.
+    Map(Vec<(Cbor, Cbor)>),
+}
+
+/// Decode one canonical value. Rejects non-canonical input and trailing bytes.
+///
+/// # Errors
+///
+/// Returns [`EventError::Noncanonical`] or [`EventError::Truncated`].
+pub fn decode_cbor(bytes: &[u8]) -> Result<Cbor, EventError> {
+    Ok(own(parse_exact(bytes)?.value))
+}
+
+/// Encode one value in canonical form.
+///
+/// # Errors
+///
+/// Returns [`EventError::Noncanonical`] if a map has two equal keys.
+pub fn encode_cbor(value: &Cbor) -> Result<Vec<u8>, EventError> {
+    let mut out = Vec::new();
+    write_cbor(&mut out, value)?;
+    Ok(out)
+}
+
+fn own(value: Value<'_>) -> Cbor {
+    match value {
+        Value::Uint(n) => Cbor::Uint(n),
+        Value::Bytes(bytes) => Cbor::Bytes(bytes.to_vec()),
+        Value::Text(text) => Cbor::Text(text.to_owned()),
+        Value::Null => Cbor::Null,
+        Value::Array(items) => Cbor::Array(items.into_iter().map(|item| own(item.value)).collect()),
+        Value::Map(pairs) => Cbor::Map(
+            pairs
+                .into_iter()
+                .map(|(key, val)| (own(key.value), own(val.value)))
+                .collect(),
+        ),
+    }
+}
+
+fn write_cbor(out: &mut Vec<u8>, value: &Cbor) -> Result<(), EventError> {
+    match value {
+        Cbor::Uint(n) => push_len(out, 0, *n),
+        Cbor::Bytes(bytes) => {
+            let len = u64::try_from(bytes.len()).map_err(|_| EventError::Noncanonical)?;
+            push_len(out, 2, len);
+            out.extend_from_slice(bytes);
+        }
+        Cbor::Text(text) => {
+            let len = u64::try_from(text.len()).map_err(|_| EventError::Noncanonical)?;
+            push_len(out, 3, len);
+            out.extend_from_slice(text.as_bytes());
+        }
+        Cbor::Null => out.push(0xf6),
+        Cbor::Array(items) => {
+            let len = u64::try_from(items.len()).map_err(|_| EventError::Noncanonical)?;
+            push_len(out, 4, len);
+            for item in items {
+                write_cbor(out, item)?;
+            }
+        }
+        Cbor::Map(pairs) => write_map(out, pairs)?,
+    }
+    Ok(())
+}
+
+fn write_map(out: &mut Vec<u8>, pairs: &[(Cbor, Cbor)]) -> Result<(), EventError> {
+    let mut encoded = Vec::new();
+    for (key, value) in pairs {
+        let mut key_bytes = Vec::new();
+        write_cbor(&mut key_bytes, key)?;
+        let mut val_bytes = Vec::new();
+        write_cbor(&mut val_bytes, value)?;
+        encoded.push((key_bytes, val_bytes));
+    }
+    encoded.sort_by(|left, right| left.0.cmp(&right.0));
+    for pair in encoded.windows(2) {
+        let Some(first) = pair.first() else {
+            continue;
+        };
+        let Some(second) = pair.get(1) else {
+            continue;
+        };
+        if first.0 == second.0 {
+            return Err(EventError::Noncanonical);
+        }
+    }
+    let len = u64::try_from(encoded.len()).map_err(|_| EventError::Noncanonical)?;
+    push_len(out, 5, len);
+    for (key, value) in encoded {
+        out.extend_from_slice(&key);
+        out.extend_from_slice(&value);
+    }
+    Ok(())
+}
+
+fn push_len(out: &mut Vec<u8>, major: u8, len: u64) {
+    let class = major << 5;
+    if len < 24 {
+        out.push(class | fold_u8(len));
+    } else if len < 256 {
+        out.push(class | 0x18);
+        out.push(fold_u8(len));
+    } else if len < 65_536 {
+        out.push(class | 0x19);
+        out.extend_from_slice(&fold_u16(len).to_be_bytes());
+    } else if len < 65_536_u64 * 65_536 {
+        out.push(class | 0x1a);
+        out.extend_from_slice(&fold_u32(len).to_be_bytes());
+    } else {
+        out.push(class | 0x1b);
+        out.extend_from_slice(&len.to_be_bytes());
+    }
+}
+
+fn fold_u8(value: u64) -> u8 {
+    u8::try_from(value).unwrap_or(0)
+}
+
+fn fold_u16(value: u64) -> u16 {
+    u16::try_from(value).unwrap_or(0)
+}
+
+fn fold_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(0)
 }

@@ -1,0 +1,27 @@
+[package]
+name = "ambient-cli"
+description = "Offline notes CLI. The root seed is a file, not the OS keystore."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ambient"
+path = "src/main.rs"
+
+[dependencies]
+ambient-events = { workspace = true }
+ambient-identity = { workspace = true }
+ambient-spaces = { workspace = true }
+ambient-store = { workspace = true }
+getrandom = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

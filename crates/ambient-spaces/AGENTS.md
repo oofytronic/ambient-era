@@ -2,7 +2,7 @@
 
 The one primitive for conversations and creations (ADR-0001). A Space is a membership list and a role log. Private Spaces are sealed to current member device keys (ADR-0005). They are not MLS groups.
 
-**Public API (planned):** Space creation, membership and role changes, share Spaces with expiry, role validation, sealing an event to the current member devices.
+**Public API:** `project_notes`, `notes_genesis_payload`, `note_put_payload`. HPKE sealing to member keys is not implemented yet. There is no share-expiry type in spec 03. Do not add one here.
 
 ## Invariants
 

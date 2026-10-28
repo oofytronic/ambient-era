@@ -1,6 +1,6 @@
 [package]
 name = "ambient-spaces"
-description = "Spaces: MLS-backed groups, membership and role log, access ladder, and leased share Spaces."
+description = "Spaces: membership, notes, and conversations. Private Spaces are sealed with HPKE."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

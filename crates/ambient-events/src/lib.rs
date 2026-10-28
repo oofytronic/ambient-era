@@ -7,5 +7,6 @@ mod cbor;
 mod error;
 mod event;
 
+pub use cbor::{Cbor, decode_cbor, encode_cbor};
 pub use error::EventError;
 pub use event::{EventId, VerifiedEvent, encode_unsigned, sign_wire, signing_public, verify};

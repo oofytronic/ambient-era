@@ -2,13 +2,15 @@ use core::fmt;
 
 use ambient_events::EventError;
 
-/// A derivation or genesis failure.
+/// A derivation, log, or genesis failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdentityError {
     /// HKDF refused the output length. Not expected for these 32-byte outputs.
     Derivation,
-    /// The genesis event could not be encoded or signed.
+    /// The envelope could not be encoded, verified, or signed.
     Event(EventError),
+    /// The payload is not the event type this version defines.
+    BadPayload,
 }
 
 impl fmt::Display for IdentityError {
@@ -16,6 +18,7 @@ impl fmt::Display for IdentityError {
         match self {
             Self::Derivation => formatter.write_str("derivation"),
             Self::Event(error) => write!(formatter, "{error}"),
+            Self::BadPayload => formatter.write_str("bad_payload"),
         }
     }
 }

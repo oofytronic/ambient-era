@@ -92,7 +92,7 @@ jobs:
       # Keep this list in sync with `wasm_excludes` in the justfile.
       - run: >
           cargo check --workspace --exclude ambient-relay --exclude ambient-ffi
-          --target wasm32-unknown-unknown --locked
+          --exclude ambient-cli --target wasm32-unknown-unknown --locked
 
   deny:
     runs-on: ubuntu-latest
