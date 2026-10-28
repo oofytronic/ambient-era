@@ -2,7 +2,7 @@
 
 Language-neutral test vectors. They are the real specification in executable form: any implementation of the protocol (this repository's Rust core, a future independent client, a relay) must produce the expected output for every vector.
 
-**Status:** vectors exist for the event envelope, identity derivation, and one HPKE blob. They were produced by [tools/generate.py](tools/generate.py), which checks its HPKE implementation against a RFC 9180 vector before writing. The Ambient vectors are provisional until the Rust core reproduces them. No protocol behavior is implemented yet.
+**Status:** event-envelope vectors are reproduced by `ambient-events`. Identity derivation and the HPKE blob are still produced only by [tools/generate.py](tools/generate.py), which checks its HPKE code against an RFC 9180 vector before writing. Those two stay provisional until their crates reproduce them.
 
 ## Layout
 

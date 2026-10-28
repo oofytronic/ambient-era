@@ -25,6 +25,13 @@ ambient-docs = { path = "crates/ambient-docs" }
 ambient-core = { path = "crates/ambient-core" }
 ambient-ffi = { path = "crates/ambient-ffi" }
 ambient-relay = { path = "crates/ambient-relay" }
+# BLAKE3-256 is the event id (docs/spec/01-events.md). Default features stay off
+# so the browser target does not pull native SIMD.
+blake3 = { version = "1.8.7", default-features = false }
+# Ed25519 verify only. No key generation in this crate, so no `rand`.
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["alloc"] }
+# Test-only reader for conformance vectors.
+serde_json = { version = "1.0.154" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

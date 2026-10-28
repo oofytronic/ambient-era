@@ -5,7 +5,7 @@
 
 Every log entry, including identity-log entries, uses this envelope. Payload meaning is defined by the spec for that type. This document does not define notes, membership, or mailboxes.
 
-Conformance: `conformance/vectors/events/`. Those vectors were produced by one generator (`conformance/tools/generate.py`) and are provisional until the Rust core reproduces them.
+Conformance: `conformance/vectors/events/`. `ambient-events` reproduces them. The generator in `conformance/tools/generate.py` is the other implementation.
 
 ## Encoding
 

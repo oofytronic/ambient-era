@@ -1,4 +1,11 @@
-//! Typed, signed, content-addressed events: deterministic CBOR, BLAKE3 hashing, Ed25519 signatures.
+//! Signed events: canonical CBOR, BLAKE3 ids, and Ed25519 checks.
 //!
-//! Scaffold only: there is no behavior yet. The rules for working on this crate are in
-//! `AGENTS.md`; the design is in `docs/STACK.md`.
+//! Behavior follows `docs/spec/01-events.md`. This crate does no I/O, reads no
+//! clock, and generates no randomness.
+
+mod cbor;
+mod error;
+mod event;
+
+pub use error::EventError;
+pub use event::{EventId, VerifiedEvent, encode_unsigned, verify};

@@ -6,7 +6,7 @@ No dates. A stage starts when the previous one is actually in use, not when the 
 
 ## Where this is
 
-Specs 01 through 04 are written. Conformance vectors exist and are provisional until the Rust core reproduces them. The crates have no protocol behavior. Spec 05 (long-form creations) is intentionally unwritten.
+Specs 01 through 04 are written. `ambient-events` reproduces the event vectors. The identity and HPKE vectors are still single-implementation. Every other crate has no protocol behavior. Spec 05 (long-form creations) is intentionally unwritten.
 
 ## v0.1 — notes and a private 1:1
 
@@ -16,7 +16,7 @@ Build in this order. Do not skip ahead.
 
 | Step | Work | Done when |
 |:--|:--|:--|
-| 1 | `ambient-events` reproduces the event vectors | Canonical CBOR, ids, and signatures match `conformance/vectors/events/` |
+| 1 | `ambient-events` reproduces the event vectors | Done. Canonical CBOR, ids, and signatures match `conformance/vectors/events/` |
 | 2 | Identity log | Genesis, device add, revoke-by-ancestor, and the recovery seal match spec 02 |
 | 3 | Local store and notes | A CLI creates, edits, and searches notes with the network off |
 | 4 | Desktop app | The same notes, in a window, still with the network off |
