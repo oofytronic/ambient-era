@@ -6,7 +6,19 @@ all-features = true
 [advisories]
 # Known vulnerabilities and unmaintained crates fail the check. To ignore one, add its id
 # below with a comment saying why it does not apply and when to revisit.
-ignore = []
+ignore = [
+    # Iced 0.14 → wgpu 27 → metal. paste is archived. No upgrade until that stack moves.
+    # Revisit when Iced no longer depends on wgpu 27.
+    "RUSTSEC-2024-0436",
+    # Iced 0.14 font stack (cosmic-text/fontdb, and winit via ab_glyph). Unmaintained, not a
+    # known vulnerability. Revisit when Iced switches off ttf-parser.
+    "RUSTSEC-2026-0192",
+    # zbus 5 names/variant crates were folded into zbus 6. Pulled by Iced 0.14 → iced_winit → mundy.
+    # Revisit when Iced depends on zbus 6.
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0372",
+]
 
 [licenses]
 # Permissive licenses only. Adding a license here is a deliberate decision: copyleft or
