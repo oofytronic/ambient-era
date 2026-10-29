@@ -4,7 +4,7 @@
 
 > Signal's privacy, X's surface, AnyType's ownership — with an identity you hold as a key.
 
-**Status:** Pre-0.1. An offline notes CLI and desktop window exist. No relay, no second device, no chat. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
+**Status:** Pre-0.1. An offline notes CLI and a Linux Iced window exist. No relay, no second device, no chat. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
 
 ---
 
@@ -83,7 +83,7 @@ The point where the thesis is proven: sovereign *and* broad. v1.0 is a private m
 | Core and relay | **Rust** |
 | iOS | SwiftUI, core via UniFFI |
 | Android | Jetpack Compose, core via UniFFI |
-| Web and desktop | Dioxus (Rust), core linked directly (WASM on web, native on desktop) |
+| Linux | Iced (Rust), a system window. Not a webview. |
 
 | Layer | Choice | Standard |
 |:--|:--|:--|
@@ -153,6 +153,6 @@ The rule that holds across every phase: **standards travel, platform APIs don't.
 ## References
 
 - [AnyType protocol](https://tech.anytype.io/any-sync/overview) · [`any-sync`](https://github.com/anyproto/any-sync)
-- [Dioxus](https://dioxuslabs.com/) · [UniFFI](https://mozilla.github.io/uniffi-rs/) · [Iroh](https://docs.iroh.computer/about/faq) · [HPKE (RFC 9180)](https://www.rfc-editor.org/rfc/rfc9180.html)
+- [Iced](https://iced.rs/) · [UniFFI](https://mozilla.github.io/uniffi-rs/) · [Iroh](https://docs.iroh.computer/about/faq) · [HPKE (RFC 9180)](https://www.rfc-editor.org/rfc/rfc9180.html)
 - [W3C DID](https://www.w3.org/TR/did-1.1/) · [IPLD](https://ipld.io/) · [SimpleX](https://simplex.chat/) (mailbox prior art, not the data model)
 - [Nostr](https://nostr.com/) · [Macro](https://macro.com/) (landscape)

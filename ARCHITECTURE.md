@@ -28,7 +28,7 @@ v0.1 does not include groups beyond a 1:1, public Spaces, phone push, Tor, payme
 ## Pieces
 
 ```
-desktop client (Dioxus, later)
+desktop client (Iced on Linux)
         │ commands / queries
         ▼
 ambient-core          facade. No UI types.

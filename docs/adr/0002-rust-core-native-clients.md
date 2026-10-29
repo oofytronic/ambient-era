@@ -1,6 +1,17 @@
-# ADR-0002: Rust core, native mobile clients, Dioxus for web and desktop
+# ADR-0002: Rust core, native clients
 
-**Status:** Accepted, pending the proof spikes in [docs/STACK.md](../STACK.md) section 12.
+**Status:** Accepted. Amended 2026-10-28. The original choice of Dioxus for desktop is withdrawn.
+
+## Amendment (2026-10-28)
+
+"Native" on Linux means a real window, not a browser pretending to be one. It does not mean the app must look as if GNOME or KDE shipped it.
+
+- The Linux desktop is **Iced**. It draws its own controls in a system window. There is no WebKit.
+- macOS is **SwiftUI**. Windows is **WinUI**. iOS is **SwiftUI**. Android is **Jetpack Compose**.
+- The web client is a **PWA**. It is the fallback for a machine with no install, not the desktop app.
+- Dioxus is not a client.
+
+Where the original decision below says Dioxus is the desktop or the web UI, this amendment wins. The record is [HISTORY.md](../../HISTORY.md).
 
 ## Context
 

@@ -4,6 +4,12 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-10-28 — Linux is an Iced window, not a webview
+
+The owner corrected what "native" means for Linux. It means a real desktop window, not a page drawn by WebKit. It does not mean the app has to look as if GNOME or KDE made it.
+
+[ADR-0002](docs/adr/0002-rust-core-native-clients.md) is amended. The Linux client is Iced. Mac, Windows, iPhone, and Android stay SwiftUI, WinUI, SwiftUI, and Compose. The web client is a PWA and only a fallback. Dioxus is not a client. The notes window in `ambient-desktop` is the Iced app over the same folder the CLI uses.
+
 ## 2026-10-27 — Roadmap
 
 [ROADMAP.md](ROADMAP.md) is the sequence. v0.1 is specified and not yet implemented. Later versions do not start until the previous one is in use. The README table is the short form of that file.

@@ -10,7 +10,7 @@
 
 | One-way (locked) | Two-way (replaceable later) |
 |:--|:--|
-| Rust core and relay | Web/desktop UI framework (Dioxus → Leptos or other Rust UI) |
+| Rust core and relay | Linux UI toolkit (Iced). The PWA is the fallback, not a second desktop. |
 | Wire and data formats (deterministic CBOR, BLAKE3, Ed25519) | Transport implementations (WebSocket → iroh → Tor) |
 | Identity key-event log; HPKE sealing of private Spaces ([ADR-0005](adr/0005-private-space-encryption.md)) | Relay storage backend |
 | On-disk store format and migration rules | CI provider, hosting, task runner |
@@ -28,9 +28,9 @@ The clients are two-way because they are thin: they render query results and sen
           └───────┬──────────────────────┬─────────────────────┬──────────┘
                   │ UniFFI               │ UniFFI              │ direct crate link
             ┌─────▼─────┐          ┌─────▼──────┐        ┌─────▼──────────────┐
-            │ iOS        │          │ Android    │        │ Web + Desktop      │
-            │ SwiftUI    │          │ Compose    │        │ Dioxus (Rust)      │
-            └────────────┘          └────────────┘        │ WASM  | native     │
+            │ iOS        │          │ Android    │        │ Linux desktop      │
+            │ SwiftUI    │          │ Compose    │        │ Iced (Rust)        │
+            └────────────┘          └────────────┘        │ system window      │
                                                           └────────────────────┘
                          ▲  untrusted, self-hostable
                          │
@@ -43,12 +43,14 @@ The clients are two-way because they are thin: they render query results and sen
 
 | Where | Language | Notes |
 |:--|:--|:--|
-| Core, relay, tooling, web/desktop UI | **Rust** (2024 edition, stable toolchain pinned) | The vast majority of the code. |
-| iOS UI | **Swift** (SwiftUI) | UI only. |
+| Core, relay, tooling, Linux UI | **Rust** (2024 edition, stable toolchain pinned) | The vast majority of the code. |
+| iOS and macOS UI | **Swift** (SwiftUI) | UI only. |
 | Android UI | **Kotlin** (Jetpack Compose) | UI only. |
+| Windows UI | **WinUI** | UI only. The language of that shell is not chosen yet. |
+| Web fallback | A **PWA** | Not the desktop app. Not started. |
 | Specs and vectors | **CDDL**, plain text, binary vectors | Language-neutral. |
 
-There is no JavaScript or TypeScript in the product. Small amounts of JS glue for the browser (Dioxus/wasm-bindgen generates it) are build artifacts, not source.
+There is no JavaScript in the core. The PWA, when it exists, is the only client that runs in a browser.
 
 ## 4. The core (Rust workspace)
 
@@ -110,11 +112,14 @@ The same facade is the **capability API** that the local agent and, later, mini-
 - Core is a shared library plus Kotlin bindings built with `cargo-ndk` and a Gradle plugin.
 - **UnifiedPush** supported alongside FCM so push doesn't require Google services.
 
-### Web and desktop: Dioxus
-- One Rust codebase, two targets: **web** (WASM) and **desktop** (native window, system webview).
-- Responsive multi-pane layouts, keyboard-first navigation, real context menus, drag-and-drop, built per desktop/web conventions rather than stretched mobile screens.
-- Desktop gets the native core (OS keychain, SQLCipher, background running, tray, notifications, and later iroh P2P). Web gets the WASM core.
-- Dioxus Native (the Blitz renderer) is a watch item. If it matures, desktop can adopt it without changing the architecture.
+### Linux: Iced
+- A system window. Iced draws the controls. There is no webview and no WebKit.
+- The core is linked as a crate. This is the desktop that exists now: the offline notes window.
+- macOS and Windows are not this window. Those are SwiftUI and WinUI, and they are not built yet.
+
+### Web: PWA
+- The fallback for a machine with no install. Not a second copy of the desktop app.
+- Not started. Key storage there is weaker than on a desktop, as in section 7.
 
 ### Design system
 Design tokens (color, type scale, spacing, radii, motion) live once in `design/tokens/` as data and generate Rust constants, Swift, and Kotlin. Components are implemented per platform with each platform's idiom; behavior and naming stay aligned through a short written component spec.
