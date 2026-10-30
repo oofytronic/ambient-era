@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-10-29 — The notes window syncs on loopback
+
+The Linux window stayed offline so protocol rules would not land in `ambient-desktop`. The owner is testing the relay, a second device, and 1:1 in that window, so the window now calls the client in `ambient-cli`. It still does not seal events or parse relay JSON. The relay it can start is cleartext on `127.0.0.1`, which [spec 04](docs/spec/04-relay-api.md) says is not a public deployment. Recovery, a QR invite, revoke, and copying a note into chat are still not done.
+
 ## 2026-10-28 — Linux is an Iced window, not a webview
 
 The owner corrected what "native" means for Linux. It means a real desktop window, not a page drawn by WebKit. It does not mean the app has to look as if GNOME or KDE made it.

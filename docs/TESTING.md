@@ -2,7 +2,7 @@
 
 ## What exists now
 
-`just ci` runs format, clippy, nextest, rustdoc, wasm, and `cargo deny`. `ambient-events` reproduces the event vectors. `ambient-identity` reproduces genesis and projects the identity log through revoke. `ambient-spaces` projects notes and a conversation, and opens the published HPKE blob. The CLI covers offline notes, a second device, and one 1:1 through the loopback relay. A green run is not a second implementation of the vectors, and it is not the v0.1 exit.
+`just ci` runs format, clippy, nextest, rustdoc, wasm, and `cargo deny`. `ambient-events` reproduces the event vectors. `ambient-identity` reproduces genesis and projects the identity log through revoke. `ambient-spaces` projects notes and a conversation, and opens the published HPKE blob. The CLI, and the Linux window that calls it, cover notes, a second device, and one 1:1 through the loopback relay. A green run is not a second implementation of the vectors, and it is not the v0.1 exit.
 
 Vectors in `conformance/vectors/` are the spec in executable form. `conformance/tools/generate.py` writes them and checks its HPKE code against a RFC 9180 test vector first. The event vectors are reproduced by `ambient-events`. `ambient-spaces` opens the published HPKE blob; it does not re-seal the generator's raw scalar. There is no separate runner crate.
 

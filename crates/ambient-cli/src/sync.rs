@@ -1,4 +1,6 @@
-//! Push and pull sealed events through a relay. The notes window does not do this.
+//! Push and pull sealed events through a relay.
+//!
+//! The notes window calls the wrappers in the crate root. It does not seal here.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -19,6 +21,15 @@ use tungstenite::Message;
 use crate::keys::{self, Local};
 use crate::notes::CliError;
 use crate::session::Notebook;
+
+pub(crate) fn start_loopback() -> Result<(), CliError> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:8787")
+        .map_err(|_| CliError::message("relay already running on 127.0.0.1:8787"))?;
+    std::thread::spawn(move || {
+        let _ = ambient_relay::serve_listener(&listener);
+    });
+    Ok(())
+}
 
 pub(crate) fn device(dir: &Path, label: &str) -> Result<String, CliError> {
     let (_local, offer) = keys::create_device(dir, label)?;

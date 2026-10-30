@@ -1,6 +1,6 @@
 [package]
 name = "ambient-desktop"
-description = "Linux notes window. Iced, not a webview. Same files as the CLI. No network."
+description = "Linux notes window. Iced, not a webview. Same files as the CLI. Loopback sync only."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

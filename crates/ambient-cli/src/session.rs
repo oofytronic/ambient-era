@@ -103,12 +103,15 @@ impl Notebook {
         Ok(Self { local })
     }
 
-    /// Notes in id order.
+    /// Notes in id order. An empty file, or no file yet, is an empty list.
     ///
     /// # Errors
     ///
     /// Returns [`CliError`] when the log cannot be projected.
     pub fn list(&self) -> Result<Vec<NoteSummary>, CliError> {
+        if load(&self.local)?.is_empty() {
+            return Ok(Vec::new());
+        }
         let view = self.project()?;
         Ok(view
             .notes
@@ -125,6 +128,9 @@ impl Notebook {
     pub fn search(&self, query: &str) -> Result<Vec<NoteSummary>, CliError> {
         if query.is_empty() {
             return Err(CliError::message("empty query"));
+        }
+        if load(&self.local)?.is_empty() {
+            return Ok(Vec::new());
         }
         let view = self.project()?;
         let mut found = Vec::new();
@@ -171,6 +177,9 @@ impl Notebook {
     /// Returns [`CliError`] when the title is too long or the log cannot be written.
     pub fn add(&self, title: &str, body: &str) -> Result<String, CliError> {
         let mut wires = load(&self.local)?;
+        if wires.is_empty() {
+            return Err(CliError::message("sync this device before writing a note"));
+        }
         let view = view_notes(&self.local, &wires)?;
         let note_id = random_note()?;
         let payload = note_put_payload(&note_id, title, body, &[])
@@ -215,6 +224,12 @@ impl Notebook {
         write_log(&self.local.notes_path, &self.local.store_key, &wires)
             .map_err(|_| CliError::message("could not write notes file"))?;
         Ok(())
+    }
+
+    /// True when this folder holds the root. A paired device does not.
+    #[must_use]
+    pub fn holds_root(&self) -> bool {
+        self.local.identity.is_some()
     }
 
     /// Authorize a device from its offer and add it to the Notes space.
@@ -351,6 +366,9 @@ fn view_notes(local: &Local, wires: &[Vec<u8>]) -> Result<ambient_spaces::Projec
 }
 
 fn load(local: &Local) -> Result<Vec<Vec<u8>>, CliError> {
+    if !local.notes_path.exists() {
+        return Ok(Vec::new());
+    }
     read_log(&local.notes_path, &local.store_key)
         .map_err(|_| CliError::message("could not open notes file"))
 }

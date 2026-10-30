@@ -63,6 +63,24 @@ fn one_message_crosses() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn paired_folder_lists_nothing_before_sync() -> Result<(), String> {
+    let root = std::env::temp_dir().join(format!("ambient-empty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let other = root.join("other");
+    ambient_cli::device_offer(&other, "other-computer").map_err(|err| err.to_string())?;
+    let book = ambient_cli::Notebook::open(&other).map_err(|err| err.to_string())?;
+    if book.holds_root() {
+        return Err("paired folder must not hold the root".to_owned());
+    }
+    let listed = book.list().map_err(|err| err.to_string())?;
+    if !listed.is_empty() {
+        return Err("paired folder had notes before sync".to_owned());
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
 fn spawn_relay() -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|err| err.to_string())?;
     let port = listener.local_addr().map_err(|err| err.to_string())?.port();

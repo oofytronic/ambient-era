@@ -20,13 +20,11 @@ ambient-identity = { workspace = true }
 ambient-spaces = { workspace = true }
 ambient-store = { workspace = true }
 ambient-transport = { workspace = true }
+ambient-relay = { workspace = true }
 getrandom = { workspace = true }
 hkdf = { workspace = true }
 sha2 = { workspace = true }
 tungstenite = { workspace = true }
-
-[dev-dependencies]
-ambient-relay = { workspace = true }
 
 [lints]
 workspace = true

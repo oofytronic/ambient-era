@@ -4,7 +4,7 @@
 
 > Signal's privacy, X's surface, AnyType's ownership — with an identity you hold as a key.
 
-**Status:** Pre-0.1. The `ambient` CLI does offline notes, a second device, and one 1:1 chat through a loopback relay. The Linux window is still offline notes only. The relay binary binds `127.0.0.1` in the clear and is not a public deployment. The recovery seal is not implemented. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
+**Status:** Pre-0.1. The Linux window does notes, a second folder, and one 1:1 through a loopback relay on this computer. The relay is cleartext on `127.0.0.1` and is not a public deployment. The recovery seal is not implemented. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
 
 ---
 
