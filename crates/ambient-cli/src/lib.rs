@@ -18,7 +18,7 @@ mod sync;
 
 pub use draft::{Draft, Shortcut, shortcut};
 pub use notes::{CliError, run};
-pub use session::{NoteSummary, Notebook, ShownHead, ShownNote};
+pub use session::{DeviceLine, NoteSummary, Notebook, ShownHead, ShownNote};
 
 /// Loopback relay the window starts. Cleartext. Not a public deployment.
 pub const LOOPBACK_URL: &str = "ws://127.0.0.1:8787";

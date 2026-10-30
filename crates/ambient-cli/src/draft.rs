@@ -93,10 +93,12 @@ mod tests {
                 ShownHead {
                     title: "Left".to_owned(),
                     body: "alpha".to_owned(),
+                    writer: "laptop".to_owned(),
                 },
                 ShownHead {
                     title: "Right".to_owned(),
                     body: "beta".to_owned(),
+                    writer: "phone".to_owned(),
                 },
             ],
         };
