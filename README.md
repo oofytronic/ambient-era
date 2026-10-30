@@ -4,7 +4,7 @@
 
 > Signal's privacy, X's surface, AnyType's ownership — with an identity you hold as a key.
 
-**Status:** Pre-0.1. The Linux window does notes, a second folder, and one 1:1 through a loopback relay on this computer. The relay is cleartext on `127.0.0.1` and is not a public deployment. The recovery seal is not implemented. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
+**Status:** Pre-0.1. The Linux window does notes, a second folder, one 1:1 through a loopback relay, device revoke from the root window, and per-note writer labels. The relay is cleartext on `127.0.0.1` and is not a public deployment. The recovery seal is not implemented. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
 
 ---
 
@@ -63,96 +63,36 @@ The notebook already exists. v0.3 adds creations that need their own membership:
 
 ### v1.0 — the complete product
 
-The point where the thesis is proven: sovereign *and* broad. v1.0 is a private messenger for small Spaces, plus a lightweight public social network, plus an owned second brain. Tipping goes through an external wallet. The app does not hold funds.
+The agent is a local process that holds a delegated key and uses the same capability grants the owner already uses to share. It does not see the recovery phrase. Tipping goes through an external wallet the owner controls. The protocol version is frozen.
 
-- Private groups on the same sealing as 1:1. Not rooms of hundreds, and not MLS.
-- Public profiles with a portable identity, follow graph, and feed. Public Spaces are signed, not encrypted.
-- Direct P2P sync, so the relay becomes optional when peers are reachable
-- Tor / anonymity mode, which is the first time "anonymous" is an honest word
-- A local agent that is a delegated key with a grant. It does not see a shared Space unless every member agreed.
-- Long-form creations with conversations woven in, and basic tipping
+## Why now
 
-**Explicitly out of scope for v1:** whiteboards, database UIs, algorithmic feeds, and very large encrypted groups. No ads, ever — sustainability comes from relay subscriptions, pro features, and self-hosting.
+The pieces exist. The gap is that no one has put them together under one identity the owner holds, with a private log that never leaves the devices, and a public surface that does not require a company to stay online.
 
-## Architecture
-
-**Principle: standards travel; platform APIs don't.** One Rust core owns every long-lived concern (identity, events, Spaces, sync, storage, transport). Clients are thin and native to their platform. Full detail, rationale, and proof spikes are in [docs/STACK.md](docs/STACK.md).
-
-| Piece | Choice |
-|:--|:--|
-| Core and relay | **Rust** |
-| iOS | SwiftUI, core via UniFFI |
-| Android | Jetpack Compose, core via UniFFI |
-| Linux | Iced (Rust), a system window. Not a webview. |
-
-| Layer | Choice | Standard |
-|:--|:--|:--|
-| Identity | Random root seed + mnemonic; rotatable key-event log; passkeys unlock locally | WebAuthn (unlock only) |
-| Data | Deterministic CBOR, BLAKE3, signed per-device logs | RFC 8949, CDDL schemas |
-| Crypto | RustCrypto: Ed25519, X25519, ChaCha20-Poly1305, HKDF, HPKE | RFC 9180 for sealing |
-| Private Spaces | HPKE to each member device's current key. Not MLS. | [ADR-0005](docs/adr/0005-private-space-encryption.md) |
-| Documents | v0.1 note body is a snapshot with an explicit conflict rule. A CRDT library (Loro or Automerge) is a later codec, not a v0.1 dependency. | [03-spaces.md](docs/spec/03-spaces.md) |
-| Storage | SQLite + SQLCipher, FTS5 search, keys in the OS keystore | — |
-| Transport | WebSocket relay now → `iroh` → Tor, behind a trait | QUIC |
-| Payments | Tipping via external wallets (NWC, LNURL, Cashu); no embedded wallet | — |
-
-The wire formats, identity log, Spaces model, and relay design are described in [VISION.md](VISION.md). Where that document still mentions MLS as the cipher, [ADR-0005](docs/adr/0005-private-space-encryption.md) wins.
-
-## Repository and development
+## Status of the code
 
 The Rust workspace under `crates/` is what `just ci` builds. Behavior that exists: event envelopes, the identity log through revoke, notes and conversation projection, HPKE seals, the relay JSON codec, an in-memory loopback relay, the `ambient` CLI, and the Linux notes window. `ambient-sync`, `ambient-capabilities`, `ambient-docs`, `ambient-core`, and `ambient-ffi` are still scaffolds. A wire-format change still starts in the spec and the vectors, not in a crate.
 
-```
-crates/        Rust workspace: ambient-events, -identity, -spaces, -sync, -store,
-               -transport, -capabilities, -docs, -core, -ffi, -relay, -cli, -desktop
-conformance/   language-neutral test vectors
-docs/          STACK.md, spec/, adr/, TESTING.md
-spikes/        throwaway experiments (not part of the build)
-HISTORY.md     decision log
-ROADMAP.md     order of work
-THREAT_MODEL.md  what is promised
-ARCHITECTURE.md  system map and v0.1 fence
-CONTRIBUTING.md  how to change it
-SECURITY.md    how to report a vulnerability
-```
-
-You need [rustup](https://rustup.rs/) (the compiler version is pinned in `rust-toolchain.toml`), plus three tools:
+## Layout
 
 ```
-cargo install --locked just cargo-nextest cargo-deny
-just ci        # format, lint, test, docs, wasm check, dependency policy
+crates/           the workspace
+docs/             specs, ADRs, spikes
+conformance/      vectors the crates must match
+ROADMAP.md        order of work
+HISTORY.md        decision log
+ARCHITECTURE.md   shape of the system
+THREAT_MODEL.md   what each stage is allowed to claim
 ```
 
-Contributor and agent rules are in [AGENTS.md](AGENTS.md). The system map is [ARCHITECTURE.md](ARCHITECTURE.md). Decisions are recorded in [docs/adr/](docs/adr/). How to work is in [CONTRIBUTING.md](CONTRIBUTING.md). Licensing is in [LICENSING.md](LICENSING.md), and security reporting is in [SECURITY.md](SECURITY.md).
+## Build
 
-## Hard problems
+```
+just ci
+```
 
-We're not pretending these are solved:
+Or `cargo test --workspace`.
 
-- **Distribution** — the thing that kills sovereign apps.
-- **Key management UX** — passkey onboarding, mnemonic fallback, and social recovery, without a custodian.
-- **Anonymity** — Tor is optional; until v0.8, relays still see IPs.
-- **E2EE vs. agents** — local inference or encrypted compute; data never leaves the device in the clear.
-- **Monetization without data** — relay subscriptions, pro features, self-hosting.
+## License
 
-## Beyond 1.0
-
-v1.0 is the proof, not the destination. The longer vision, in brief:
-
-| Version | Theme | What it becomes |
-|:--|:--|:--|
-| **v1.5** | Scale & polish | Fast, everywhere, recommendable to a normal friend: multi-device, relay federation, push infrastructure, Signal/Telegram/WhatsApp import. |
-| **v2.0** | Platform | An operating layer: sandboxed, permission-scoped mini-apps and an extension SDK running on your data with your identity. |
-| **v2.5** | Communities & credentials | Orgs, roles, moderation, and portable reputation via Verifiable Credentials. |
-| **v3.0** | Sovereign internet suite | Calendar, storage, media, forms, wallet, plus bridges to Nostr, ATProto, and IPFS. |
-| **v3.5** | Ecosystem & governance | Independent clients, spec stewardship, grants, audits, and governance that doesn't depend on any one founder. |
-| **v4.0+** | Ambient sovereignty | Device mesh, hardware keys, offline-first everything, one-click migration off Big Tech. |
-
-The rule that holds across every phase: **standards travel, platform APIs don't.** Keep the specs (events, identity, Spaces, mailboxes), swap the runtime per platform, and keep the logic in the Rust core, never in the UI.
-
-## References
-
-- [AnyType protocol](https://tech.anytype.io/any-sync/overview) · [`any-sync`](https://github.com/anyproto/any-sync)
-- [Iced](https://iced.rs/) · [UniFFI](https://mozilla.github.io/uniffi-rs/) · [Iroh](https://docs.iroh.computer/about/faq) · [HPKE (RFC 9180)](https://www.rfc-editor.org/rfc/rfc9180.html)
-- [W3C DID](https://www.w3.org/TR/did-1.1/) · [IPLD](https://ipld.io/) · [SimpleX](https://simplex.chat/) (mailbox prior art, not the data model)
-- [Nostr](https://nostr.com/) · [Macro](https://macro.com/) (landscape)
+Not decided. See [docs/adr/0004-licensing.md](docs/adr/0004-licensing.md).
