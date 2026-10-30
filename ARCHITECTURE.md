@@ -38,11 +38,17 @@ ambient-core          facade. No UI types.
 ambient-relay         mailbox store. Cannot decrypt.
 ```
 
-The relay crate depends only on events and transport. It must not depend on the store or the core.
+The relay crate depends only on transport. It must not depend on the store or the core.
 
 Layering is in [AGENTS.md](AGENTS.md). Dependencies point down.
 
+## What the code does today
+
+The CLI appends notes into a sealed file, pairs a second folder that does not hold the root, and syncs those notes through `ambient-relay` on `127.0.0.1`. It can open one conversation and exchange text the same way. The Iced window reads and writes that notes file and does not open a socket. There is no recovery seal, no QR image, no revoke command, and no command that copies a note into a chat. The local file is not SQLCipher and has no FTS index. Search scans the decrypted notes.
+
 ## What happens to a note
+
+This is the path the spec requires. The CLI does steps 1, 3, and 4. It does not write the recovery copy below. Step 2 is a sealed file and a scan, not SQLCipher or FTS. The window does step 1 only, with the network off.
 
 1. The device appends a `note.put` event, signed by that device's key, linked to that device's previous event.
 2. The local database projects it, and FTS indexes the plaintext. The database file is encrypted. The index never goes to the relay.

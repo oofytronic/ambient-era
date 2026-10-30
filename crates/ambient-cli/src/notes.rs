@@ -38,7 +38,9 @@ pub fn run(
     stdout: &mut impl Write,
 ) -> Result<(), CliError> {
     let command = args.next().ok_or_else(|| {
-        CliError::message("usage: ambient <init|add|edit|list|search|show> <dir> ...")
+        CliError::message(
+            "usage: ambient <init|add|edit|list|search|show|device|pair|sync|card|talk|say|hear> ...",
+        )
     })?;
     match command.as_str() {
         "init" => init(args, stdout),
@@ -47,6 +49,13 @@ pub fn run(
         "list" => list(args, stdout),
         "search" => search(args, stdout),
         "show" => show(args, stdout),
+        "device" => device_cmd(args, stdout),
+        "pair" => pair_cmd(args, stdout),
+        "sync" => sync_cmd(args, stdout),
+        "card" => card_cmd(args, stdout),
+        "talk" => talk_cmd(args, stdout),
+        "say" => say_cmd(args, stdout),
+        "hear" => hear_cmd(args, stdout),
         _ => Err(CliError::message("unknown command")),
     }
 }
@@ -122,6 +131,104 @@ fn search(
     for note in Notebook::open(Path::new(&dir))?.search(&query)? {
         writeln!(stdout, "{} {}", note.id, note.title).map_err(|_| CliError::message("stdout"))?;
     }
+    Ok(())
+}
+
+fn hear_cmd(
+    args: &mut impl Iterator<Item = String>,
+    stdout: &mut impl Write,
+) -> Result<(), CliError> {
+    let dir = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient hear <dir>"))?;
+    let text = crate::sync::hear(Path::new(&dir))?;
+    write!(stdout, "{text}").map_err(|_| CliError::message("stdout"))?;
+    Ok(())
+}
+
+fn say_cmd(
+    args: &mut impl Iterator<Item = String>,
+    stdout: &mut impl Write,
+) -> Result<(), CliError> {
+    let dir = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient say <dir> <text>"))?;
+    let text = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient say <dir> <text>"))?;
+    crate::sync::say(Path::new(&dir), &text)?;
+    writeln!(stdout, "sent").map_err(|_| CliError::message("stdout"))?;
+    Ok(())
+}
+
+fn talk_cmd(
+    args: &mut impl Iterator<Item = String>,
+    stdout: &mut impl Write,
+) -> Result<(), CliError> {
+    let dir = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient talk <dir> <card>"))?;
+    let card = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient talk <dir> <card>"))?;
+    crate::sync::talk(Path::new(&dir), &card)?;
+    writeln!(stdout, "conversation").map_err(|_| CliError::message("stdout"))?;
+    Ok(())
+}
+
+fn card_cmd(
+    args: &mut impl Iterator<Item = String>,
+    stdout: &mut impl Write,
+) -> Result<(), CliError> {
+    let dir = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient card <dir>"))?;
+    let text = crate::sync::card(Path::new(&dir))?;
+    writeln!(stdout, "{text}").map_err(|_| CliError::message("stdout"))?;
+    Ok(())
+}
+
+fn sync_cmd(
+    args: &mut impl Iterator<Item = String>,
+    stdout: &mut impl Write,
+) -> Result<(), CliError> {
+    let dir = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient sync <dir> <relay-url>"))?;
+    let url = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient sync <dir> <relay-url>"))?;
+    let text = crate::sync::sync(Path::new(&dir), &url)?;
+    writeln!(stdout, "{text}").map_err(|_| CliError::message("stdout"))?;
+    Ok(())
+}
+
+fn pair_cmd(
+    args: &mut impl Iterator<Item = String>,
+    stdout: &mut impl Write,
+) -> Result<(), CliError> {
+    let dir = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient pair <dir> <offer> [label]"))?;
+    let offer = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient pair <dir> <offer> [label]"))?;
+    let label = args.next().unwrap_or_else(|| "other-computer".to_owned());
+    Notebook::open(Path::new(&dir))?.pair_device(&offer, &label)?;
+    writeln!(stdout, "paired").map_err(|_| CliError::message("stdout"))?;
+    Ok(())
+}
+
+fn device_cmd(
+    args: &mut impl Iterator<Item = String>,
+    stdout: &mut impl Write,
+) -> Result<(), CliError> {
+    let dir = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient device <dir> [label]"))?;
+    let label = args.next().unwrap_or_else(|| "other-computer".to_owned());
+    let offer = crate::sync::device(Path::new(&dir), &label)?;
+    writeln!(stdout, "{offer}").map_err(|_| CliError::message("stdout"))?;
     Ok(())
 }
 

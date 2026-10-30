@@ -2,7 +2,7 @@
 
 Stores and forwards opaque encrypted blobs between mailbox addresses. See `VISION.md` section 6.
 
-**Public API (planned):** Put blob, get blobs since cursor, delete, subscribe. Nothing application-specific.
+**Public API:** `Relay::handle_line`, `serve`, `serve_listener`. Mailboxes are in memory. The binary binds `127.0.0.1` and speaks cleartext. Spec 04 says that is not a conforming public deployment. There is no TTL, quota, or rate limit. This process does not parse blobs.
 
 ## Invariants
 
@@ -13,7 +13,7 @@ Stores and forwards opaque encrypted blobs between mailbox addresses. See `VISIO
 
 ## Dependencies
 
-May depend on: `ambient-events`, `ambient-transport`. Must not depend on any crate above it in the layering (see root `AGENTS.md`). Add external dependencies only with a stated reason, then run `just deny`.
+May depend on: `ambient-events`, `ambient-transport`. This crate currently depends on transport only, and it must not parse blobs. Must not depend on any crate above it in the layering (see root `AGENTS.md`). Add external dependencies only with a stated reason, then run `just deny`.
 
 ## Targets and review
 

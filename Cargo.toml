@@ -45,8 +45,12 @@ chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["
 getrandom = { version = "0.2.16" }
 # Linux notes window. Iced draws its own controls in a system window. Not a webview.
 iced = { version = "=0.14.0" }
-# Test-only reader for conformance vectors.
+# Test vectors, and the relay's newline-delimited JSON (docs/spec/04-relay-api.md).
 serde_json = { version = "1.0.154" }
+# HPKE base mode for a private Space (RFC 9180, ADR-0005). X25519 and ChaCha20-Poly1305 only.
+hpke = { version = "=0.15.1", default-features = false, features = ["alloc", "x25519", "chacha"] }
+# The relay speaks the WebSocket in spec 04. No TLS feature: the binary binds loopback.
+tungstenite = { version = "=0.28.0", default-features = false, features = ["handshake"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

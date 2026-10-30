@@ -98,7 +98,7 @@ The plaintext of an event blob is the wire event. Clients put one blob to each r
 
 This construction does not provide forward secrecy or post-compromise security if a recipient's long-term encryption key is stolen. [THREAT_MODEL.md](../../THREAT_MODEL.md) says so.
 
-Vector `conformance/vectors/spaces/0001-hpke-blob.json` seals the plaintext `hello` with fixed secrets. The generator checks its HPKE code against a CFRG RFC 9180 vector before writing it. The Ambient bytes are still provisional until the Rust core reproduces them.
+Vector `conformance/vectors/spaces/0001-hpke-blob.json` seals the plaintext `hello` with fixed secrets. The generator checks its HPKE code against a CFRG RFC 9180 vector before writing it. `ambient-spaces` opens that published blob and recovers `hello`. It does not re-seal the same ciphertext: the RustCrypto API derives the ephemeral key from input keying material, and the generator used a raw X25519 scalar. New seals use fresh input keying material. The published blob is the interoperability check.
 
 ## Changelog
 

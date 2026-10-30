@@ -6,7 +6,7 @@ No dates. A stage starts when the previous one is actually in use, not when the 
 
 ## Where this is
 
-Specs 01 through 04 are written. `ambient-events` reproduces the event vectors. `ambient-identity` derives the root, signs genesis, and projects device add, inbox rotation, and revoke-by-ancestor. `ambient-spaces` projects a Notes space, including a conflict between two devices. The `ambient` CLI and the Linux `ambient-desktop` window create, edit, and search notes with the network off. The window is Iced, not a webview. The notes file is sealed with ChaCha20-Poly1305. It is not SQLCipher, and the key file is not the OS keystore. HPKE to other devices and the recovery seal are not implemented. Spec 05 is intentionally unwritten.
+Specs 01 through 04 are written. `ambient-events` reproduces the event vectors. `ambient-identity` derives the root, signs genesis, and projects device add, inbox rotation, and revoke-by-ancestor. `ambient-spaces` projects a Notes space, including a conflict between two devices, and a conversation. The `ambient` CLI creates, edits, and searches notes offline, pairs a second folder, and exchanges one 1:1 through the loopback relay. The Linux window is Iced over the same notes folder and still has no socket. The notes file is sealed with ChaCha20-Poly1305. It is not SQLCipher, and the key file is not the OS keystore. HPKE seals events to other devices. The recovery seal is not implemented. The relay process binds `127.0.0.1` and speaks cleartext, so it is not a public deployment. Spec 05 is intentionally unwritten.
 
 ## v0.1 — notes and a private 1:1
 
@@ -20,8 +20,8 @@ Build in this order. Do not skip ahead.
 | 2 | Identity log | Derivation, genesis, device add, inbox rotation, revoke-by-ancestor, and the pairing-offer bytes are in. The recovery seal is not. |
 | 3 | Local store and notes | The `ambient` CLI creates, edits, and searches notes offline. The store is an encrypted file, not SQLCipher yet. |
 | 4 | Desktop app | The Linux window is Iced over the same folder as the CLI. Still no network. Not the OS keystore. |
-| 5 | Relay and a second device | Notes written on one machine show up on the other. The relay never sees plaintext |
-| 6 | 1:1 | A QR invite, a conversation Space, text sealed to per-contact keys |
+| 5 | Relay and a second device | CLI: a note sealed with HPKE shows up in a second folder. The relay stores opaque blobs. It binds `127.0.0.1` in the clear, which spec 04 says is not a public deployment. The window does not sync. |
+| 6 | 1:1 | CLI: one conversation per folder, text sealed to a per-contact key. The invite is the contact card as text, not a QR image. The window does not show chat. |
 | 7 | Devices, activity, copy | Revoke a device. See which device did what. Copy a note into a chat as text, not as a grant |
 
 **Exit.** The owner uses the notes for real work, and uses 1:1 with at least one person, including an offline gap and one restore from the recovery phrase. A green test run is not the exit.

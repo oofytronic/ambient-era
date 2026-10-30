@@ -3,9 +3,10 @@
 use std::path::Path;
 
 use ambient_events::{EventId, encode_unsigned, sign_wire, verify};
-use ambient_identity::{DeviceState, device_add_payload, project_log};
+use ambient_identity::{DeviceState, decode_pair_offer_text, device_add_payload, project_log};
 use ambient_spaces::{
-    GenesisMember, Revocation, note_put_payload, notes_genesis_payload, project_notes,
+    GenesisMember, Revocation, member_add_payload, note_put_payload, notes_genesis_payload,
+    project_notes,
 };
 use ambient_store::{read_log, write_log};
 
@@ -58,6 +59,8 @@ impl Notebook {
         let local = keys::create(dir, "this-computer")?;
         let genesis = local
             .identity
+            .as_ref()
+            .ok_or_else(|| CliError::message("could not sign genesis"))?
             .genesis_wire()
             .map_err(|_| CliError::message("could not sign genesis"))?;
         let genesis_id = verify(&genesis)
@@ -72,6 +75,8 @@ impl Notebook {
         .map_err(|_| CliError::message("could not encode device"))?;
         let add = local
             .identity
+            .as_ref()
+            .ok_or_else(|| CliError::message("could not sign device"))?
             .sign_log(Some(genesis_id), "id.device-add", &add_payload)
             .map_err(|_| CliError::message("could not sign device"))?;
         let space_payload = notes_genesis_payload(&[GenesisMember {
@@ -212,6 +217,79 @@ impl Notebook {
         Ok(())
     }
 
+    /// Authorize a device from its offer and add it to the Notes space.
+    ///
+    /// The offer is the text the other device printed. This folder must hold the root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when the offer is bad, this folder is not the owner, or the log rejects the events.
+    pub fn pair_device(&self, offer_text: &str, label: &str) -> Result<(), CliError> {
+        if self.local.identity.is_none() {
+            return Err(CliError::message(
+                "only the folder with the root can pair a device",
+            ));
+        }
+        let offer = decode_pair_offer_text(offer_text.trim())
+            .map_err(|_| CliError::message("offer rejected"))?;
+        let mut wires = load(&self.local)?;
+        let identity_wires = identity_wires(&self.local, &wires)?;
+        let head = project_log(&self.local.identity_public, &identity_wires)
+            .map_err(|_| CliError::message("identity log rejected"))?
+            .head;
+        let payload = device_add_payload(
+            &offer.signing_key,
+            &offer.encryption_key,
+            label,
+            &offer.mailbox,
+        )
+        .map_err(|_| CliError::message("label must be 1 to 32 bytes"))?;
+        let add = self
+            .local
+            .identity
+            .as_ref()
+            .ok_or_else(|| CliError::message("only the folder with the root can pair a device"))?
+            .sign_log(head, "id.device-add", &payload)
+            .map_err(|_| CliError::message("could not sign device"))?;
+        wires.push(add);
+        let view = view_notes(&self.local, &wires)?;
+        let member = ambient_spaces::GenesisMember {
+            signing_key: offer.signing_key,
+            encryption_key: offer.encryption_key,
+            role: 2,
+            mailbox: offer.mailbox,
+        };
+        let payload = member_add_payload(&member)
+            .map_err(|_| CliError::message("could not encode member"))?;
+        let prev = view.tip.get(&self.local.device.signing_key).copied();
+        wires.push(sign_device(
+            &self.local,
+            prev,
+            Some(view.space_id),
+            "space.member-add",
+            &payload,
+        )?);
+        write_log(&self.local.notes_path, &self.local.store_key, &wires)
+            .map_err(|_| CliError::message("could not write notes file"))?;
+        Ok(())
+    }
+
+    /// Current Notes-space members. Empty when this folder has no events yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when the log does not project.
+    pub fn recipients(&self) -> Result<Vec<ambient_spaces::MemberInfo>, CliError> {
+        let wires = load(&self.local)?;
+        if wires.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(view_notes(&self.local, &wires)?
+            .members
+            .into_values()
+            .collect())
+    }
+
     fn project(&self) -> Result<ambient_spaces::Projection, CliError> {
         view_notes(&self.local, &load(&self.local)?)
     }
@@ -227,6 +305,17 @@ fn summary(id: &[u8; 32], heads: &[ambient_spaces::NoteHead]) -> NoteSummary {
     }
 }
 
+fn identity_wires<'a>(local: &Local, wires: &'a [Vec<u8>]) -> Result<Vec<&'a [u8]>, CliError> {
+    let mut out = Vec::new();
+    for wire in wires {
+        let event = verify(wire).map_err(|_| CliError::message("identity log rejected"))?;
+        if event.signer == local.identity_public {
+            out.push(wire.as_slice());
+        }
+    }
+    Ok(out)
+}
+
 fn view_notes(local: &Local, wires: &[Vec<u8>]) -> Result<ambient_spaces::Projection, CliError> {
     let refs: Vec<&[u8]> = wires.iter().map(Vec::as_slice).collect();
     let identity_wires: Vec<&[u8]> = refs
@@ -235,10 +324,10 @@ fn view_notes(local: &Local, wires: &[Vec<u8>]) -> Result<ambient_spaces::Projec
         .filter(|wire| {
             verify(wire)
                 .ok()
-                .is_some_and(|event| event.signer == local.identity.signing_key)
+                .is_some_and(|event| event.signer == local.identity_public)
         })
         .collect();
-    let log = project_log(&local.identity.signing_key, &identity_wires)
+    let log = project_log(&local.identity_public, &identity_wires)
         .map_err(|_| CliError::message("identity log rejected"))?;
     let mut revoked = Vec::new();
     for (key, state) in &log.devices {
@@ -255,7 +344,7 @@ fn view_notes(local: &Local, wires: &[Vec<u8>]) -> Result<ambient_spaces::Projec
         .filter(|wire| {
             verify(wire)
                 .ok()
-                .is_some_and(|event| event.signer != local.identity.signing_key)
+                .is_some_and(|event| event.signer != local.identity_public)
         })
         .collect();
     project_notes(&space_wires, &revoked).map_err(|_| CliError::message("notes log rejected"))

@@ -40,6 +40,17 @@ pub struct NoteHead {
     pub body: String,
 }
 
+/// One current member, as the sync client needs them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MemberInfo {
+    /// X25519 key new events are sealed to.
+    pub encryption_key: [u8; 32],
+    /// Inbox mailbox.
+    pub mailbox: [u8; 32],
+    /// 1 owner, 2 writer.
+    pub role: u64,
+}
+
 /// Applied notes in one Notes space.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Projection {
@@ -49,6 +60,34 @@ pub struct Projection {
     pub tip: BTreeMap<[u8; 32], EventId>,
     /// Heads for each note id. More than one head is a conflict. Do not pick a winner.
     pub notes: BTreeMap<[u8; 32], Vec<NoteHead>>,
+    /// Current members, keyed by signing key.
+    pub members: BTreeMap<[u8; 32], MemberInfo>,
+    /// Events that were not applied.
+    pub skipped: Vec<(EventId, Skip)>,
+}
+
+/// One applied chat message. Event-id order, not arrival order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChatLine {
+    /// Event id of this `msg.put`.
+    pub event_id: EventId,
+    /// Contact signing key that sent it.
+    pub sender: [u8; 32],
+    /// Message text. A copy, not a grant.
+    pub text: String,
+}
+
+/// Applied messages in one conversation Space.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Conversation {
+    /// Event id of `space.genesis`.
+    pub space_id: EventId,
+    /// Last applied event from each signer.
+    pub tip: BTreeMap<[u8; 32], EventId>,
+    /// Current members, keyed by signing key.
+    pub members: BTreeMap<[u8; 32], MemberInfo>,
+    /// Applied messages.
+    pub messages: Vec<ChatLine>,
     /// Events that were not applied.
     pub skipped: Vec<(EventId, Skip)>,
 }
@@ -65,6 +104,7 @@ struct Item {
 #[derive(Clone)]
 struct Member {
     role: u64,
+    encryption_key: [u8; 32],
     mailbox: [u8; 32],
 }
 
@@ -78,6 +118,49 @@ struct Member {
 ///
 /// Missing genesis, a malformed payload, or a wire that does not verify.
 pub fn project_notes(wires: &[&[u8]], revoked: &[Revocation]) -> Result<Projection, SpaceError> {
+    let projected = project(wires, revoked, "notes")?;
+    Ok(Projection {
+        space_id: projected.space_id,
+        tip: projected.tip,
+        notes: projected.notes,
+        members: projected.members,
+        skipped: projected.skipped,
+    })
+}
+
+/// Project a conversation Space. `note.put` is `wrong_kind` and is not applied.
+///
+/// # Errors
+///
+/// Missing genesis, a malformed payload, a wire that does not verify, or a notes Space.
+pub fn project_conversation(
+    wires: &[&[u8]],
+    revoked: &[Revocation],
+) -> Result<Conversation, SpaceError> {
+    let projected = project(wires, revoked, "conversation")?;
+    Ok(Conversation {
+        space_id: projected.space_id,
+        tip: projected.tip,
+        members: projected.members,
+        messages: projected.messages,
+        skipped: projected.skipped,
+    })
+}
+
+struct Projected {
+    space_id: EventId,
+    tip: BTreeMap<[u8; 32], EventId>,
+    notes: BTreeMap<[u8; 32], Vec<NoteHead>>,
+    members: BTreeMap<[u8; 32], MemberInfo>,
+    messages: Vec<ChatLine>,
+    skipped: Vec<(EventId, Skip)>,
+}
+
+fn project(
+    wires: &[&[u8]],
+    revoked: &[Revocation],
+    expected: &str,
+) -> Result<Projected, SpaceError> {
     let mut items = Vec::new();
     for wire in wires {
         let event = verify(wire).map_err(SpaceError::Event)?;
@@ -118,7 +201,7 @@ pub fn project_notes(wires: &[&[u8]], revoked: &[Revocation]) -> Result<Projecti
         return Err(SpaceError::BadPayload);
     }
     let (kind, mut members) = read_genesis(&genesis.payload)?;
-    if kind != "notes" {
+    if kind != expected {
         return Err(SpaceError::WrongKind);
     }
     let Some(founder) = members.get(&genesis.signer) else {
@@ -133,35 +216,44 @@ pub fn project_notes(wires: &[&[u8]], revoked: &[Revocation]) -> Result<Projecti
     }
     let mut tip = BTreeMap::from([(genesis.signer, genesis.id)]);
     let mut notes_by_id = BTreeMap::new();
+    let mut messages = Vec::new();
     apply_ready(
         &mut by_prev,
         &mut members,
         &mut notes_by_id,
+        &mut messages,
         &mut tip,
         &mut skipped,
         &revoked_ids,
         space_id,
+        expected == "conversation",
     )?;
     for item in by_prev.into_values() {
         skipped.push((item.id, Skip::Gap));
     }
     skipped.sort_by_key(|item| item.0);
-    Ok(Projection {
+    messages.sort_by_key(|item| item.event_id);
+    Ok(Projected {
         space_id,
         tip,
         notes: heads(notes_by_id),
+        members: publish_members(&members),
+        messages,
         skipped,
     })
 }
 
+#[allow(clippy::too_many_arguments)] // One walk over the log. Splitting it would hide the order.
 fn apply_ready(
     by_prev: &mut HashMap<([u8; 32], Option<EventId>), Item>,
     members: &mut BTreeMap<[u8; 32], Member>,
     notes_by_id: &mut BTreeMap<[u8; 32], Vec<StoredNote>>,
+    messages: &mut Vec<ChatLine>,
     tip: &mut BTreeMap<[u8; 32], EventId>,
     skipped: &mut Vec<(EventId, Skip)>,
     revoked_ids: &BTreeSet<EventId>,
     space_id: EventId,
+    conversation: bool,
 ) -> Result<(), SpaceError> {
     loop {
         let mut ready = Vec::new();
@@ -189,8 +281,9 @@ fn apply_ready(
                 continue;
             }
             match item.event_type.as_str() {
-                "note.put" => apply_note(notes_by_id, members, &item, skipped)?,
-                "msg.put" => skipped.push((item.id, Skip::WrongKind)),
+                "note.put" if !conversation => apply_note(notes_by_id, members, &item, skipped)?,
+                "msg.put" if conversation => apply_message(messages, members, &item, skipped)?,
+                "note.put" | "msg.put" => skipped.push((item.id, Skip::WrongKind)),
                 "space.member-add" | "space.member-remove" | "space.inbox" => {
                     apply_membership(members, &item, skipped)?;
                 }
@@ -239,6 +332,44 @@ fn apply_note(
         parents,
     });
     Ok(())
+}
+
+fn apply_message(
+    messages: &mut Vec<ChatLine>,
+    members: &BTreeMap<[u8; 32], Member>,
+    item: &Item,
+    skipped: &mut Vec<(EventId, Skip)>,
+) -> Result<(), SpaceError> {
+    let Some(member) = members.get(&item.signer) else {
+        skipped.push((item.id, Skip::NotMember));
+        return Ok(());
+    };
+    if member.role != 1 && member.role != 2 {
+        skipped.push((item.id, Skip::NotMember));
+        return Ok(());
+    }
+    messages.push(ChatLine {
+        event_id: item.id,
+        sender: item.signer,
+        text: read_message(&item.payload)?,
+    });
+    Ok(())
+}
+
+fn publish_members(members: &BTreeMap<[u8; 32], Member>) -> BTreeMap<[u8; 32], MemberInfo> {
+    members
+        .iter()
+        .map(|(key, member)| {
+            (
+                *key,
+                MemberInfo {
+                    encryption_key: member.encryption_key,
+                    mailbox: member.mailbox,
+                    role: member.role,
+                },
+            )
+        })
+        .collect()
 }
 
 fn apply_membership(
@@ -376,23 +507,69 @@ pub struct GenesisMember {
 ///
 /// Returns [`SpaceError::BadPayload`] when a member role is not 1 or 2.
 pub fn notes_genesis_payload(members: &[GenesisMember]) -> Result<Vec<u8>, SpaceError> {
+    genesis_payload("notes", members)
+}
+
+/// Payload for `space.genesis` of a conversation Space.
+///
+/// # Errors
+///
+/// Returns [`SpaceError::BadPayload`] when a member role is not 1 or 2.
+pub fn conversation_genesis_payload(members: &[GenesisMember]) -> Result<Vec<u8>, SpaceError> {
+    genesis_payload("conversation", members)
+}
+
+/// Payload for `space.member-add`.
+///
+/// # Errors
+///
+/// Returns [`SpaceError::BadPayload`] when the role is not 1 or 2.
+pub fn member_add_payload(member: &GenesisMember) -> Result<Vec<u8>, SpaceError> {
+    if member.role != 1 && member.role != 2 {
+        return Err(SpaceError::BadPayload);
+    }
+    encode_cbor(&member_cbor(member)).map_err(SpaceError::Event)
+}
+
+/// Payload for `msg.put`. Fields 2 and 3 are null: no reply, no citation.
+///
+/// # Errors
+///
+/// Returns [`SpaceError::BadPayload`] when the text is longer than 16000 bytes.
+pub fn msg_put_payload(text: &str) -> Result<Vec<u8>, SpaceError> {
+    if text.len() > 16000 {
+        return Err(SpaceError::BadPayload);
+    }
+    encode_cbor(&Cbor::Map(vec![
+        (Cbor::Uint(1), Cbor::Text(text.to_owned())),
+        (Cbor::Uint(2), Cbor::Null),
+        (Cbor::Uint(3), Cbor::Null),
+    ]))
+    .map_err(SpaceError::Event)
+}
+
+fn genesis_payload(kind: &str, members: &[GenesisMember]) -> Result<Vec<u8>, SpaceError> {
     let mut encoded = Vec::new();
     for member in members {
         if member.role != 1 && member.role != 2 {
             return Err(SpaceError::BadPayload);
         }
-        encoded.push(Cbor::Map(vec![
-            (Cbor::Uint(1), Cbor::Bytes(member.signing_key.to_vec())),
-            (Cbor::Uint(2), Cbor::Bytes(member.encryption_key.to_vec())),
-            (Cbor::Uint(3), Cbor::Uint(member.role)),
-            (Cbor::Uint(4), Cbor::Bytes(member.mailbox.to_vec())),
-        ]));
+        encoded.push(member_cbor(member));
     }
     encode_cbor(&Cbor::Map(vec![
-        (Cbor::Uint(1), Cbor::Text("notes".to_owned())),
+        (Cbor::Uint(1), Cbor::Text(kind.to_owned())),
         (Cbor::Uint(2), Cbor::Array(encoded)),
     ]))
     .map_err(SpaceError::Event)
+}
+
+fn member_cbor(member: &GenesisMember) -> Cbor {
+    Cbor::Map(vec![
+        (Cbor::Uint(1), Cbor::Bytes(member.signing_key.to_vec())),
+        (Cbor::Uint(2), Cbor::Bytes(member.encryption_key.to_vec())),
+        (Cbor::Uint(3), Cbor::Uint(member.role)),
+        (Cbor::Uint(4), Cbor::Bytes(member.mailbox.to_vec())),
+    ])
 }
 
 /// Payload for `note.put`.
@@ -455,14 +632,35 @@ fn read_member(value: &Cbor) -> Result<([u8; 32], Member), SpaceError> {
         Some(Cbor::Uint(role)) if *role == 1 || *role == 2 => *role,
         _ => return Err(SpaceError::BadPayload),
     };
-    let _encryption = bytes32(map.get(&2).ok_or(SpaceError::BadPayload)?)?;
+    let encryption = bytes32(map.get(&2).ok_or(SpaceError::BadPayload)?)?;
     Ok((
         bytes32(map.get(&1).ok_or(SpaceError::BadPayload)?)?,
         Member {
             role,
+            encryption_key: encryption,
             mailbox: bytes32(map.get(&4).ok_or(SpaceError::BadPayload)?)?,
         },
     ))
+}
+
+fn read_message(payload: &[u8]) -> Result<String, SpaceError> {
+    let map = uint_map(&decode_owned(payload)?)?;
+    if map.len() != 3 {
+        return Err(SpaceError::BadPayload);
+    }
+    let text = match map.get(&1) {
+        Some(Cbor::Text(text)) if text.len() <= 16000 => text.clone(),
+        _ => return Err(SpaceError::BadPayload),
+    };
+    match map.get(&2) {
+        Some(Cbor::Null | Cbor::Bytes(_)) => {}
+        _ => return Err(SpaceError::BadPayload),
+    }
+    match map.get(&3) {
+        Some(Cbor::Null | Cbor::Bytes(_)) => {}
+        _ => return Err(SpaceError::BadPayload),
+    }
+    Ok(text)
 }
 
 fn read_note(payload: &[u8]) -> Result<([u8; 32], String, String, Vec<EventId>), SpaceError> {

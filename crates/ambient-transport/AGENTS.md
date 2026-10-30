@@ -2,7 +2,7 @@
 
 Moves opaque blobs between devices and relays. Transports are untrusted.
 
-**Public API (planned):** `Transport` trait (`send`, `receive`, `discover`), WebSocket implementation.
+**Public API:** newline JSON for spec 04. `Request`, `Response`, `Item`, and the encode and decode functions. No socket. A `Transport` trait waits until a second transport exists.
 
 ## Invariants
 

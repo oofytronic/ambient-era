@@ -1,6 +1,12 @@
-//! The relay: an untrusted, self-hostable mailbox server.
-//!
-//! Scaffold only: there is no behavior yet. The design is in `docs/STACK.md` section 8 and
-//! `VISION.md` section 6; the rules for working on this crate are in `AGENTS.md`.
+//! Loopback relay. Cleartext, bound to 127.0.0.1. Not a public deployment.
 
-fn main() {}
+use std::io::Write as _;
+
+fn main() {
+    let port = std::env::args().nth(1).unwrap_or_else(|| "8787".to_owned());
+    let addr = format!("127.0.0.1:{port}");
+    if let Err(err) = ambient_relay::serve(&addr) {
+        let _ = writeln!(std::io::stderr(), "{err}");
+        std::process::exit(1);
+    }
+}

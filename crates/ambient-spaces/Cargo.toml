@@ -10,6 +10,11 @@ publish.workspace = true
 [dependencies]
 ambient-events = { workspace = true }
 ambient-identity = { workspace = true }
+blake3 = { workspace = true }
+hpke = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

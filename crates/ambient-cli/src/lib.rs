@@ -11,6 +11,7 @@ mod draft;
 mod keys;
 mod notes;
 mod session;
+mod sync;
 
 pub use draft::{Draft, Shortcut, shortcut};
 pub use notes::{CliError, run};

@@ -2,7 +2,7 @@
 
 Language-neutral test vectors. They are the real specification in executable form: any implementation of the protocol (this repository's Rust core, a future independent client, a relay) must produce the expected output for every vector.
 
-**Status:** event-envelope vectors are reproduced by `ambient-events`. The identity genesis vector is reproduced by `ambient-identity`. The HPKE blob is still produced only by [tools/generate.py](tools/generate.py), which checks its HPKE code against an RFC 9180 vector before writing. That blob stays provisional until `ambient-spaces` reproduces it.
+**Status:** event-envelope vectors are reproduced by `ambient-events`. The identity genesis vector is reproduced by `ambient-identity`. `ambient-spaces` opens the published HPKE blob and recovers `hello`. It does not re-emit those ciphertext bytes. The generator still used a raw X25519 scalar, which the RustCrypto public API does not accept. See [docs/spec/03-spaces.md](../docs/spec/03-spaces.md).
 
 ## Layout
 

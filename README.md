@@ -4,7 +4,7 @@
 
 > Signal's privacy, X's surface, AnyType's ownership — with an identity you hold as a key.
 
-**Status:** Pre-0.1. An offline notes CLI and a Linux Iced window exist. No relay, no second device, no chat. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
+**Status:** Pre-0.1. The `ambient` CLI does offline notes, a second device, and one 1:1 chat through a loopback relay. The Linux window is still offline notes only. The relay binary binds `127.0.0.1` in the clear and is not a public deployment. The recovery seal is not implemented. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
 
 ---
 
@@ -100,11 +100,11 @@ The wire formats, identity log, Spaces model, and relay design are described in 
 
 ## Repository and development
 
-The Rust workspace is scaffolded: eleven crates under `crates/` (core, protocol, and relay) with no behavior yet, built behind CI, lints, and a dependency policy. Specs and conformance vectors come before the behavior they describe.
+The Rust workspace under `crates/` is what `just ci` builds. Behavior that exists: event envelopes, the identity log through revoke, notes and conversation projection, HPKE seals, the relay JSON codec, an in-memory loopback relay, the `ambient` CLI, and the Linux notes window. `ambient-sync`, `ambient-capabilities`, `ambient-docs`, `ambient-core`, and `ambient-ffi` are still scaffolds. A wire-format change still starts in the spec and the vectors, not in a crate.
 
 ```
 crates/        Rust workspace: ambient-events, -identity, -spaces, -sync, -store,
-               -transport, -capabilities, -docs, -core, -ffi, -relay
+               -transport, -capabilities, -docs, -core, -ffi, -relay, -cli, -desktop
 conformance/   language-neutral test vectors
 docs/          STACK.md, spec/, adr/, TESTING.md
 spikes/        throwaway experiments (not part of the build)

@@ -9,8 +9,10 @@ pub enum SpaceError {
     Event(EventError),
     /// Canonical CBOR that is not the payload this type defines.
     BadPayload,
-    /// `note.put` in a conversation, or `msg.put` in notes, or a kind other than notes.
+    /// `note.put` in a conversation, or `msg.put` in notes, or the wrong Space kind.
     WrongKind,
+    /// The HPKE seal or open did not succeed.
+    Seal,
 }
 
 impl fmt::Display for SpaceError {
@@ -19,6 +21,7 @@ impl fmt::Display for SpaceError {
             Self::Event(error) => write!(formatter, "{error}"),
             Self::BadPayload => formatter.write_str("bad_payload"),
             Self::WrongKind => formatter.write_str("wrong_kind"),
+            Self::Seal => formatter.write_str("seal failed"),
         }
     }
 }
