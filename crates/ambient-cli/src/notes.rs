@@ -39,7 +39,7 @@ pub fn run(
 ) -> Result<(), CliError> {
     let command = args.next().ok_or_else(|| {
         CliError::message(
-            "usage: ambient <init|add|edit|list|search|show|device|pair|sync|card|talk|say|hear> ...",
+            "usage: ambient <init|add|edit|list|search|show|device|pair|sync|card|talk|say|hear|phrase|restore> ...",
         )
     })?;
     match command.as_str() {
@@ -56,6 +56,8 @@ pub fn run(
         "talk" => talk_cmd(args, stdout),
         "say" => say_cmd(args, stdout),
         "hear" => hear_cmd(args, stdout),
+        "phrase" => phrase_cmd(args, stdout),
+        "restore" => restore_cmd(args, stdout),
         _ => Err(CliError::message("unknown command")),
     }
 }
@@ -256,4 +258,29 @@ fn read_stdin(stdin: &mut impl Read) -> Result<String, CliError> {
         .read_to_string(&mut body)
         .map_err(|_| CliError::message("could not read stdin"))?;
     Ok(body)
+}
+
+
+fn phrase_cmd(args: &mut impl Iterator<Item = String>, stdout: &mut impl Write) -> Result<(), CliError> {
+    let dir = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient phrase <dir>"))?;
+    let text = crate::recovery_phrase(Path::new(&dir))?;
+    writeln!(stdout, "{text}").map_err(|_| CliError::message("stdout"))?;
+    Ok(())
+}
+
+fn restore_cmd(args: &mut impl Iterator<Item = String>, stdout: &mut impl Write) -> Result<(), CliError> {
+    let dir = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient restore <dir> <phrase> <relay-url>"))?;
+    let phrase = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient restore <dir> <phrase> <relay-url>"))?;
+    let url = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient restore <dir> <phrase> <relay-url>"))?;
+    crate::restore_folder(Path::new(&dir), &phrase, &url)?;
+    writeln!(stdout, "restored {dir}").map_err(|_| CliError::message("stdout"))?;
+    Ok(())
 }
