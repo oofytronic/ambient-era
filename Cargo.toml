@@ -51,6 +51,7 @@ serde_json = { version = "1.0.154" }
 hpke = { version = "=0.15.1", default-features = false, features = ["alloc", "x25519", "chacha"] }
 # The relay speaks the WebSocket in spec 04. No TLS feature: the binary binds loopback.
 tungstenite = { version = "=0.28.0", default-features = false, features = ["handshake"] }
+bip39 = { version = "3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

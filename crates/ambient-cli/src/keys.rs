@@ -264,3 +264,45 @@ fn copy32(bytes: &[u8], start: usize) -> Result<[u8; 32], CliError> {
     out.copy_from_slice(slice);
     Ok(out)
 }
+
+/// The BIP39 recovery phrase for this root seed. 24 words.
+pub(crate) fn recovery_phrase(root: &[u8; 32]) -> Result<String, CliError> {
+    let mnemonic = bip39::Mnemonic::from_entropy(root)
+        .map_err(|_| CliError::message("could not encode recovery phrase"))?;
+    Ok(mnemonic.to_string())
+}
+
+/// Recover the root seed from a BIP39 phrase.
+pub(crate) fn root_from_phrase(phrase: &str) -> Result<[u8; 32], CliError> {
+    let mnemonic = bip39::Mnemonic::parse(phrase)
+        .map_err(|_| CliError::message("recovery phrase rejected"))?;
+    let entropy = mnemonic.to_entropy();
+    if entropy.len() != 32 {
+        return Err(CliError::message("recovery phrase must be 24 words"));
+    }
+    let mut root = [0_u8; 32];
+    root.copy_from_slice(entropy);
+    Ok(root)
+}
+
+pub(crate) fn store_key_from_root(root: &[u8; 32]) -> [u8; 32] {
+    store_key(root)
+}
+
+pub(crate) fn v1_bytes_for_restore(
+    root: &[u8; 32],
+    sign: &[u8; 32],
+    enc: &[u8; 32],
+    mailbox: &[u8; 32],
+    label: &str,
+) -> Result<Vec<u8>, CliError> {
+    v1_bytes(root, sign, enc, mailbox, label)
+}
+
+pub(crate) fn write_secret_pub(path: &std::path::Path, bytes: &[u8]) -> Result<(), CliError> {
+    write_secret(path, bytes)
+}
+
+pub(crate) fn copy32_pub(bytes: &[u8], start: usize) -> Result<[u8; 32], CliError> {
+    copy32(bytes, start)
+}

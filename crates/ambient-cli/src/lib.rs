@@ -90,3 +90,32 @@ pub fn chat_lines(dir: &Path) -> Result<Vec<String>, CliError> {
         .map(str::to_owned)
         .collect())
 }
+
+/// The recovery phrase for this notebook. Only the root folder has one.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when this folder does not hold the root or the phrase cannot be encoded.
+pub fn recovery_phrase(dir: &Path) -> Result<String, CliError> {
+    let local = keys::open(dir)?;
+    let Some(identity) = &local.identity else {
+        return Err(CliError::message("only the root folder has a recovery phrase"));
+    };
+    // The root is not stored in Identity; we need to re-read it.
+    // For v0.1 we re-derive from the key file.
+    let bytes = std::fs::read(&local.key_path).map_err(|_| CliError::message("missing key file"))?;
+    if bytes.get(4) != Some(&1) {
+        return Err(CliError::message("paired device has no recovery phrase"));
+    }
+    let root = keys::copy32_pub(&bytes, 5)?;
+    keys::recovery_phrase(&root)
+}
+
+/// Restore a new folder from a recovery phrase by fetching the sealed log.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when the phrase is bad or the relay has no recovery.
+pub fn restore_folder(dir: &Path, phrase: &str, url: &str) -> Result<(), CliError> {
+    sync::restore(dir, phrase, url)
+}

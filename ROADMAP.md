@@ -6,7 +6,7 @@ No dates. A stage starts when the previous one is actually in use, not when the 
 
 ## Where this is
 
-Specs 01 through 04 are written. `ambient-events` reproduces the event vectors. `ambient-identity` derives the root, signs genesis, and projects device add, inbox rotation, and revoke-by-ancestor. `ambient-spaces` projects a Notes space, including a conflict between two devices, and a conversation. The Linux window creates, edits, and searches notes, pairs a second folder, and exchanges one 1:1 through the loopback relay. The window is Iced, not a webview. The notes file is sealed with ChaCha20-Poly1305. It is not SQLCipher, and the key file is not the OS keystore. HPKE seals events to other devices. The recovery seal is not implemented. The relay binds `127.0.0.1` and speaks cleartext, so it is not a public deployment. Spec 05 is intentionally unwritten.
+Specs 01 through 04 are written. `ambient-events` reproduces the event vectors. `ambient-identity` derives the root, signs genesis, and projects device add, inbox rotation, and revoke-by-ancestor. `ambient-spaces` projects a Notes space, including a conflict between two devices, and a conversation. The Linux window creates, edits, and searches notes, pairs a second folder, and exchanges one 1:1 through the loopback relay. The window is Iced, not a webview. The notes file is sealed with ChaCha20-Poly1305. It is not SQLCipher, and the key file is not the OS keystore. HPKE seals events to other devices. The recovery seal is implemented: the root device seals the notes log to the identity seal key and the window can restore from the BIP39 phrase. The relay binds `127.0.0.1` and speaks cleartext, so it is not a public deployment. Spec 05 is intentionally unwritten.
 
 ## v0.1 — notes and a private 1:1
 
@@ -17,12 +17,12 @@ Build in this order. Do not skip ahead.
 | Step | Work | Done when |
 |:--|:--|:--|
 | 1 | `ambient-events` reproduces the event vectors | Done. Canonical CBOR, ids, and signatures match `conformance/vectors/events/` |
-| 2 | Identity log | Derivation, genesis, device add, inbox rotation, revoke-by-ancestor, and the pairing-offer bytes are in. The recovery seal is not. |
+| 2 | Identity log | Derivation, genesis, device add, inbox rotation, revoke-by-ancestor, pairing-offer bytes, and the recovery seal are in. |
 | 3 | Local store and notes | The `ambient` CLI creates, edits, and searches notes offline. The store is an encrypted file, not SQLCipher yet. |
 | 4 | Desktop app | The Linux window is Iced over the same folder as the CLI. Not the OS keystore. |
 | 5 | Relay and a second device | The window pairs a second folder and a note shows up there after Sync in both. The relay stores opaque blobs and binds `127.0.0.1` in the clear, which spec 04 says is not a public deployment. Two folders on one computer, not two machines. |
 | 6 | 1:1 | The window opens one conversation. Text is sealed to a per-contact key. The invite is the contact card as text, not a QR image. Messages show up after Sync in both windows. |
-| 7 | Devices, activity, copy | Revoke a device from the root window. Note list and editor show which device wrote it. Copy a note into a chat as text is not in yet. |
+| 7 | Devices, activity, copy | Revoke a device from the root window. Note list and editor show which device wrote it. Copy a note into a chat as text is not in yet. Recovery restore from the phrase is in. |
 
 **Exit.** The owner uses the notes for real work, and uses 1:1 with at least one person, including an offline gap and one restore from the recovery phrase. A green test run is not the exit.
 

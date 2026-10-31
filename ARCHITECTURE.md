@@ -44,7 +44,7 @@ Layering is in [AGENTS.md](AGENTS.md). Dependencies point down.
 
 ## What the code does today
 
-The CLI and the Linux window append notes into a sealed file, pair a second folder that does not hold the root, and sync those notes through `ambient-relay` on `127.0.0.1`. They can open one conversation and exchange text the same way. The window calls the client in `ambient-cli` and does not seal events itself. There is no recovery seal, no QR image, no revoke command, and no command that copies a note into a chat. The local file is not SQLCipher and has no FTS index. Search scans the decrypted notes. Two folders on one computer is not a second machine, and the cleartext relay is not a public deployment.
+The CLI and the Linux window append notes into a sealed file, pair a second folder that does not hold the root, and sync those notes through `ambient-relay` on `127.0.0.1`. They can open one conversation and exchange text the same way. The window calls the client in `ambient-cli` and does not seal events itself. There is a recovery seal, no QR image, a revoke command, and no command that copies a note into a chat. The local file is not SQLCipher and has no FTS index. Search scans the decrypted notes. Two folders on one computer is not a second machine, and the cleartext relay is not a public deployment.
 
 ## What happens to a note
 

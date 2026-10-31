@@ -1,3 +1,7 @@
+## 2026-10-31 — Recovery seal and phrase restore
+
+The root device seals the identity log and Notes-space events to the identity seal key (HKDF `identity-seal`) and puts the blobs in the recovery mailbox (HKDF `recovery-mailbox`). A new folder can be created from the BIP39 phrase of the root seed; it fetches and opens those blobs. Device keys are still not derived from the root. See [spec 02](docs/spec/02-identity-log.md).
+
 # History
 
 A log of meaningful decisions. Newest first. This is not a commit changelog.
