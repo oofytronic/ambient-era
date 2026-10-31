@@ -281,7 +281,7 @@ pub(crate) fn root_from_phrase(phrase: &str) -> Result<[u8; 32], CliError> {
         return Err(CliError::message("recovery phrase must be 24 words"));
     }
     let mut root = [0_u8; 32];
-    root.copy_from_slice(entropy);
+    root.copy_from_slice(&entropy);
     Ok(root)
 }
 

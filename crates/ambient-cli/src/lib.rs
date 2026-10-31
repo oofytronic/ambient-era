@@ -18,7 +18,7 @@ mod sync;
 
 pub use draft::{Draft, Shortcut, shortcut};
 pub use notes::{CliError, run};
-pub use session::{DeviceLine, NoteSummary, Notebook, ShownHead, ShownNote};
+pub use session::{NoteSummary, Notebook, ShownHead, ShownNote};
 
 /// Loopback relay the window starts. Cleartext. Not a public deployment.
 pub const LOOPBACK_URL: &str = "ws://127.0.0.1:8787";
@@ -98,7 +98,7 @@ pub fn chat_lines(dir: &Path) -> Result<Vec<String>, CliError> {
 /// Returns [`CliError`] when this folder does not hold the root or the phrase cannot be encoded.
 pub fn recovery_phrase(dir: &Path) -> Result<String, CliError> {
     let local = keys::open(dir)?;
-    let Some(identity) = &local.identity else {
+    let Some(_identity) = &local.identity else {
         return Err(CliError::message("only the root folder has a recovery phrase"));
     };
     // The root is not stored in Identity; we need to re-read it.
