@@ -42,6 +42,8 @@ struct App {
     my_card: String,
     their_card: String,
     relay_ready: bool,
+    recovery_phrase: String,
+    restore_phrase: String,
 }
 
 #[derive(Clone, Debug)]
@@ -64,6 +66,10 @@ enum Message {
     StartConversation,
     DraftChat(String),
     SendChat,
+    ShowPhrase,
+    CopyPhrase,
+    RestorePhraseChanged(String),
+    StartRestore,
 }
 
 impl App {
@@ -88,6 +94,8 @@ impl App {
             my_card: String::new(),
             their_card: String::new(),
             relay_ready: false,
+            recovery_phrase: String::new(),
+            restore_phrase: String::new(),
         };
         match open_notebook(&app.dir) {
             Ok(book) => {
@@ -187,6 +195,19 @@ impl App {
             }
             Message::SendChat => {
                 self.send_chat();
+                Task::none()
+            }
+            Message::ShowPhrase => {
+                self.show_phrase();
+                Task::none()
+            }
+            Message::CopyPhrase => self.copy_phrase(),
+            Message::RestorePhraseChanged(phrase) => {
+                self.restore_phrase = phrase;
+                Task::none()
+            }
+            Message::StartRestore => {
+                self.start_restore();
                 Task::none()
             }
         }
@@ -353,6 +374,30 @@ impl App {
                 button(text("Open the other person"))
                     .width(Fill)
                     .on_press(Message::OpenPerson),
+            );
+            panel = panel.push(text("4. Recovery").size(16));
+            panel = panel.push(text("Show the phrase, then restore into a new folder on this computer.").size(12));
+            panel = panel.push(
+                button(text("Show recovery phrase"))
+                    .width(Fill)
+                    .on_press(Message::ShowPhrase),
+            );
+            if !self.recovery_phrase.is_empty() {
+                panel = panel.push(text(&self.recovery_phrase).size(12));
+                panel = panel.push(
+                    button(text("Copy phrase"))
+                        .width(Fill)
+                        .on_press(Message::CopyPhrase),
+                );
+            }
+            panel = panel.push(
+                text_input("Paste phrase to restore", &self.restore_phrase)
+                    .on_input(Message::RestorePhraseChanged),
+            );
+            panel = panel.push(
+                button(text("Restore into new folder"))
+                    .width(Fill)
+                    .on_press(Message::StartRestore),
             );
         }
         panel = panel.push(text("3. Conversation").size(16));
@@ -601,6 +646,48 @@ impl App {
         }
     }
 }
+
+
+    fn show_phrase(&mut self) {
+        match ambient_cli::recovery_phrase(&self.dir) {
+            Ok(phrase) => {
+                self.recovery_phrase = phrase;
+                self.say("Recovery phrase shown. Copy it and store it offline.");
+            }
+            Err(err) => self.message = err.to_string(),
+        }
+    }
+
+    fn copy_phrase(&mut self) -> Task<Message> {
+        if self.recovery_phrase.is_empty() {
+            self.say("Show the phrase first.");
+            return Task::none();
+        }
+        self.say("Phrase copied.");
+        clipboard::write(self.recovery_phrase.clone())
+    }
+
+    fn start_restore(&mut self) {
+        let phrase = self.restore_phrase.trim();
+        if phrase.is_empty() {
+            self.say("Paste the recovery phrase first.");
+            return;
+        }
+        let path = sibling(&self.dir, "-restored");
+        if path.join("key").exists() {
+            self.say("Restored folder already exists. Open it separately or delete it first.");
+            return;
+        }
+        match ambient_cli::restore_folder(&path, phrase, ambient_cli::LOOPBACK_URL) {
+            Ok(()) => {
+                self.spawn_at(
+                    &path,
+                    "Restored. That window holds the root. The notes from the sealed log should be there.",
+                );
+            }
+            Err(err) => self.message = err.to_string(),
+        }
+    }
 
 fn sibling(dir: &Path, suffix: &str) -> PathBuf {
     let name = dir
