@@ -59,6 +59,19 @@ pub fn contact_card(dir: &Path) -> Result<String, CliError> {
     sync::card(dir)
 }
 
+/// A shareable link for this folder's contact card.
+///
+/// The link is `ambient://contact/` followed by the same base64url the card uses.
+/// Scanning a QR of this link, or pasting the link, starts a conversation the same way the raw card does.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when the card cannot be read.
+pub fn contact_link(dir: &Path) -> Result<String, CliError> {
+    let card = sync::card(dir)?;
+    Ok(format!("ambient://contact/{card}"))
+}
+
 /// Open the one conversation in this folder, using the other person's card.
 ///
 /// # Errors

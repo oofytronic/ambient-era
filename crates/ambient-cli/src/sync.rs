@@ -44,8 +44,12 @@ pub(crate) fn card(dir: &Path) -> Result<String, CliError> {
 pub(crate) fn talk(dir: &Path, card_text: &str) -> Result<(), CliError> {
     let _ = Notebook::open(dir)?;
     let (ours, _) = load_or_create_card(dir)?;
+    let trimmed = card_text.trim();
+    let offer_text = trimmed
+        .strip_prefix("ambient://contact/")
+        .unwrap_or(trimmed);
     let theirs =
-        decode_pair_offer_text(card_text.trim()).map_err(|_| CliError::message("card rejected"))?;
+        decode_pair_offer_text(offer_text).map_err(|_| CliError::message("card rejected"))?;
     let path = dir.join("chats");
     let local = keys::open(dir)?;
     let mut wires = read_wires(&path, &local.store_key)?;

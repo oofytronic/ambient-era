@@ -44,11 +44,11 @@ Layering is in [AGENTS.md](AGENTS.md). Dependencies point down.
 
 ## What the code does today
 
-The CLI and the Linux window append notes into a sealed file, pair a second folder that does not hold the root, and sync those notes through `ambient-relay` on `127.0.0.1`. They can open one conversation and exchange text the same way. The window calls the client in `ambient-cli` and does not seal events itself. There is a recovery seal, no QR image, a revoke command, and no command that copies a note into a chat. The local file is not SQLCipher and has no FTS index. Search scans the decrypted notes. Two folders on one computer is not a second machine, and the cleartext relay is not a public deployment.
+The CLI and the Linux window append notes into a sealed file, pair a second folder that does not hold the root, and sync those notes through `ambient-relay` on `127.0.0.1`. They can open one conversation and exchange text the same way. The window calls the client in `ambient-cli` and does not seal events itself. There is a recovery seal, a contact invite as a link or a QR, a revoke command, and a command that copies a note into a chat. The local file is not SQLCipher and has no FTS index. Search scans the decrypted notes. Two folders on one computer is not a second machine, and the cleartext relay is not a public deployment.
 
 ## What happens to a note
 
-This is the path the spec requires. The CLI and the window do steps 1, 3, and 4. They do not write the recovery copy below. Step 2 is a sealed file and a scan, not SQLCipher or FTS.
+This is the path the spec requires. The CLI and the window do steps 1, 3, and 4. They write the recovery copy below. The window can show the phrase and restore from it. Step 2 is a sealed file and a scan, not SQLCipher or FTS.
 
 1. The device appends a `note.put` event, signed by that device's key, linked to that device's previous event.
 2. The local database projects it, and FTS indexes the plaintext. The database file is encrypted. The index never goes to the relay.

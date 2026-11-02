@@ -4,6 +4,10 @@ The root device seals the identity log and Notes-space events to the identity se
 
 # History
 
+## 2026-11-01 — contact invite is a link or a QR
+
+The notes window shows a shareable `ambient://contact/` link and a QR of that link. Pasting the link or the raw card starts a conversation. A selected note can be copied into the chat as text. The recovery phrase and restore remain in the window.
+
 A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.

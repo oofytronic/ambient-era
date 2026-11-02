@@ -44,7 +44,7 @@ chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["
 # OS randomness for the CLI and the desktop window. Protocol crates do not depend on it.
 getrandom = { version = "0.2.16" }
 # Linux notes window. Iced draws its own controls in a system window. Not a webview.
-iced = { version = "=0.14.0" }
+iced = { version = "=0.14.0", features = ["image"] }
 # Test vectors, and the relay's newline-delimited JSON (docs/spec/04-relay-api.md).
 serde_json = { version = "1.0.154" }
 # HPKE base mode for a private Space (RFC 9180, ADR-0005). X25519 and ChaCha20-Poly1305 only.
@@ -52,6 +52,10 @@ hpke = { version = "=0.15.1", default-features = false, features = ["alloc", "x2
 # The relay speaks the WebSocket in spec 04. No TLS feature: the binary binds loopback.
 tungstenite = { version = "=0.28.0", default-features = false, features = ["handshake"] }
 bip39 = { version = "3.0.0", default-features = false, features = ["alloc", "zeroize"] }
+# QR for contact invites in the notes window. Pure Rust, no network.
+qrcode = { version = "0.14.1", default-features = false, features = ["image"] }
+# PNG for the QR image the window shows. Minimal features.
+image = { version = "0.25.6" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

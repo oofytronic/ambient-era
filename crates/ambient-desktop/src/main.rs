@@ -10,8 +10,12 @@ use std::path::{Path, PathBuf};
 use ambient_cli::{Draft, NoteSummary, Notebook};
 use iced::clipboard;
 use iced::keyboard::Key;
-use iced::widget::{button, column, row, scrollable, text, text_editor, text_input};
+use iced::widget::{button, column, container, row, scrollable, text, text_editor, text_input};
+use iced::widget::image as iced_image;
 use iced::{Element, Fill, Task, Theme};
+use qrcode::QrCode;
+use image::ImageEncoder;
+use std::io::Cursor;
 
 fn main() -> iced::Result {
     iced::application(App::boot, App::update, App::view)
@@ -44,6 +48,9 @@ struct App {
     relay_ready: bool,
     recovery_phrase: String,
     restore_phrase: String,
+    contact_link: String,
+    show_qr: bool,
+    qr_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +77,9 @@ enum Message {
     CopyPhrase,
     RestorePhraseChanged(String),
     StartRestore,
+    CopyLink,
+    ToggleQr,
+    SendNoteToChat,
 }
 
 impl App {
@@ -96,6 +106,9 @@ impl App {
             relay_ready: false,
             recovery_phrase: String::new(),
             restore_phrase: String::new(),
+            contact_link: String::new(),
+            show_qr: false,
+            qr_bytes: None,
         };
         match open_notebook(&app.dir) {
             Ok(book) => {
@@ -105,6 +118,9 @@ impl App {
                 app.reload_chat();
                 if let Ok(card) = ambient_cli::contact_card(&app.dir) {
                     app.my_card = card;
+                }
+                if let Ok(link) = ambient_cli::contact_link(&app.dir) {
+                    app.contact_link = link;
                 }
                 if paired && app.notes.is_empty() {
                     app.say("Paired device. It does not hold the root. Press Sync after the first window has synced.");
@@ -210,6 +226,15 @@ impl App {
                 self.start_restore();
                 Task::none()
             }
+            Message::CopyLink => self.copy_link(),
+            Message::ToggleQr => {
+                self.toggle_qr();
+                Task::none()
+            }
+            Message::SendNoteToChat => {
+                self.send_note_to_chat();
+                Task::none()
+            }
         }
     }
 
@@ -309,10 +334,19 @@ impl App {
                 .on_action(Message::BodyEdited)
                 .key_binding(binding),
         );
+        let mut actions = row![
+            button(text("Save")).on_press(Message::Save),
+        ]
+        .spacing(8);
+        if self.selected.is_some() {
+            actions = actions.push(
+                button(text("Send to chat")).on_press(Message::SendNoteToChat),
+            );
+        }
         body = body.push(
             row![
-                button(text("Save")).on_press(Message::Save),
-                text("Ctrl+S saves. Ctrl+N is a new note. The key file stays in this folder.")
+                actions,
+                text("Ctrl+S saves. Ctrl+N is a new note. Send to chat copies the note text into the conversation.")
                     .size(12),
             ]
             .spacing(16),
@@ -321,14 +355,21 @@ impl App {
     }
 
     fn chat_pane(&self) -> Element<'_, Message> {
-        let mut lines = column![].spacing(8);
+        let mut lines = column![].spacing(10);
         if self.chat.is_empty() {
             lines = lines.push(text(
                 "No messages yet. Start the conversation from the panel, then Sync both windows.",
             ));
         }
         for line in &self.chat {
-            lines = lines.push(text(line));
+            lines = lines.push(
+                container(text(line))
+                    .padding(8)
+                    .style(|_theme| container::Style {
+                        background: Some(iced::Background::Color(iced::Color::from_rgb(0.15, 0.15, 0.15))),
+                        ..Default::default()
+                    }),
+            );
         }
         column![
             scrollable(lines).height(Fill),
@@ -401,17 +442,32 @@ impl App {
             );
         }
         panel = panel.push(text("3. Conversation").size(16));
-        panel = panel.push(text("Copy your card in the other person's window and paste it below. A card is not a device offer. Only one window presses Start conversation. Then Sync both, open Chat, and send.").size(12));
-        panel = panel.push(text("Your card").size(12));
-        panel = panel.push(text_input("Your card", &self.my_card).on_input(Message::MyCardChanged));
+        panel = panel.push(text("Share the link or the QR. A link is for text. A QR is for a person or device nearby. Paste their link or card below. Only one window presses Start conversation. Then Sync both.").size(12));
+        panel = panel.push(text("Your invite").size(12));
+        panel = panel.push(text(&self.contact_link).size(11));
         panel = panel.push(
-            button(text("Copy card"))
-                .width(Fill)
-                .on_press(Message::CopyCard),
+            row![
+                button(text("Copy link"))
+                    .width(Fill)
+                    .on_press(Message::CopyLink),
+                button(text(if self.show_qr { "Hide QR" } else { "Show QR" }))
+                    .width(Fill)
+                    .on_press(Message::ToggleQr),
+            ]
+            .spacing(8),
         );
-        panel = panel.push(text("Their card").size(12));
+        if self.show_qr {
+            if let Some(bytes) = &self.qr_bytes {
+                panel = panel.push(
+                    iced_image::Image::new(iced_image::Handle::from_bytes(bytes.clone()))
+                        .width(200)
+                        .height(200),
+                );
+            }
+        }
+        panel = panel.push(text("Their link or card").size(12));
         panel = panel.push(
-            text_input("Paste their card", &self.their_card).on_input(Message::TheirCardChanged),
+            text_input("Paste their link or card", &self.their_card).on_input(Message::TheirCardChanged),
         );
         panel = panel.push(
             button(text("Start conversation"))
@@ -645,7 +701,6 @@ impl App {
             Err(err) => self.message = format!("could not open another window: {err}"),
         }
     }
-}
 
 
     fn show_phrase(&mut self) {
@@ -689,6 +744,61 @@ impl App {
         }
     }
 
+
+    fn copy_link(&mut self) -> Task<Message> {
+        if self.contact_link.is_empty() {
+            self.say("No invite link yet.");
+            return Task::none();
+        }
+        self.say("Invite link copied. Send it by text.");
+        clipboard::write(self.contact_link.clone())
+    }
+
+    fn toggle_qr(&mut self) {
+        self.show_qr = !self.show_qr;
+        if self.show_qr && self.qr_bytes.is_none() {
+            match generate_qr(&self.contact_link) {
+                Ok(bytes) => self.qr_bytes = Some(bytes),
+                Err(err) => {
+                    self.message = err;
+                    self.show_qr = false;
+                }
+            }
+        }
+    }
+
+    fn send_note_to_chat(&mut self) {
+        let Some(id) = self.selected.clone() else {
+            self.say("Select a note first.");
+            return;
+        };
+        let Some(book) = self.notebook.as_ref() else {
+            return;
+        };
+        match book.show(&id) {
+            Ok(note) => {
+                let draft = Draft::from_note(&note);
+                let mut text = String::new();
+                if !draft.title.is_empty() {
+                    text.push_str(&draft.title);
+                    text.push_str("\n\n");
+                }
+                text.push_str(&draft.body);
+                match ambient_cli::send_chat(&self.dir, &text) {
+                    Ok(()) => {
+                        self.show_chat = true;
+                        self.say("Note copied into the chat. Press Sync so the other window sees it.");
+                        self.reload_chat();
+                    }
+                    Err(err) => self.message = err.to_string(),
+                }
+            }
+            Err(err) => self.message = err.to_string(),
+        }
+    }
+
+}
+
 fn sibling(dir: &Path, suffix: &str) -> PathBuf {
     let name = dir
         .file_name()
@@ -720,4 +830,28 @@ fn binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>
         (Some("n"), true) => Some(text_editor::Binding::Custom(Message::NewNote)),
         _ => text_editor::Binding::from_key_press(press),
     }
+}
+
+
+fn generate_qr(data: &str) -> Result<Vec<u8>, String> {
+    if data.is_empty() {
+        return Err("no data for QR".to_owned());
+    }
+    let code = QrCode::new(data.as_bytes()).map_err(|_| "could not make QR")?;
+    let img = code
+        .render::<::image::Luma<u8>>()
+        .min_dimensions(200, 200)
+        .build();
+    let mut buf = Vec::new();
+    let mut cursor = Cursor::new(&mut buf);
+    let encoder = ::image::codecs::png::PngEncoder::new(&mut cursor);
+    encoder
+        .write_image(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            ::image::ExtendedColorType::L8,
+        )
+        .map_err(|_| "could not encode QR")?;
+    Ok(buf)
 }

@@ -4,7 +4,7 @@
 
 > Signal's privacy, X's surface, AnyType's ownership — with an identity you hold as a key.
 
-**Status:** Pre-0.1. The Linux window does notes, a second folder, one 1:1 through a loopback relay, device revoke from the root window, and per-note writer labels. The relay is cleartext on `127.0.0.1` and is not a public deployment. The recovery seal is implemented. Restore from the BIP39 phrase works through the CLI. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
+**Status:** Pre-0.1. The Linux window does notes, a second folder, one 1:1 through a loopback relay, device revoke from the root window, and per-note writer labels. The relay is cleartext on `127.0.0.1` and is not a public deployment. The recovery seal is implemented. The window shows the BIP39 phrase and can restore from it. Contact invites are a link or a QR. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
 
 ---
 
@@ -53,7 +53,7 @@ v0.1 is **not** an everything app, and it does not run an agent. It is the owner
 1. Create an identity. A passkey unlocks it. The recovery phrase is the backup.
 2. Write notes in one Notes space. They work with no network.
 3. Add the owner's other computer. Notes sync through a relay the owner runs.
-4. Add one contact by QR code and chat. The chat is a Space of two.
+4. Add one contact by link or QR and chat. The chat is a Space of two.
 
 No groups, no feed, no P2P, no phone push yet. The relay is untrusted and self-hostable. What "encrypted" means, and what it does not mean, is [THREAT_MODEL.md](THREAT_MODEL.md).
 
