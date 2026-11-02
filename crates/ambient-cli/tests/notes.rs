@@ -19,6 +19,10 @@ fn create_edit_and_search_offline() -> Result<(), String> {
     if !found.contains(id.trim()) {
         return Err("search missed the body".to_owned());
     }
+    let index = std::fs::read(dir.join("search.db")).map_err(|err| err.to_string())?;
+    if index.windows(b"milk".len()).any(|window| window == b"milk") {
+        return Err("search index stored the note in the clear".to_owned());
+    }
     run_ok(&["edit", &path, id.trim(), "Market"], "buy oats")?;
     let shown = run_ok(&["show", &path, id.trim()], "")?;
     if shown.trim() != "buy oats" {

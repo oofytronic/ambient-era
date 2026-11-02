@@ -14,6 +14,18 @@ v0.1 is a desktop daily driver for one person:
 
 v0.1 does not include groups beyond a 1:1, public Spaces, phone push, Tor, payments, a CRDT library, or a running agent. Do not scaffold those "so they exist." Reserved names in the specs are rejected on purpose.
 
+## One primitive
+
+A Space is the only membership model: a membership list plus the merge of its members' signed logs, sealed with HPKE to current member keys when the Space is private.
+
+Anything new is one of these, and not a third mechanism:
+
+- A Space of this same kind (a notebook is the owner's devices, a 1:1 is two members, a later group is N members, a later creation is its own Space).
+- A capability grant on a Space (narrowed, expiring, revocable access). That grant is v0.4, not a new protocol invented beside Spaces.
+- A copy. Putting note text into a chat copies the Markdown into a `msg.put`. The contact does not join the Notes space. The citation grants no key and no later edits.
+
+Do not add a per-share Space type, a second access list, or a "deleted everywhere" promise. Revocation stops future seals. It does not pull back plaintext a member already opened. See [THREAT_MODEL.md](THREAT_MODEL.md).
+
 ## Larger project, not now
 
 | Later | What it is | Why it waits |
@@ -44,11 +56,11 @@ Layering is in [AGENTS.md](AGENTS.md). Dependencies point down.
 
 ## What the code does today
 
-The CLI and the Linux window append notes into a sealed file, pair a second folder that does not hold the root, and sync those notes through `ambient-relay` on `127.0.0.1`. They can open one conversation and exchange text the same way. The window calls the client in `ambient-cli` and does not seal events itself. There is a recovery seal, a contact invite as a link or a QR, a revoke command, and a command that copies a note into a chat. The local file is not SQLCipher and has no FTS index. Search scans the decrypted notes. Two folders on one computer is not a second machine, and the cleartext relay is not a public deployment.
+The CLI and the Linux window append notes into a sealed file, pair a second folder that does not hold the root, and sync those notes through `ambient-relay` on `127.0.0.1`. They can open one conversation and exchange text the same way. The window calls the client in `ambient-cli` and does not seal events itself. There is a recovery seal, a contact invite as a link or a QR, a revoke command, and a command that copies a note into a chat. Message events carry the advisory unix time from the event envelope. The key file can be wrapped with a passphrase; that passphrase is not a platform passkey. Search uses a SQLCipher FTS5 index next to the sealed log. The log is still the source of truth, and `ambient-store` is still not SQLCipher. Two folders on one computer is not a second machine, and the cleartext relay is not a public deployment.
 
 ## What happens to a note
 
-This is the path the spec requires. The CLI and the window do steps 1, 3, and 4. They write the recovery copy below. The window can show the phrase and restore from it. Step 2 is a sealed file and a scan, not SQLCipher or FTS.
+This is the path the spec requires. The CLI and the window do steps 1, 3, and 4. They write the recovery copy below. The window can show the phrase and restore from it. The sealed file is still the log. The native client also projects that log into a SQLCipher FTS5 index. `ambient-store` itself is not SQLCipher.
 
 1. The device appends a `note.put` event, signed by that device's key, linked to that device's previous event.
 2. The local database projects it, and FTS indexes the plaintext. The database file is encrypted. The index never goes to the relay.

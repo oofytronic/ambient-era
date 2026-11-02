@@ -57,6 +57,7 @@ The relay never depends on the core, the store, or anything that holds a user's 
 - **Do not weaken checks.** Never disable, skip, or loosen a test, lint, or CI job to get green. Fix the cause. If a check is wrong, say so and propose the change separately.
 - **No telemetry, no user data in logs.** Ever.
 - **Honest claims.** Do not write docs, UI copy, or comments claiming a property the code does not yet provide (anonymity, forward secrecy, unrecoverable deletion, and so on). See [THREAT_MODEL.md](THREAT_MODEL.md).
+- **One primitive.** New objects — notes, chats, creations, files, agent context — are either a Space of this same kind or a capability grant on one. Do not add a second membership model, a temporary Space type with its own rules, or a sharing protocol that is neither a Space nor a grant. Copying text into a message is a copy, not membership. Closing or revoking a share stops future events. It does not erase plaintext a recipient already opened.
 - **Unsure about a security-relevant choice?** Stop and ask rather than guess.
 
 ## Conventions

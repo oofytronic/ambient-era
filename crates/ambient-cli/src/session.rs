@@ -120,7 +120,11 @@ impl Notebook {
             .collect())
     }
 
-    /// Notes whose title or body contains `query`. The match is case-sensitive.
+    /// Notes matching `query`.
+    ///
+    /// Uses the SQLCipher FTS5 index when it opens. Words are matched
+    /// case-insensitively. If the index cannot be built, falls back to a
+    /// case-sensitive scan of the projection.
     ///
     /// # Errors
     ///
@@ -133,16 +137,33 @@ impl Notebook {
             return Ok(Vec::new());
         }
         let view = self.project()?;
-        let mut found = Vec::new();
+        let Some(dir) = self.local.key_path.parent() else {
+            return Ok(search_scan(&view, query));
+        };
+        let mut rows = Vec::new();
         for (id, heads) in &view.notes {
-            if heads
-                .iter()
-                .any(|head| head.title.contains(query) || head.body.contains(query))
-            {
-                found.push(summary(id, heads));
+            let mut title = String::new();
+            let mut body = String::new();
+            for head in heads {
+                title.push_str(&head.title);
+                title.push('\n');
+                body.push_str(&head.body);
+                body.push('\n');
             }
+            rows.push((hex(id), title, body));
         }
-        Ok(found)
+        match crate::index::match_ids(dir, &self.local.store_key, &rows, query) {
+            Ok(ids) => {
+                let wanted: std::collections::BTreeSet<String> = ids.into_iter().collect();
+                Ok(view
+                    .notes
+                    .iter()
+                    .filter(|(id, _)| wanted.contains(&hex(*id)))
+                    .map(|(id, heads)| summary(id, heads))
+                    .collect())
+            }
+            Err(_) => Ok(search_scan(&view, query)),
+        }
     }
 
     /// Open one note, including every conflicting head.
@@ -308,6 +329,19 @@ impl Notebook {
     fn project(&self) -> Result<ambient_spaces::Projection, CliError> {
         view_notes(&self.local, &load(&self.local)?)
     }
+}
+
+fn search_scan(view: &ambient_spaces::Projection, query: &str) -> Vec<NoteSummary> {
+    let mut found = Vec::new();
+    for (id, heads) in &view.notes {
+        if heads
+            .iter()
+            .any(|head| head.title.contains(query) || head.body.contains(query))
+        {
+            found.push(summary(id, heads));
+        }
+    }
+    found
 }
 
 fn summary(id: &[u8; 32], heads: &[ambient_spaces::NoteHead]) -> NoteSummary {

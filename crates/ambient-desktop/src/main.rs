@@ -51,6 +51,7 @@ struct App {
     contact_link: String,
     show_qr: bool,
     qr_bytes: Option<Vec<u8>>,
+    unlock_input: String,
 }
 
 #[derive(Clone, Debug)]
@@ -80,6 +81,8 @@ enum Message {
     CopyLink,
     ToggleQr,
     SendNoteToChat,
+    UnlockChanged(String),
+    SubmitUnlock,
 }
 
 impl App {
@@ -109,6 +112,7 @@ impl App {
             contact_link: String::new(),
             show_qr: false,
             qr_bytes: None,
+            unlock_input: String::new(),
         };
         match open_notebook(&app.dir) {
             Ok(book) => {
@@ -140,6 +144,7 @@ impl App {
         format!("Ambient — {} ({role})", self.dir.display())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::QueryChanged(query) => {
@@ -235,6 +240,14 @@ impl App {
                 self.send_note_to_chat();
                 Task::none()
             }
+            Message::UnlockChanged(text) => {
+                self.unlock_input = text;
+                Task::none()
+            }
+            Message::SubmitUnlock => {
+                self.submit_unlock();
+                Task::none()
+            }
         }
     }
 
@@ -291,6 +304,21 @@ impl App {
         .spacing(12)
         .width(Fill)
         .height(Fill);
+        if self.open_error == "this folder is locked" {
+            return column![
+                text("This folder is locked").size(22),
+                text("The key file is wrapped. The passphrase is not the root, not the recovery phrase, and not a platform passkey. This window has no WebAuthn API, so the passphrase is the local unlock.").size(12),
+                text_input("Passphrase", &self.unlock_input)
+                    .on_input(Message::UnlockChanged)
+                    .on_submit(Message::SubmitUnlock)
+                    .secure(true),
+                button(text("Unlock")).on_press(Message::SubmitUnlock),
+                text(self.message.as_str()),
+            ]
+            .spacing(12)
+            .padding(24)
+            .into();
+        }
         if !self.open_error.is_empty() {
             body = body.push(text(format!(
                 "Could not open this folder. {}",
@@ -400,6 +428,14 @@ impl App {
                 .width(Fill)
                 .on_press(Message::StartRelay),
             button(text("Sync")).width(Fill).on_press(Message::Sync),
+            text("Unlock").size(16),
+            text("Wraps the key file with a passphrase. Not the root, not the recovery phrase, and not a platform passkey.").size(12),
+            text_input("Passphrase", &self.unlock_input)
+                .on_input(Message::UnlockChanged)
+                .secure(true),
+            button(text(if self.open_error == "this folder is locked" { "Unlock" } else { "Wrap key file" }))
+                .width(Fill)
+                .on_press(Message::SubmitUnlock),
             text("2. Second device").size(16),
             text("Save a note here. Open the paired window. Press Sync in both. That folder does not hold the root.").size(12),
         ]
@@ -792,6 +828,42 @@ impl App {
                     }
                     Err(err) => self.message = err.to_string(),
                 }
+            }
+            Err(err) => self.message = err.to_string(),
+        }
+    }
+
+    fn submit_unlock(&mut self) {
+        let passphrase = self.unlock_input.trim().to_owned();
+        if self.open_error == "this folder is locked" {
+            match ambient_cli::unlock_folder(&self.dir, &passphrase) {
+                Ok(()) => {
+                    self.unlock_input.clear();
+                    self.open_error.clear();
+                    match Notebook::open(&self.dir) {
+                        Ok(book) => {
+                            self.notebook = Some(book);
+                            self.reload();
+                            self.reload_chat();
+                            if let Ok(card) = ambient_cli::contact_card(&self.dir) {
+                                self.my_card = card;
+                            }
+                            if let Ok(link) = ambient_cli::contact_link(&self.dir) {
+                                self.contact_link = link;
+                            }
+                            self.say("Unlocked for this run. The key file on disk stays wrapped.");
+                        }
+                        Err(err) => self.open_error = err.to_string(),
+                    }
+                }
+                Err(err) => self.message = err.to_string(),
+            }
+            return;
+        }
+        match ambient_cli::set_folder_unlock(&self.dir, &passphrase) {
+            Ok(()) => {
+                self.unlock_input.clear();
+                self.say("Key file wrapped. The passphrase is not the root and not the recovery phrase.");
             }
             Err(err) => self.message = err.to_string(),
         }

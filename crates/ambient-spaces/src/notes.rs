@@ -75,6 +75,8 @@ pub struct ChatLine {
     pub sender: [u8; 32],
     /// Message text. A copy, not a grant.
     pub text: String,
+    /// Advisory unix milliseconds from the envelope. Not an order.
+    pub unix_ms: Option<u64>,
 }
 
 /// Applied messages in one conversation Space.
@@ -99,6 +101,7 @@ struct Item {
     space: Option<EventId>,
     event_type: String,
     payload: Vec<u8>,
+    unix_ms: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -171,6 +174,7 @@ fn project(
             space: event.space,
             event_type: event.event_type,
             payload: event.payload,
+            unix_ms: event.unix_ms,
         });
     }
     let (ready, mut skipped) = resolve_forks(&items);
@@ -352,6 +356,7 @@ fn apply_message(
         event_id: item.id,
         sender: item.signer,
         text: read_message(&item.payload)?,
+        unix_ms: item.unix_ms,
     });
     Ok(())
 }
@@ -455,6 +460,7 @@ fn resolve_forks(items: &[Item]) -> (Vec<Item>, Vec<(EventId, Skip)>) {
                 space: item.space,
                 event_type: item.event_type.clone(),
                 payload: item.payload.clone(),
+                unix_ms: item.unix_ms,
             });
     }
     let mut ready = Vec::new();

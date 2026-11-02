@@ -74,7 +74,7 @@ pub(crate) fn talk(dir: &Path, card_text: &str) -> Result<(), CliError> {
         },
     ])
     .map_err(|_| CliError::message("could not encode conversation"))?;
-    wires.push(sign_as(&ours, None, None, "space.genesis", &payload)?);
+    wires.push(sign_as(&ours, None, None, None, "space.genesis", &payload)?);
     write_log(&path, &local.store_key, &wires)
         .map_err(|_| CliError::message("could not write chats"))?;
     Ok(())
@@ -92,6 +92,7 @@ pub(crate) fn say(dir: &Path, text: &str) -> Result<(), CliError> {
         &ours,
         prev,
         Some(view.space_id),
+        now_ms(),
         "msg.put",
         &payload,
     )?);
@@ -375,8 +376,42 @@ fn identity_public_of(wires: &[Vec<u8>]) -> Option<[u8; 32]> {
 }
 
 fn push_line(out: &mut String, line: &ChatLine) {
+    if let Some(ms) = line.unix_ms {
+        out.push_str(&format_unix_ms(ms));
+        out.push(' ');
+    }
     out.push_str(&line.text);
     out.push('\n');
+}
+
+fn now_ms() -> Option<u64> {
+    let Ok(elapsed) = std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH)
+    else {
+        return None;
+    };
+    u64::try_from(elapsed.as_millis()).ok()
+}
+
+/// UTC `YYYY-MM-DD HH:MM` from unix milliseconds. Display only. Not an order.
+fn format_unix_ms(ms: u64) -> String {
+    let secs = ms / 1000;
+    let days = i64::try_from(secs / 86_400).unwrap_or(0);
+    let tod = secs % 86_400;
+    let hour = tod / 3_600;
+    let minute = (tod % 3_600) / 60;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = u64::try_from(z - era * 146_097).unwrap_or(0);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = i64::try_from(yoe).unwrap_or(0) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    if month <= 2 {
+        year += 1;
+    }
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
 }
 
 struct Card {
@@ -465,13 +500,14 @@ fn sign_as(
     card: &Card,
     prev: Option<ambient_events::EventId>,
     space: Option<ambient_events::EventId>,
+    unix_ms: Option<u64>,
     event_type: &str,
     payload: &[u8],
 ) -> Result<Vec<u8>, CliError> {
     let unsigned = encode_unsigned(
         &card.signing_key,
         prev.map(|id| id.0),
-        None,
+        unix_ms,
         space.map(|id| id.0),
         event_type,
         payload,

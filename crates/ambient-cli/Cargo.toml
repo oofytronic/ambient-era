@@ -1,6 +1,6 @@
 [package]
 name = "ambient-cli"
-description = "Offline notes CLI. The root seed is a file, not the OS keystore."
+description = "Notes CLI. The root can be wrapped by a local passphrase. It is not a passkey."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -26,6 +26,9 @@ hkdf = { workspace = true }
 sha2 = { workspace = true }
 tungstenite = { workspace = true }
 bip39 = { workspace = true }
+argon2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+rusqlite = { workspace = true }
 
 [lints]
 workspace = true

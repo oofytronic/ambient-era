@@ -1,7 +1,12 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use ambient_identity::{DeviceKeys, Identity, derive, device_from_seeds};
+use argon2::{Algorithm, Argon2, Params, Version};
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use hkdf::Hkdf;
 use sha2::Sha256;
 
@@ -19,13 +24,23 @@ pub(crate) struct Local {
 
 pub(crate) fn open(dir: &Path) -> Result<Local, CliError> {
     let key_path = dir.join("key");
+    if let Some(inner) = cached_inner(&key_path) {
+        return parse_key(dir, &inner);
+    }
     let bytes = fs::read(&key_path).map_err(|_| CliError::message("missing key file"))?;
+    if bytes.get(4) == Some(&3) {
+        return Err(CliError::message("this folder is locked"));
+    }
+    parse_key(dir, &bytes)
+}
+
+fn parse_key(dir: &Path, bytes: &[u8]) -> Result<Local, CliError> {
     if bytes.get(..4) != Some(b"AMBK") {
         return Err(CliError::message("key file is not a notebook key"));
     }
     match bytes.get(4).copied() {
-        Some(1) => open_v1(dir, &bytes),
-        Some(2) => open_v2(dir, &bytes),
+        Some(1) => open_v1(dir, bytes),
+        Some(2) => open_v2(dir, bytes),
         _ => Err(CliError::message("key file is not a known version")),
     }
 }
@@ -166,7 +181,7 @@ pub(crate) fn remember_identity(local: &mut Local, public: [u8; 32]) -> Result<(
         local.identity_public = public;
         return Ok(());
     }
-    let bytes = fs::read(&local.key_path).map_err(|_| CliError::message("missing key file"))?;
+    let bytes = inner_bytes(&local.key_path)?;
     if bytes.get(4) != Some(&2) {
         return Err(CliError::message(
             "only a paired device learns the identity",
@@ -176,9 +191,9 @@ pub(crate) fn remember_identity(local: &mut Local, public: [u8; 32]) -> Result<(
     let enc = copy32(&bytes, 70)?;
     let mailbox = copy32(&bytes, 102)?;
     let store = copy32(&bytes, 134)?;
-    write_secret(
+    store_inner(
         &local.key_path,
-        &v2_bytes(true, &public, &sign, &enc, &mailbox, &store, &local.label)?,
+        v2_bytes(true, &public, &sign, &enc, &mailbox, &store, &local.label)?,
     )?;
     local.identity_public = public;
     Ok(())
@@ -305,4 +320,184 @@ pub(crate) fn write_secret_pub(path: &std::path::Path, bytes: &[u8]) -> Result<(
 
 pub(crate) fn copy32_pub(bytes: &[u8], start: usize) -> Result<[u8; 32], CliError> {
     copy32(bytes, start)
+}
+
+const UNLOCK_AAD: &[u8] = b"ambient-unlock/v1";
+
+struct Cached {
+    wrap: [u8; 32],
+    inner: Vec<u8>,
+}
+
+impl Drop for Cached {
+    fn drop(&mut self) {
+        self.wrap.fill(0);
+        self.inner.fill(0);
+    }
+}
+
+fn cache() -> &'static Mutex<HashMap<PathBuf, Cached>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Cached>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn cached_inner(path: &Path) -> Option<Vec<u8>> {
+    let guard = cache().lock().unwrap_or_else(PoisonError::into_inner);
+    guard.get(&cache_key(path)).map(|item| item.inner.clone())
+}
+
+fn cached_wrap(path: &Path) -> Option<[u8; 32]> {
+    let guard = cache().lock().unwrap_or_else(PoisonError::into_inner);
+    guard.get(&cache_key(path)).map(|item| item.wrap)
+}
+
+fn cache_put(path: &Path, wrap: [u8; 32], inner: Vec<u8>) {
+    let mut guard = cache().lock().unwrap_or_else(PoisonError::into_inner);
+    guard.insert(cache_key(path), Cached { wrap, inner });
+}
+
+fn inner_bytes(path: &Path) -> Result<Vec<u8>, CliError> {
+    if let Some(inner) = cached_inner(path) {
+        return Ok(inner);
+    }
+    let bytes = fs::read(path).map_err(|_| CliError::message("missing key file"))?;
+    if bytes.get(4) == Some(&3) {
+        return Err(CliError::message("this folder is locked"));
+    }
+    Ok(bytes)
+}
+
+fn store_inner(path: &Path, inner: Vec<u8>) -> Result<(), CliError> {
+    let on_disk = fs::read(path).ok();
+    if on_disk.as_ref().and_then(|bytes| bytes.get(4).copied()) == Some(3) {
+        let wrap = cached_wrap(path).ok_or_else(|| CliError::message("this folder is locked"))?;
+        let bytes = on_disk.ok_or_else(|| CliError::message("missing key file"))?;
+        let salt = copy_array::<16>(&bytes, 5)?;
+        let nonce = random_n::<12>()?;
+        let sealed = seal_inner(&wrap, &nonce, &inner)?;
+        write_secret(path, &wrapped_bytes(&salt, &nonce, &sealed))?;
+        cache_put(path, wrap, inner);
+        return Ok(());
+    }
+    write_secret(path, &inner)
+}
+
+/// Wrap the key file with a passphrase. The passphrase is not the root.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when the passphrase is too short or the folder is locked
+/// and has not been unlocked in this process.
+pub(crate) fn set_unlock(dir: &Path, passphrase: &str) -> Result<(), CliError> {
+    let passphrase = check_passphrase(passphrase)?;
+    let key_path = dir.join("key");
+    let inner = inner_bytes(&key_path)?;
+    let salt = random_n::<16>()?;
+    let wrap = derive_wrap(passphrase, &salt)?;
+    let nonce = random_n::<12>()?;
+    let sealed = seal_inner(&wrap, &nonce, &inner)?;
+    write_secret(&key_path, &wrapped_bytes(&salt, &nonce, &sealed))?;
+    cache_put(&key_path, wrap, inner);
+    Ok(())
+}
+
+/// Unwrap a locked key file for this process. Does not write the root to disk.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when the passphrase is wrong or the folder is not locked.
+pub(crate) fn unlock(dir: &Path, passphrase: &str) -> Result<(), CliError> {
+    let passphrase = check_passphrase(passphrase)?;
+    let key_path = dir.join("key");
+    let bytes = fs::read(&key_path).map_err(|_| CliError::message("missing key file"))?;
+    if bytes.get(4) != Some(&3) {
+        return Err(CliError::message("this folder is not locked"));
+    }
+    let salt = copy_array::<16>(&bytes, 5)?;
+    let nonce = copy_array::<12>(&bytes, 21)?;
+    let sealed = bytes
+        .get(33..)
+        .ok_or_else(|| CliError::message("key file truncated"))?;
+    let wrap = derive_wrap(passphrase, &salt)?;
+    let inner = open_inner(&wrap, &nonce, sealed)?;
+    parse_key(dir, &inner)?;
+    cache_put(&key_path, wrap, inner);
+    Ok(())
+}
+
+fn check_passphrase(passphrase: &str) -> Result<&str, CliError> {
+    let passphrase = passphrase.trim();
+    if passphrase.chars().count() < 8 {
+        return Err(CliError::message(
+            "passphrase must be at least 8 characters",
+        ));
+    }
+    Ok(passphrase)
+}
+
+fn derive_wrap(passphrase: &str, salt: &[u8]) -> Result<[u8; 32], CliError> {
+    let params = Params::new(19_456, 2, 1, Some(32))
+        .map_err(|_| CliError::message("could not start unlock"))?;
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut out = [0_u8; 32];
+    argon
+        .hash_password_into(passphrase.as_bytes(), salt, &mut out)
+        .map_err(|_| CliError::message("could not derive unlock key"))?;
+    Ok(out)
+}
+
+fn seal_inner(wrap: &[u8; 32], nonce_bytes: &[u8; 12], inner: &[u8]) -> Result<Vec<u8>, CliError> {
+    let cipher = ChaCha20Poly1305::new(wrap.into());
+    cipher
+        .encrypt(
+            &Nonce::from(*nonce_bytes),
+            Payload {
+                msg: inner,
+                aad: UNLOCK_AAD,
+            },
+        )
+        .map_err(|_| CliError::message("could not wrap key file"))
+}
+
+fn open_inner(wrap: &[u8; 32], nonce_bytes: &[u8; 12], sealed: &[u8]) -> Result<Vec<u8>, CliError> {
+    let cipher = ChaCha20Poly1305::new(wrap.into());
+    cipher
+        .decrypt(
+            &Nonce::from(*nonce_bytes),
+            Payload {
+                msg: sealed,
+                aad: UNLOCK_AAD,
+            },
+        )
+        .map_err(|_| CliError::message("passphrase rejected"))
+}
+
+fn wrapped_bytes(salt: &[u8; 16], nonce: &[u8; 12], sealed: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(33 + sealed.len());
+    out.extend_from_slice(b"AMBK");
+    out.push(3);
+    out.extend_from_slice(salt);
+    out.extend_from_slice(nonce);
+    out.extend_from_slice(sealed);
+    out
+}
+
+fn random_n<const N: usize>() -> Result<[u8; N], CliError> {
+    let mut bytes = [0_u8; N];
+    getrandom::getrandom(&mut bytes).map_err(|_| CliError::message("random source failed"))?;
+    Ok(bytes)
+}
+
+fn copy_array<const N: usize>(bytes: &[u8], start: usize) -> Result<[u8; N], CliError> {
+    let end = start + N;
+    let slice = bytes
+        .get(start..end)
+        .ok_or_else(|| CliError::message("key file truncated"))?;
+    let mut out = [0_u8; N];
+    out.copy_from_slice(slice);
+    Ok(out)
 }

@@ -4,6 +4,16 @@ The root device seals the identity log and Notes-space events to the identity se
 
 # History
 
+## 2026-11-02 — one primitive, local unlock, message time, search index
+
+Agents must keep one membership model: a new object is a Space of the same kind, a capability grant, or a copy. Not a second sharing protocol. See [AGENTS.md](AGENTS.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
+
+Message events now set envelope field 4 (advisory unix milliseconds). The window shows that time. It is not an order.
+
+The key file can be wrapped with Argon2id and ChaCha20-Poly1305. The passphrase unlocks the file in this process. It is not the root and not a WebAuthn passkey. The Linux window has no platform passkey API.
+
+Native search builds a SQLCipher FTS5 index beside the sealed log. The log is still the source of truth. `ambient-store` stays a sealed file so the protocol crates still compile for wasm.
+
 ## 2026-11-01 — contact invite is a link or a QR
 
 The notes window shows a shareable `ambient://contact/` link and a QR of that link. Pasting the link or the raw card starts a conversation. A selected note can be copied into the chat as text. The recovery phrase and restore remain in the window.

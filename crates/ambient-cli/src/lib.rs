@@ -11,6 +11,7 @@
 use std::path::Path;
 
 mod draft;
+mod index;
 mod keys;
 mod notes;
 mod session;
@@ -102,6 +103,25 @@ pub fn chat_lines(dir: &Path) -> Result<Vec<String>, CliError> {
         .filter(|line| !line.is_empty())
         .map(str::to_owned)
         .collect())
+}
+
+/// Wrap the key file with a passphrase. The passphrase is not the root and not a passkey.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when the passphrase is shorter than 8 characters, or the folder is locked
+/// in this process.
+pub fn set_folder_unlock(dir: &Path, passphrase: &str) -> Result<(), CliError> {
+    keys::set_unlock(dir, passphrase)
+}
+
+/// Unlock a wrapped key file for this process. The unwrapped root is not written back to disk.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when the passphrase is wrong or this folder is not wrapped.
+pub fn unlock_folder(dir: &Path, passphrase: &str) -> Result<(), CliError> {
+    keys::unlock(dir, passphrase)
 }
 
 /// The recovery phrase for this notebook. Only the root folder has one.

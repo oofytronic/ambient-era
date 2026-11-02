@@ -56,6 +56,11 @@ bip39 = { version = "3.0.0", default-features = false, features = ["alloc", "zer
 qrcode = { version = "0.14.1", default-features = false, features = ["image"] }
 # PNG for the QR image the window shows. Minimal features.
 image = { version = "0.25.6" }
+# Argon2id wraps the on-disk key file. The passphrase is not the root.
+argon2 = { version = "0.5.3", default-features = false, features = ["alloc"] }
+# Native search index only (ambient-cli). SQLCipher page encryption plus FTS5.
+# Not in the protocol crates: those must stay wasm-clean.
+rusqlite = { version = "0.32.1", default-features = false, features = ["bundled-sqlcipher-vendored-openssl"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -4,7 +4,7 @@
 
 > Signal's privacy, X's surface, AnyType's ownership — with an identity you hold as a key.
 
-**Status:** Pre-0.1. The Linux window does notes, a second folder, one 1:1 through a loopback relay, device revoke from the root window, and per-note writer labels. The relay is cleartext on `127.0.0.1` and is not a public deployment. The recovery seal is implemented. The window shows the BIP39 phrase and can restore from it. Contact invites are a link or a QR. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
+**Status:** Pre-0.1. The Linux window does notes, a second folder, one 1:1 through a loopback relay, device revoke from the root window, and per-note writer labels. The relay is cleartext on `127.0.0.1` and is not a public deployment. The recovery seal is implemented. The window shows the BIP39 phrase and can restore from it. Contact invites are a link or a QR. Chat lines show the advisory time from the event envelope. The key file can be wrapped with a passphrase; that is a local unlock, not a platform passkey. Native search is a SQLCipher FTS5 index beside the sealed log. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
 
 ---
 

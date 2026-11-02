@@ -49,7 +49,7 @@ fn one_message_crosses() -> Result<(), String> {
     run_ok(&["card", &bob_s], "")?;
     run_ok(&["sync", &bob_s, &url], "")?;
     let heard = run_ok(&["hear", &bob_s], "")?;
-    if heard.trim() != "hello" {
+    if !heard.trim().ends_with("hello") {
         return Err(format!("bob heard {heard}"));
     }
     run_ok(&["say", &bob_s, "hi"], "")?;
