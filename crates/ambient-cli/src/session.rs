@@ -3,10 +3,12 @@
 use std::path::Path;
 
 use ambient_events::{EventId, encode_unsigned, sign_wire, verify};
-use ambient_identity::{DeviceState, decode_pair_offer_text, device_add_payload, project_log};
+use ambient_identity::{
+    DeviceState, decode_pair_offer_text, device_add_payload, project_log, revoke_payload,
+};
 use ambient_spaces::{
-    GenesisMember, Revocation, member_add_payload, note_put_payload, notes_genesis_payload,
-    project_notes,
+    GenesisMember, Revocation, member_add_payload, member_remove_payload, note_put_payload,
+    notes_genesis_payload, project_notes,
 };
 use ambient_store::{read_log, write_log};
 
@@ -20,6 +22,8 @@ pub struct NoteSummary {
     pub id: String,
     /// Title of the first head. Empty when the note has no title.
     pub title: String,
+    /// Label of the device that wrote the first head. Empty when unknown.
+    pub writer: String,
     /// More than one head is a conflict. The window must not pick a winner.
     pub conflict: bool,
 }
@@ -31,6 +35,21 @@ pub struct ShownHead {
     pub title: String,
     /// Markdown body.
     pub body: String,
+    /// Label of the device that wrote this head.
+    pub writer: String,
+}
+
+/// One device on the identity log.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeviceLine {
+    /// Hex signing key.
+    pub id: String,
+    /// Local label. Not sent to a relay.
+    pub label: String,
+    /// True after `id.device-revoke`.
+    pub revoked: bool,
+    /// True for the key in this folder.
+    pub current: bool,
 }
 
 /// A note opened for reading or editing.
@@ -113,10 +132,11 @@ impl Notebook {
             return Ok(Vec::new());
         }
         let view = self.project()?;
+        let names = device_labels(&self.local)?;
         Ok(view
             .notes
             .iter()
-            .map(|(id, heads)| summary(id, heads))
+            .map(|(id, heads)| summary(id, heads, &names))
             .collect())
     }
 
@@ -137,8 +157,9 @@ impl Notebook {
             return Ok(Vec::new());
         }
         let view = self.project()?;
+        let names = device_labels(&self.local)?;
         let Some(dir) = self.local.key_path.parent() else {
-            return Ok(search_scan(&view, query));
+            return Ok(search_scan(&view, query, &names));
         };
         let mut rows = Vec::new();
         for (id, heads) in &view.notes {
@@ -159,10 +180,10 @@ impl Notebook {
                     .notes
                     .iter()
                     .filter(|(id, _)| wanted.contains(&hex(*id)))
-                    .map(|(id, heads)| summary(id, heads))
+                    .map(|(id, heads)| summary(id, heads, &names))
                     .collect())
             }
-            Err(_) => Ok(search_scan(&view, query)),
+            Err(_) => Ok(search_scan(&view, query, &names)),
         }
     }
 
@@ -174,6 +195,7 @@ impl Notebook {
     pub fn show(&self, id_hex: &str) -> Result<ShownNote, CliError> {
         let note_id = parse_hex32(id_hex)?;
         let view = self.project()?;
+        let names = device_labels(&self.local)?;
         let heads = view
             .notes
             .get(&note_id)
@@ -186,6 +208,10 @@ impl Notebook {
                 .map(|head| ShownHead {
                     title: head.title.clone(),
                     body: head.body.clone(),
+                    writer: names
+                        .get(&head.signer)
+                        .cloned()
+                        .unwrap_or_else(|| short_hex(&head.signer)),
                 })
                 .collect(),
         })
@@ -326,32 +352,149 @@ impl Notebook {
             .collect())
     }
 
+    /// Devices on the identity log. A paired folder can read the list. Only the root can revoke.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when the identity log does not project.
+    pub fn devices(&self) -> Result<Vec<DeviceLine>, CliError> {
+        let wires = load(&self.local)?;
+        let log = project_log(
+            &self.local.identity_public,
+            &identity_wires(&self.local, &wires)?,
+        )
+        .map_err(|_| CliError::message("identity log rejected"))?;
+        let mut lines = Vec::new();
+        for (key, state) in log.devices {
+            let (label, revoked) = match state {
+                DeviceState::Active { label, .. } => (label, false),
+                DeviceState::Revoked { label, .. } => (label, true),
+            };
+            lines.push(DeviceLine {
+                id: hex(&key),
+                label,
+                revoked,
+                current: key == self.local.device.signing_key,
+            });
+        }
+        Ok(lines)
+    }
+
+    /// Revoke a device key. Keeps the notes it already wrote. Stops sealing new events to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when this folder is not the root, the key is this device, or it is already revoked.
+    pub fn revoke_device(&self, id_hex: &str) -> Result<(), CliError> {
+        if self.local.identity.is_none() {
+            return Err(CliError::message(
+                "only the folder with the root can revoke a device",
+            ));
+        }
+        let key = parse_hex32(id_hex)?;
+        if key == self.local.device.signing_key {
+            return Err(CliError::message("this device cannot revoke itself"));
+        }
+        let mut wires = load(&self.local)?;
+        let log = project_log(
+            &self.local.identity_public,
+            &identity_wires(&self.local, &wires)?,
+        )
+        .map_err(|_| CliError::message("identity log rejected"))?;
+        match log.devices.get(&key) {
+            Some(DeviceState::Active { .. }) => {}
+            Some(DeviceState::Revoked { .. }) => {
+                return Err(CliError::message("that device is already revoked"));
+            }
+            None => return Err(CliError::message("no such device")),
+        }
+        let view = view_notes(&self.local, &wires)?;
+        let payload = revoke_payload(&key, view.tip.get(&key).copied())
+            .map_err(|_| CliError::message("could not encode revoke"))?;
+        let revoke = self
+            .local
+            .identity
+            .as_ref()
+            .ok_or_else(|| CliError::message("only the folder with the root can revoke a device"))?
+            .sign_log(log.head, "id.device-revoke", &payload)
+            .map_err(|_| CliError::message("could not sign revoke"))?;
+        wires.push(revoke);
+        if view.members.contains_key(&key) {
+            let payload = member_remove_payload(&key)
+                .map_err(|_| CliError::message("could not encode member remove"))?;
+            let prev = view.tip.get(&self.local.device.signing_key).copied();
+            wires.push(sign_device(
+                &self.local,
+                prev,
+                Some(view.space_id),
+                "space.member-remove",
+                &payload,
+            )?);
+        }
+        write_log(&self.local.notes_path, &self.local.store_key, &wires)
+            .map_err(|_| CliError::message("could not write notes file"))?;
+        Ok(())
+    }
+
     fn project(&self) -> Result<ambient_spaces::Projection, CliError> {
         view_notes(&self.local, &load(&self.local)?)
     }
 }
 
-fn search_scan(view: &ambient_spaces::Projection, query: &str) -> Vec<NoteSummary> {
+fn search_scan(
+    view: &ambient_spaces::Projection,
+    query: &str,
+    names: &std::collections::BTreeMap<[u8; 32], String>,
+) -> Vec<NoteSummary> {
     let mut found = Vec::new();
     for (id, heads) in &view.notes {
         if heads
             .iter()
             .any(|head| head.title.contains(query) || head.body.contains(query))
         {
-            found.push(summary(id, heads));
+            found.push(summary(id, heads, names));
         }
     }
     found
 }
 
-fn summary(id: &[u8; 32], heads: &[ambient_spaces::NoteHead]) -> NoteSummary {
+fn summary(
+    id: &[u8; 32],
+    heads: &[ambient_spaces::NoteHead],
+    names: &std::collections::BTreeMap<[u8; 32], String>,
+) -> NoteSummary {
+    let writer = heads.first().map_or(String::new(), |head| {
+        names
+            .get(&head.signer)
+            .cloned()
+            .unwrap_or_else(|| short_hex(&head.signer))
+    });
     NoteSummary {
         id: hex(id),
         title: heads
             .first()
             .map_or(String::new(), |head| head.title.clone()),
+        writer,
         conflict: heads.len() > 1,
     }
+}
+
+fn device_labels(local: &Local) -> Result<std::collections::BTreeMap<[u8; 32], String>, CliError> {
+    let wires = load(local)?;
+    let log = project_log(&local.identity_public, &identity_wires(local, &wires)?)
+        .map_err(|_| CliError::message("identity log rejected"))?;
+    let mut names = std::collections::BTreeMap::new();
+    for (key, state) in log.devices {
+        let label = match state {
+            DeviceState::Active { label, .. } | DeviceState::Revoked { label, .. } => label,
+        };
+        names.insert(key, label);
+    }
+    Ok(names)
+}
+
+fn short_hex(bytes: &[u8; 32]) -> String {
+    hex(bytes).chars().take(8).collect()
 }
 
 fn identity_wires<'a>(local: &Local, wires: &'a [Vec<u8>]) -> Result<Vec<&'a [u8]>, CliError> {

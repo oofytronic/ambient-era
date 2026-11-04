@@ -1,4 +1,4 @@
-//! Notes, a second device, and one conversation on one machine.
+//! Notes, devices, and conversations on one machine.
 //!
 //! `init`, `add`, `edit`, `list`, `search`, and `show` talk to a directory.
 //! The directory holds `key` (mode 0600) and `notes` (wire events sealed with
@@ -19,7 +19,7 @@ mod sync;
 
 pub use draft::{Draft, Shortcut, shortcut};
 pub use notes::{CliError, run};
-pub use session::{NoteSummary, Notebook, ShownHead, ShownNote};
+pub use session::{DeviceLine, NoteSummary, Notebook, ShownHead, ShownNote};
 
 /// Loopback relay the window starts. Cleartext. Not a public deployment.
 pub const LOOPBACK_URL: &str = "ws://127.0.0.1:8787";
@@ -73,31 +73,77 @@ pub fn contact_link(dir: &Path) -> Result<String, CliError> {
     Ok(format!("ambient://contact/{card}"))
 }
 
-/// Open the one conversation in this folder, using the other person's card.
+/// Open a conversation with the other person's card. Returns the Space id.
+///
+/// A folder may hold more than one conversation. Each one has its own contact key.
 ///
 /// # Errors
 ///
-/// Returns [`CliError`] when the card is this device, a conversation already exists, or the log cannot be written.
-pub fn start_conversation(dir: &Path, card: &str) -> Result<(), CliError> {
+/// Returns [`CliError`] when the card is this device, that invite was already used, or the log cannot be written.
+pub fn start_conversation(dir: &Path, card: &str) -> Result<String, CliError> {
     sync::talk(dir, card)
 }
 
-/// Append one chat message. It stays local until [`sync_folder`].
+/// Append one chat message to the only conversation. It stays local until [`sync_folder`].
 ///
 /// # Errors
 ///
-/// Returns [`CliError`] when there is no conversation or the message is too long.
+/// Returns [`CliError`] when there is not exactly one conversation or the message is too long.
 pub fn send_chat(dir: &Path, text: &str) -> Result<(), CliError> {
     sync::say(dir, text)
 }
 
-/// Message texts in event-id order, one string each. Empty when there is no conversation yet.
+/// Append one chat message to the conversation `id`.
 ///
 /// # Errors
 ///
-/// Returns [`CliError`] when the chat log cannot be opened.
+/// Returns [`CliError`] when that conversation does not exist or the message is too long.
+pub fn send_chat_in(dir: &Path, id: &str, text: &str) -> Result<(), CliError> {
+    sync::say_in(dir, id, text)
+}
+
+/// Message texts in the only conversation. Empty when there is none.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when there is more than one conversation or the log cannot be opened.
 pub fn chat_lines(dir: &Path) -> Result<Vec<String>, CliError> {
     let text = sync::hear(dir)?;
+    Ok(text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// One conversation. `id` is the Space id. `label` is a short name for the other key, not a global user id.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConversationSummary {
+    /// Hex Space id.
+    pub id: String,
+    /// Short label for the other member.
+    pub label: String,
+}
+
+/// Conversations in this folder, in storage order.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when a chat log cannot be opened.
+pub fn list_conversations(dir: &Path) -> Result<Vec<ConversationSummary>, CliError> {
+    Ok(sync::conversations(dir)?
+        .into_iter()
+        .map(|(id, label)| ConversationSummary { id, label })
+        .collect())
+}
+
+/// Message texts in one conversation, in event-id order.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when that conversation does not exist.
+pub fn chat_lines_in(dir: &Path, id: &str) -> Result<Vec<String>, CliError> {
+    let text = sync::hear_in(dir, id)?;
     Ok(text
         .lines()
         .filter(|line| !line.is_empty())
@@ -132,11 +178,14 @@ pub fn unlock_folder(dir: &Path, passphrase: &str) -> Result<(), CliError> {
 pub fn recovery_phrase(dir: &Path) -> Result<String, CliError> {
     let local = keys::open(dir)?;
     let Some(_identity) = &local.identity else {
-        return Err(CliError::message("only the root folder has a recovery phrase"));
+        return Err(CliError::message(
+            "only the root folder has a recovery phrase",
+        ));
     };
     // The root is not stored in Identity; we need to re-read it.
     // For v0.1 we re-derive from the key file.
-    let bytes = std::fs::read(&local.key_path).map_err(|_| CliError::message("missing key file"))?;
+    let bytes =
+        std::fs::read(&local.key_path).map_err(|_| CliError::message("missing key file"))?;
     if bytes.get(4) != Some(&1) {
         return Err(CliError::message("paired device has no recovery phrase"));
     }

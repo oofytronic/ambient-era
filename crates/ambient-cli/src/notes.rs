@@ -260,8 +260,10 @@ fn read_stdin(stdin: &mut impl Read) -> Result<String, CliError> {
     Ok(body)
 }
 
-
-fn phrase_cmd(args: &mut impl Iterator<Item = String>, stdout: &mut impl Write) -> Result<(), CliError> {
+fn phrase_cmd(
+    args: &mut impl Iterator<Item = String>,
+    stdout: &mut impl Write,
+) -> Result<(), CliError> {
     let dir = args
         .next()
         .ok_or_else(|| CliError::message("usage: ambient phrase <dir>"))?;
@@ -270,7 +272,10 @@ fn phrase_cmd(args: &mut impl Iterator<Item = String>, stdout: &mut impl Write) 
     Ok(())
 }
 
-fn restore_cmd(args: &mut impl Iterator<Item = String>, stdout: &mut impl Write) -> Result<(), CliError> {
+fn restore_cmd(
+    args: &mut impl Iterator<Item = String>,
+    stdout: &mut impl Write,
+) -> Result<(), CliError> {
     let dir = args
         .next()
         .ok_or_else(|| CliError::message("usage: ambient restore <dir> <phrase> <relay-url>"))?;

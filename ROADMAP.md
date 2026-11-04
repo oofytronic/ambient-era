@@ -21,8 +21,8 @@ Build in this order. Do not skip ahead.
 | 3 | Local store and notes | The `ambient` CLI creates, edits, and searches notes offline. The log is an encrypted file. Native search is a SQLCipher FTS5 index beside it. |
 | 4 | Desktop app | The Linux window is Iced over the same folder as the CLI. Not the OS keystore. |
 | 5 | Relay and a second device | The window pairs a second folder and a note shows up there after Sync in both. The relay stores opaque blobs and binds `127.0.0.1` in the clear, which spec 04 says is not a public deployment. Two folders on one computer, not two machines. |
-| 6 | 1:1 | The window opens one conversation. Text is sealed to a per-contact key. The invite is the contact card as text, not a QR image. Messages show up after Sync in both windows. |
-| 7 | Devices, activity, copy | Revoke a device from the root window. Note list and editor show which device wrote it. Copy a note into a chat as text is in. Recovery restore from the phrase is in the window. Contact invite is a link or a QR. |
+| 6 | 1:1 | The window opens a conversation, and can open another. Each one has its own contact key. Text is sealed to that key. The invite is a link or a QR. Messages show up after Sync in both windows. |
+| 7 | Devices, activity, copy | Revoke a device from the root window. The note list and the editor show which device wrote the current version. Copy a note into a chat as text is in. Recovery restore from the phrase is in the window. |
 
 **Exit.** The owner uses the notes for real work, and uses 1:1 with at least one person, including an offline gap and one restore from the recovery phrase. A green test run is not the exit.
 

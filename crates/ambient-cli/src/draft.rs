@@ -8,7 +8,8 @@ pub struct Draft {
     /// Body field. Empty when the note is in conflict, so saving is a choice.
     pub body: String,
     /// Heads to show above the editor. Empty when there is one head.
-    pub conflicts: Vec<(String, String)>,
+    /// Writer, title, body.
+    pub conflicts: Vec<(String, String, String)>,
 }
 
 impl Draft {
@@ -36,7 +37,7 @@ impl Draft {
             let conflicts = note
                 .heads
                 .iter()
-                .map(|head| (head.title.clone(), head.body.clone()))
+                .map(|head| (head.writer.clone(), head.title.clone(), head.body.clone()))
                 .collect();
             Self {
                 title,

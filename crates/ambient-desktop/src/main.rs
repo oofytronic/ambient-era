@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use ambient_cli::{Draft, NoteSummary, Notebook};
 use iced::clipboard;
 use iced::keyboard::Key;
-use iced::widget::{button, column, container, row, scrollable, text, text_editor, text_input};
 use iced::widget::image as iced_image;
+use iced::widget::{button, column, container, row, scrollable, text, text_editor, text_input};
 use iced::{Element, Fill, Task, Theme};
-use qrcode::QrCode;
 use image::ImageEncoder;
+use qrcode::QrCode;
 use std::io::Cursor;
 
 fn main() -> iced::Result {
@@ -38,9 +38,13 @@ struct App {
     selected: Option<String>,
     title_text: String,
     body: text_editor::Content,
-    conflicts: Vec<(String, String)>,
+    conflicts: Vec<(String, String, String)>,
+    note_writer: String,
     message: String,
     show_chat: bool,
+    chats: Vec<ambient_cli::ConversationSummary>,
+    chat_id: Option<String>,
+    devices: Vec<ambient_cli::DeviceLine>,
     chat: Vec<String>,
     draft_chat: String,
     my_card: String,
@@ -90,6 +94,8 @@ enum Message {
     ShowDevices,
     ShowRecovery,
     CloseSheet,
+    SelectChat(String),
+    Revoke(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,8 +121,12 @@ impl App {
             title_text: String::new(),
             body: text_editor::Content::new(),
             conflicts: Vec::new(),
+            note_writer: String::new(),
             message: String::new(),
             show_chat: false,
+            chats: Vec::new(),
+            chat_id: None,
+            devices: Vec::new(),
             chat: Vec::new(),
             draft_chat: String::new(),
             my_card: String::new(),
@@ -258,6 +268,17 @@ impl App {
                 self.send_note_to_chat();
                 Task::none()
             }
+            Message::SelectChat(id) => {
+                self.chat_id = Some(id);
+                self.show_chat = true;
+                self.sheet = Sheet::None;
+                self.reload_chat();
+                Task::none()
+            }
+            Message::Revoke(id) => {
+                self.revoke(&id);
+                Task::none()
+            }
             Message::UnlockChanged(text) => {
                 self.unlock_input = text;
                 Task::none()
@@ -267,10 +288,22 @@ impl App {
                 Task::none()
             }
             Message::ShowInvite => {
+                if let Ok(link) = ambient_cli::contact_link(&self.dir) {
+                    if link != self.contact_link {
+                        self.show_qr = false;
+                        self.qr_bytes = None;
+                    }
+                    self.contact_link = link;
+                }
                 self.sheet = Sheet::Invite;
                 Task::none()
             }
             Message::ShowDevices => {
+                self.devices = self
+                    .notebook
+                    .as_ref()
+                    .and_then(|book| book.devices().ok())
+                    .unwrap_or_default();
                 self.sheet = Sheet::Devices;
                 Task::none()
             }
@@ -289,9 +322,12 @@ impl App {
         if self.open_error == "this folder is locked" {
             return self.unlock_screen();
         }
-        column![self.toolbar(), row![self.sidebar(), self.main()].height(Fill)]
-            .height(Fill)
-            .into()
+        column![
+            self.toolbar(),
+            row![self.sidebar(), self.main()].height(Fill)
+        ]
+        .height(Fill)
+        .into()
     }
 
     fn toolbar(&self) -> Element<'_, Message> {
@@ -335,12 +371,25 @@ impl App {
         .width(260)
         .height(Fill);
         if self.show_chat {
-            side = side.push(text("One conversation").size(12));
             side = side.push(
                 button(text("Invite"))
                     .width(Fill)
                     .on_press(Message::ShowInvite),
             );
+            if self.chats.is_empty() {
+                side = side.push(text("No conversations yet.").size(12));
+            }
+            for chat in &self.chats {
+                let mut label = chat.label.clone();
+                if self.chat_id.as_deref() == Some(chat.id.as_str()) {
+                    label.insert_str(0, "● ");
+                }
+                side = side.push(
+                    button(text(label))
+                        .width(Fill)
+                        .on_press(Message::SelectChat(chat.id.clone())),
+                );
+            }
             return side.into();
         }
         let mut notes = column![];
@@ -353,6 +402,10 @@ impl App {
             if self.selected.as_deref() == Some(note.id.as_str()) {
                 label.insert_str(0, "● ");
             }
+            if !note.writer.is_empty() {
+                label.push_str("  ");
+                label.push_str(&note.writer);
+            }
             if note.conflict {
                 label.push_str("  conflict");
             }
@@ -363,7 +416,11 @@ impl App {
             );
         }
         side = side.push(text_input("Search", &self.query).on_input(Message::QueryChanged));
-        side = side.push(button(text("New note")).width(Fill).on_press(Message::NewNote));
+        side = side.push(
+            button(text("New note"))
+                .width(Fill)
+                .on_press(Message::NewNote),
+        );
         side = side.push(scrollable(notes).height(Fill));
         side.into()
     }
@@ -408,12 +465,15 @@ impl App {
                 "Two versions. Write the one you want to keep, then save."
             )]
             .spacing(8);
-            for (index, (title, note_body)) in self.conflicts.iter().enumerate() {
+            for (index, (writer, title, note_body)) in self.conflicts.iter().enumerate() {
                 let number = index.saturating_add(1);
-                versions = versions.push(text(format!("Version {number}: {title}")));
+                versions = versions.push(text(format!("Version {number} · {writer}: {title}")));
                 versions = versions.push(text(note_body));
             }
             body = body.push(scrollable(versions).height(160));
+        }
+        if !self.note_writer.is_empty() && self.conflicts.is_empty() {
+            body = body.push(text(format!("Written by {}", self.note_writer)).size(12));
         }
         body = body.push(
             text_input("Title", &self.title_text)
@@ -439,10 +499,7 @@ impl App {
         let mut lines = column![].spacing(10);
         if self.chat.is_empty() {
             lines = lines.push(text("No messages yet."));
-            lines = lines.push(
-                button(text("Invite someone"))
-                    .on_press(Message::ShowInvite),
-            );
+            lines = lines.push(button(text("Invite someone")).on_press(Message::ShowInvite));
         }
         for line in &self.chat {
             lines = lines.push(
@@ -490,7 +547,9 @@ impl App {
                     .height(200),
             );
         }
-        sheet = sheet.push(text_input("Their link or card", &self.their_card).on_input(Message::TheirCardChanged));
+        sheet = sheet.push(
+            text_input("Their link or card", &self.their_card).on_input(Message::TheirCardChanged),
+        );
         sheet = sheet.push(button(text("Start conversation")).on_press(Message::StartConversation));
         scrollable(sheet).height(Fill).into()
     }
@@ -504,7 +563,8 @@ impl App {
         let mut sheet = column![
             Self::sheet_title("Devices"),
             text(self.dir.display().to_string()).size(12),
-            text("The relay is cleartext on this computer only. It is not a public server.").size(12),
+            text("The relay is cleartext on this computer only. It is not a public server.")
+                .size(12),
             button(text(relay_label)).on_press(Message::StartRelay),
             text("Unlock").size(16),
             text("Wraps the key file. Not the root, and not a platform passkey.").size(12),
@@ -514,8 +574,31 @@ impl App {
             button(text("Wrap key file")).on_press(Message::SubmitUnlock),
         ]
         .spacing(12);
+        sheet = sheet.push(text("Devices").size(16));
+        if self.devices.is_empty() {
+            sheet = sheet.push(text("No devices yet.").size(12));
+        }
+        for device in &self.devices {
+            let state = if device.revoked {
+                "revoked"
+            } else if device.current {
+                "this device"
+            } else {
+                "active"
+            };
+            sheet = sheet.push(text(format!("{} · {state}", device.label)).size(14));
+            if self.notebook.as_ref().is_some_and(Notebook::holds_root)
+                && !device.current
+                && !device.revoked
+            {
+                sheet = sheet.push(
+                    button(text(format!("Revoke {}", device.label)))
+                        .on_press(Message::Revoke(device.id.clone())),
+                );
+            }
+        }
         if self.notebook.as_ref().is_some_and(Notebook::holds_root) {
-            sheet = sheet.push(text("A paired folder does not hold the root.").size(12));
+            sheet = sheet.push(text("A paired folder does not hold the root. Revoke stops future seals. It does not erase notes that device already opened.").size(12));
             sheet = sheet.push(button(text("Open paired window")).on_press(Message::OpenPaired));
             sheet = sheet.push(button(text("Open the other person")).on_press(Message::OpenPerson));
         }
@@ -552,7 +635,6 @@ impl App {
         .into()
     }
 
-
     fn reload(&mut self) {
         let Some(book) = self.notebook.as_ref() else {
             return;
@@ -569,7 +651,19 @@ impl App {
     }
 
     fn reload_chat(&mut self) {
-        match ambient_cli::chat_lines(&self.dir) {
+        self.chats = ambient_cli::list_conversations(&self.dir).unwrap_or_default();
+        let known = self
+            .chat_id
+            .as_ref()
+            .is_some_and(|id| self.chats.iter().any(|chat| &chat.id == id));
+        if !known {
+            self.chat_id = self.chats.first().map(|chat| chat.id.clone());
+        }
+        let Some(id) = self.chat_id.clone() else {
+            self.chat.clear();
+            return;
+        };
+        match ambient_cli::chat_lines_in(&self.dir, &id) {
             Ok(lines) => self.chat = lines,
             Err(err) => self.message = err.to_string(),
         }
@@ -586,6 +680,11 @@ impl App {
                 self.title_text = draft.title;
                 self.body = text_editor::Content::with_text(&draft.body);
                 self.conflicts = draft.conflicts;
+                self.note_writer = note
+                    .heads
+                    .first()
+                    .map(|head| head.writer.clone())
+                    .unwrap_or_default();
                 self.show_chat = false;
                 self.message.clear();
             }
@@ -598,6 +697,7 @@ impl App {
         self.title_text.clear();
         self.body = text_editor::Content::new();
         self.conflicts.clear();
+        self.note_writer.clear();
         self.show_chat = false;
         self.message.clear();
     }
@@ -735,8 +835,11 @@ impl App {
             return;
         }
         match ambient_cli::start_conversation(&self.dir, card) {
-            Ok(()) => {
+            Ok(id) => {
+                self.chat_id = Some(id);
                 self.show_chat = true;
+                self.sheet = Sheet::None;
+                self.their_card.clear();
                 self.say("Conversation saved here. Press Sync, then Sync in their window.");
                 self.reload_chat();
             }
@@ -750,7 +853,11 @@ impl App {
             self.say("Write a message first.");
             return;
         }
-        match ambient_cli::send_chat(&self.dir, &text) {
+        let Some(id) = self.chat_id.clone() else {
+            self.say("Invite someone before sending.");
+            return;
+        };
+        match ambient_cli::send_chat_in(&self.dir, &id, &text) {
             Ok(()) => {
                 self.draft_chat.clear();
                 self.show_chat = true;
@@ -774,7 +881,6 @@ impl App {
             Err(err) => self.message = format!("could not open another window: {err}"),
         }
     }
-
 
     fn show_phrase(&mut self) {
         match ambient_cli::recovery_phrase(&self.dir) {
@@ -817,7 +923,6 @@ impl App {
         }
     }
 
-
     fn copy_link(&mut self) -> Task<Message> {
         if self.contact_link.is_empty() {
             self.say("No invite link yet.");
@@ -840,6 +945,19 @@ impl App {
         }
     }
 
+    fn revoke(&mut self, id: &str) {
+        let Some(book) = self.notebook.as_ref() else {
+            return;
+        };
+        match book.revoke_device(id) {
+            Ok(()) => {
+                self.devices = book.devices().unwrap_or_default();
+                self.say("Revoked. New events are no longer sealed to that device. Notes it already wrote stay.");
+            }
+            Err(err) => self.message = err.to_string(),
+        }
+    }
+
     fn send_note_to_chat(&mut self) {
         let Some(id) = self.selected.clone() else {
             self.say("Select a note first.");
@@ -857,13 +975,16 @@ impl App {
                     text.push_str("\n\n");
                 }
                 text.push_str(&draft.body);
-                match ambient_cli::send_chat(&self.dir, &text) {
-                    Ok(()) => {
-                        self.show_chat = true;
-                        self.say("Note copied into the chat. Press Sync so the other window sees it.");
-                        self.reload_chat();
-                    }
-                    Err(err) => self.message = err.to_string(),
+                match self.chat_id.clone() {
+                    Some(chat) => match ambient_cli::send_chat_in(&self.dir, &chat, &text) {
+                        Ok(()) => {
+                            self.show_chat = true;
+                            self.say("Note copied into the chat. Press Sync so the other window sees it.");
+                            self.reload_chat();
+                        }
+                        Err(err) => self.message = err.to_string(),
+                    },
+                    None => self.say("Start a conversation before sending a note."),
                 }
             }
             Err(err) => self.message = err.to_string(),
@@ -900,12 +1021,13 @@ impl App {
         match ambient_cli::set_folder_unlock(&self.dir, &passphrase) {
             Ok(()) => {
                 self.unlock_input.clear();
-                self.say("Key file wrapped. The passphrase is not the root and not the recovery phrase.");
+                self.say(
+                    "Key file wrapped. The passphrase is not the root and not the recovery phrase.",
+                );
             }
             Err(err) => self.message = err.to_string(),
         }
     }
-
 }
 
 fn sibling(dir: &Path, suffix: &str) -> PathBuf {
@@ -940,7 +1062,6 @@ fn binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>
         _ => text_editor::Binding::from_key_press(press),
     }
 }
-
 
 fn generate_qr(data: &str) -> Result<Vec<u8>, String> {
     if data.is_empty() {

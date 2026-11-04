@@ -65,7 +65,8 @@ fn open_db(path: &Path, key: &[u8; 32]) -> Result<Connection, CliError> {
 }
 
 fn try_open(path: &Path, key: &[u8; 32]) -> Result<Connection, CliError> {
-    let conn = Connection::open(path).map_err(|_| CliError::message("could not open search index"))?;
+    let conn =
+        Connection::open(path).map_err(|_| CliError::message("could not open search index"))?;
     let pragma = format!("PRAGMA key = \"x'{}'\";", hex_key(key));
     conn.execute_batch(&pragma)
         .map_err(|_| CliError::message("could not open search index"))?;

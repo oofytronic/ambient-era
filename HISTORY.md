@@ -4,6 +4,10 @@ The root device seals the identity log and Notes-space events to the identity se
 
 # History
 
+## 2026-11-04 — revoke, writers, and more than one conversation
+
+The root window lists devices and can revoke one. Revoke keeps the notes that device already wrote and stops sealing new events to it. The note list and the editor name the device that wrote the current version. A folder can hold more than one conversation. Each conversation has its own contact key. The first one still lives in `chats`. Later ones live under `conversations/`.
+
 ## 2026-11-04 — user-owned only if the later problems stay grants
 
 The later system is still user-owned only if recovery, node payment, agent power, sensing, sleeping nodes, bootstrap, and abuse handling stay inside Spaces and grants. A phrase is the v0.1 backup, not the long-term recovery. No single guardian, operator, or agent may seize the root. See [ARCHITECTURE.md](ARCHITECTURE.md). None of this is v0.1 work.

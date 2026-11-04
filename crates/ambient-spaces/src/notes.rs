@@ -34,6 +34,8 @@ pub enum Skip {
 pub struct NoteHead {
     /// Event id of this `note.put`.
     pub event_id: EventId,
+    /// Key that signed this snapshot.
+    pub signer: [u8; 32],
     /// Title, which may be empty.
     pub title: String,
     /// Markdown body.
@@ -300,6 +302,7 @@ fn apply_ready(
 
 struct StoredNote {
     event_id: EventId,
+    signer: [u8; 32],
     title: String,
     body: String,
     parents: Vec<EventId>,
@@ -331,6 +334,7 @@ fn apply_note(
     let (id, title, body, parents) = read_note(&item.payload)?;
     notes.entry(id).or_default().push(StoredNote {
         event_id: item.id,
+        signer: item.signer,
         title,
         body,
         parents,
@@ -426,6 +430,7 @@ fn heads(notes: BTreeMap<[u8; 32], Vec<StoredNote>>) -> BTreeMap<[u8; 32], Vec<N
                 }
                 heads.push(NoteHead {
                     event_id: version.event_id,
+                    signer: version.signer,
                     title: version.title,
                     body: version.body,
                 });
@@ -535,6 +540,19 @@ pub fn member_add_payload(member: &GenesisMember) -> Result<Vec<u8>, SpaceError>
         return Err(SpaceError::BadPayload);
     }
     encode_cbor(&member_cbor(member)).map_err(SpaceError::Event)
+}
+
+/// Payload for `space.member-remove`.
+///
+/// # Errors
+///
+/// Returns [`SpaceError::Event`] when encoding fails.
+pub fn member_remove_payload(signing: &[u8; 32]) -> Result<Vec<u8>, SpaceError> {
+    encode_cbor(&Cbor::Map(vec![(
+        Cbor::Uint(1),
+        Cbor::Bytes(signing.to_vec()),
+    )]))
+    .map_err(SpaceError::Event)
 }
 
 /// Payload for `msg.put`. Fields 2 and 3 are null: no reply, no citation.
