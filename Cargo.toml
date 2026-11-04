@@ -34,7 +34,7 @@ ed25519-dalek = { version = "2.2.0", default-features = false, features = ["allo
 # HKDF-SHA256 for the identity key, the recovery seal key, and the recovery mailbox
 # (docs/spec/02-identity-log.md).
 hkdf = { version = "0.12.4", default-features = false }
-sha2 = { version = "0.10.9", default-features = false }
+sha2 = { version = "0.11.1", default-features = false }
 # X25519 public key of the recovery seal secret. No key generation.
 x25519-dalek = { version = "2.0.1", default-features = false, features = ["static_secrets"] }
 # Secret values zeroize on drop.
