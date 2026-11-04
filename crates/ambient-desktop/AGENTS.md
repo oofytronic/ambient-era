@@ -1,6 +1,6 @@
 # ambient-desktop
 
-The Linux notes window. Iced draws the controls. There is no webview.
+The Linux notes window. Iced draws the controls. There is no webview. The shell is notes and one conversation. Sync is a toolbar action. Invite, devices, and recovery are screens, not a permanent instruction column.
 
 It calls [`Notebook`](../ambient-cli/src/session.rs) and the sync helpers in `ambient-cli`. The folder is the same one the CLI uses.
 

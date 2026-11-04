@@ -52,6 +52,7 @@ struct App {
     show_qr: bool,
     qr_bytes: Option<Vec<u8>>,
     unlock_input: String,
+    sheet: Sheet,
 }
 
 #[derive(Clone, Debug)]
@@ -68,7 +69,9 @@ enum Message {
     Sync,
     OpenPaired,
     OpenPerson,
+    #[allow(dead_code)]
     CopyCard,
+    #[allow(dead_code)]
     MyCardChanged(String),
     TheirCardChanged(String),
     StartConversation,
@@ -83,6 +86,18 @@ enum Message {
     SendNoteToChat,
     UnlockChanged(String),
     SubmitUnlock,
+    ShowInvite,
+    ShowDevices,
+    ShowRecovery,
+    CloseSheet,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sheet {
+    None,
+    Invite,
+    Devices,
+    Recovery,
 }
 
 impl App {
@@ -113,6 +128,7 @@ impl App {
             show_qr: false,
             qr_bytes: None,
             unlock_input: String::new(),
+            sheet: Sheet::None,
         };
         match open_notebook(&app.dir) {
             Ok(book) => {
@@ -174,10 +190,12 @@ impl App {
             }
             Message::ShowNotes => {
                 self.show_chat = false;
+                self.sheet = Sheet::None;
                 Task::none()
             }
             Message::ShowChat => {
                 self.show_chat = true;
+                self.sheet = Sheet::None;
                 self.reload_chat();
                 Task::none()
             }
@@ -248,19 +266,83 @@ impl App {
                 self.submit_unlock();
                 Task::none()
             }
+            Message::ShowInvite => {
+                self.sheet = Sheet::Invite;
+                Task::none()
+            }
+            Message::ShowDevices => {
+                self.sheet = Sheet::Devices;
+                Task::none()
+            }
+            Message::ShowRecovery => {
+                self.sheet = Sheet::Recovery;
+                Task::none()
+            }
+            Message::CloseSheet => {
+                self.sheet = Sheet::None;
+                Task::none()
+            }
         }
     }
 
     fn view(&self) -> Element<'_, Message> {
-        row![self.sidebar(), self.center(), self.link_panel()].into()
+        if self.open_error == "this folder is locked" {
+            return self.unlock_screen();
+        }
+        column![self.toolbar(), row![self.sidebar(), self.main()].height(Fill)]
+            .height(Fill)
+            .into()
     }
 
-    fn sidebar(&self) -> Element<'_, Message> {
+    fn toolbar(&self) -> Element<'_, Message> {
         let role = match self.notebook.as_ref() {
             Some(book) if book.holds_root() => "Holds the root",
             Some(_) => "Paired device",
             None => "Not open",
         };
+        let mut bar = row![
+            text("Ambient").size(20),
+            text(role).size(12),
+            text(self.message.as_str()).size(12).width(Fill),
+            button(text("Sync")).on_press(Message::Sync),
+            button(text("Devices")).on_press(Message::ShowDevices),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center)
+        .padding(12);
+        if self.notebook.as_ref().is_some_and(Notebook::holds_root) {
+            bar = bar.push(button(text("Recovery")).on_press(Message::ShowRecovery));
+        }
+        bar.into()
+    }
+
+    fn sidebar(&self) -> Element<'_, Message> {
+        let notes_style = if self.show_chat { "Notes" } else { "Notes ·" };
+        let chat_style = if self.show_chat { "Chat ·" } else { "Chat" };
+        let mut side = column![
+            row![
+                button(text(notes_style))
+                    .on_press(Message::ShowNotes)
+                    .width(Fill),
+                button(text(chat_style))
+                    .on_press(Message::ShowChat)
+                    .width(Fill),
+            ]
+            .spacing(8),
+        ]
+        .spacing(12)
+        .padding(16)
+        .width(260)
+        .height(Fill);
+        if self.show_chat {
+            side = side.push(text("One conversation").size(12));
+            side = side.push(
+                button(text("Invite"))
+                    .width(Fill)
+                    .on_press(Message::ShowInvite),
+            );
+            return side.into();
+        }
         let mut notes = column![];
         for note in &self.notes {
             let mut label = if note.title.is_empty() {
@@ -280,64 +362,47 @@ impl App {
                     .on_press(Message::Select(note.id.clone())),
             );
         }
+        side = side.push(text_input("Search", &self.query).on_input(Message::QueryChanged));
+        side = side.push(button(text("New note")).width(Fill).on_press(Message::NewNote));
+        side = side.push(scrollable(notes).height(Fill));
+        side.into()
+    }
+
+    fn main(&self) -> Element<'_, Message> {
+        let body = match self.sheet {
+            Sheet::Invite => self.invite_sheet(),
+            Sheet::Devices => self.devices_sheet(),
+            Sheet::Recovery => self.recovery_sheet(),
+            Sheet::None if self.show_chat => self.chat_pane(),
+            Sheet::None => self.notes_pane(),
+        };
+        container(body).padding(24).width(Fill).height(Fill).into()
+    }
+
+    fn unlock_screen(&self) -> Element<'_, Message> {
         column![
-            text("Ambient").size(22),
-            text(role).size(12),
-            text_input("Search", &self.query).on_input(Message::QueryChanged),
-            button(text("New note")).on_press(Message::NewNote),
-            scrollable(notes).height(Fill),
+            text("This folder is locked").size(22),
+            text("The passphrase unwraps the key file for this run. It is not the root, not the recovery phrase, and not a platform passkey.").size(12),
+            text_input("Passphrase", &self.unlock_input)
+                .on_input(Message::UnlockChanged)
+                .on_submit(Message::SubmitUnlock)
+                .secure(true),
+            button(text("Unlock")).on_press(Message::SubmitUnlock),
+            text(self.message.as_str()),
         ]
         .spacing(12)
-        .padding(16)
-        .width(260)
+        .padding(24)
         .into()
     }
 
-    fn center(&self) -> Element<'_, Message> {
-        let mut body = column![
-            row![
-                button(text("Notes")).on_press(Message::ShowNotes),
-                button(text("Chat")).on_press(Message::ShowChat),
-            ]
-            .spacing(8)
-        ]
-        .spacing(12)
-        .width(Fill)
-        .height(Fill);
-        if self.open_error == "this folder is locked" {
-            return column![
-                text("This folder is locked").size(22),
-                text("The key file is wrapped. The passphrase is not the root, not the recovery phrase, and not a platform passkey. This window has no WebAuthn API, so the passphrase is the local unlock.").size(12),
-                text_input("Passphrase", &self.unlock_input)
-                    .on_input(Message::UnlockChanged)
-                    .on_submit(Message::SubmitUnlock)
-                    .secure(true),
-                button(text("Unlock")).on_press(Message::SubmitUnlock),
-                text(self.message.as_str()),
-            ]
-            .spacing(12)
-            .padding(24)
-            .into();
-        }
+    fn notes_pane(&self) -> Element<'_, Message> {
+        let mut body = column![].spacing(12).height(Fill);
         if !self.open_error.is_empty() {
             body = body.push(text(format!(
                 "Could not open this folder. {}",
                 self.open_error
             )));
         }
-        if !self.message.is_empty() {
-            body = body.push(text(self.message.as_str()));
-        }
-        if self.show_chat {
-            body = body.push(self.chat_pane());
-        } else {
-            body = body.push(self.notes_pane());
-        }
-        body.padding(24).into()
-    }
-
-    fn notes_pane(&self) -> Element<'_, Message> {
-        let mut body = column![].spacing(12).height(Fill);
         if !self.conflicts.is_empty() {
             let mut versions = column![text(
                 "Two versions. Write the one you want to keep, then save."
@@ -362,39 +427,31 @@ impl App {
                 .on_action(Message::BodyEdited)
                 .key_binding(binding),
         );
-        let mut actions = row![
-            button(text("Save")).on_press(Message::Save),
-        ]
-        .spacing(8);
+        let mut actions = row![button(text("Save")).on_press(Message::Save)].spacing(8);
         if self.selected.is_some() {
-            actions = actions.push(
-                button(text("Send to chat")).on_press(Message::SendNoteToChat),
-            );
+            actions = actions.push(button(text("Send to chat")).on_press(Message::SendNoteToChat));
         }
-        body = body.push(
-            row![
-                actions,
-                text("Ctrl+S saves. Ctrl+N is a new note. Send to chat copies the note text into the conversation.")
-                    .size(12),
-            ]
-            .spacing(16),
-        );
+        body = body.push(actions);
         body.into()
     }
 
     fn chat_pane(&self) -> Element<'_, Message> {
         let mut lines = column![].spacing(10);
         if self.chat.is_empty() {
-            lines = lines.push(text(
-                "No messages yet. Start the conversation from the panel, then Sync both windows.",
-            ));
+            lines = lines.push(text("No messages yet."));
+            lines = lines.push(
+                button(text("Invite someone"))
+                    .on_press(Message::ShowInvite),
+            );
         }
         for line in &self.chat {
             lines = lines.push(
                 container(text(line))
                     .padding(8)
                     .style(|_theme| container::Style {
-                        background: Some(iced::Background::Color(iced::Color::from_rgb(0.15, 0.15, 0.15))),
+                        background: Some(iced::Background::Color(iced::Color::from_rgb(
+                            0.15, 0.15, 0.15,
+                        ))),
                         ..Default::default()
                     }),
             );
@@ -405,116 +462,96 @@ impl App {
                 .on_input(Message::DraftChat)
                 .on_submit(Message::SendChat),
             button(text("Send")).on_press(Message::SendChat),
-            text("Send stores it here. It reaches the other window only after Sync in both.")
-                .size(12),
         ]
         .spacing(12)
         .height(Fill)
         .into()
     }
 
-    fn link_panel(&self) -> Element<'_, Message> {
+    fn invite_sheet(&self) -> Element<'_, Message> {
+        let mut sheet = column![
+            Self::sheet_title("Invite"),
+            text("Share your link, or paste theirs. A link is for text. A QR is for someone nearby. Only one side starts the conversation. Then Sync.").size(12),
+            text("Your link").size(12),
+            text(&self.contact_link).size(12),
+            row![
+                button(text("Copy link")).on_press(Message::CopyLink),
+                button(text(if self.show_qr { "Hide QR" } else { "Show QR" })).on_press(Message::ToggleQr),
+            ]
+            .spacing(8),
+        ]
+        .spacing(12);
+        if self.show_qr
+            && let Some(bytes) = &self.qr_bytes
+        {
+            sheet = sheet.push(
+                iced_image::Image::new(iced_image::Handle::from_bytes(bytes.clone()))
+                    .width(200)
+                    .height(200),
+            );
+        }
+        sheet = sheet.push(text_input("Their link or card", &self.their_card).on_input(Message::TheirCardChanged));
+        sheet = sheet.push(button(text("Start conversation")).on_press(Message::StartConversation));
+        scrollable(sheet).height(Fill).into()
+    }
+
+    fn devices_sheet(&self) -> Element<'_, Message> {
         let relay_label = if self.relay_ready {
             "Relay is on"
         } else {
             "Start relay"
         };
-        let mut panel = column![
-            text("Test").size(22),
+        let mut sheet = column![
+            Self::sheet_title("Devices"),
             text(self.dir.display().to_string()).size(12),
-            text("1. Relay").size(16),
-            text("Start it in one window. Cleartext on this computer only. Not a public server.").size(12),
-            button(text(relay_label))
-                .width(Fill)
-                .on_press(Message::StartRelay),
-            button(text("Sync")).width(Fill).on_press(Message::Sync),
+            text("The relay is cleartext on this computer only. It is not a public server.").size(12),
+            button(text(relay_label)).on_press(Message::StartRelay),
             text("Unlock").size(16),
-            text("Wraps the key file with a passphrase. Not the root, not the recovery phrase, and not a platform passkey.").size(12),
+            text("Wraps the key file. Not the root, and not a platform passkey.").size(12),
             text_input("Passphrase", &self.unlock_input)
                 .on_input(Message::UnlockChanged)
                 .secure(true),
-            button(text(if self.open_error == "this folder is locked" { "Unlock" } else { "Wrap key file" }))
-                .width(Fill)
-                .on_press(Message::SubmitUnlock),
-            text("2. Second device").size(16),
-            text("Save a note here. Open the paired window. Press Sync in both. That folder does not hold the root.").size(12),
+            button(text("Wrap key file")).on_press(Message::SubmitUnlock),
         ]
-        .spacing(8)
-        .width(Fill);
+        .spacing(12);
         if self.notebook.as_ref().is_some_and(Notebook::holds_root) {
-            panel = panel.push(
-                button(text("Open paired window"))
-                    .width(Fill)
-                    .on_press(Message::OpenPaired),
-            );
-            panel = panel.push(
-                button(text("Open the other person"))
-                    .width(Fill)
-                    .on_press(Message::OpenPerson),
-            );
-            panel = panel.push(text("4. Recovery").size(16));
-            panel = panel.push(text("Show the phrase, then restore into a new folder on this computer.").size(12));
-            panel = panel.push(
-                button(text("Show recovery phrase"))
-                    .width(Fill)
-                    .on_press(Message::ShowPhrase),
-            );
-            if !self.recovery_phrase.is_empty() {
-                panel = panel.push(text(&self.recovery_phrase).size(12));
-                panel = panel.push(
-                    button(text("Copy phrase"))
-                        .width(Fill)
-                        .on_press(Message::CopyPhrase),
-                );
-            }
-            panel = panel.push(
-                text_input("Paste phrase to restore", &self.restore_phrase)
-                    .on_input(Message::RestorePhraseChanged),
-            );
-            panel = panel.push(
-                button(text("Restore into new folder"))
-                    .width(Fill)
-                    .on_press(Message::StartRestore),
-            );
+            sheet = sheet.push(text("A paired folder does not hold the root.").size(12));
+            sheet = sheet.push(button(text("Open paired window")).on_press(Message::OpenPaired));
+            sheet = sheet.push(button(text("Open the other person")).on_press(Message::OpenPerson));
         }
-        panel = panel.push(text("3. Conversation").size(16));
-        panel = panel.push(text("Share the link or the QR. A link is for text. A QR is for a person or device nearby. Paste their link or card below. Only one window presses Start conversation. Then Sync both.").size(12));
-        panel = panel.push(text("Your invite").size(12));
-        panel = panel.push(text(&self.contact_link).size(11));
-        panel = panel.push(
-            row![
-                button(text("Copy link"))
-                    .width(Fill)
-                    .on_press(Message::CopyLink),
-                button(text(if self.show_qr { "Hide QR" } else { "Show QR" }))
-                    .width(Fill)
-                    .on_press(Message::ToggleQr),
-            ]
-            .spacing(8),
-        );
-        if self.show_qr {
-            if let Some(bytes) = &self.qr_bytes {
-                panel = panel.push(
-                    iced_image::Image::new(iced_image::Handle::from_bytes(bytes.clone()))
-                        .width(200)
-                        .height(200),
-                );
-            }
-        }
-        panel = panel.push(text("Their link or card").size(12));
-        panel = panel.push(
-            text_input("Paste their link or card", &self.their_card).on_input(Message::TheirCardChanged),
-        );
-        panel = panel.push(
-            button(text("Start conversation"))
-                .width(Fill)
-                .on_press(Message::StartConversation),
-        );
-        column![scrollable(panel).height(Fill)]
-            .padding(16)
-            .width(340)
-            .into()
+        scrollable(sheet).height(Fill).into()
     }
+
+    fn recovery_sheet(&self) -> Element<'_, Message> {
+        let mut sheet = column![
+            Self::sheet_title("Recovery"),
+            text("The phrase rebuilds the root on a new folder. It does not recreate device keys. It is not a social recovery.").size(12),
+            button(text("Show recovery phrase")).on_press(Message::ShowPhrase),
+        ]
+        .spacing(12);
+        if !self.recovery_phrase.is_empty() {
+            sheet = sheet.push(text(&self.recovery_phrase).size(12));
+            sheet = sheet.push(button(text("Copy phrase")).on_press(Message::CopyPhrase));
+        }
+        sheet = sheet.push(
+            text_input("Paste phrase to restore", &self.restore_phrase)
+                .on_input(Message::RestorePhraseChanged),
+        );
+        sheet = sheet.push(button(text("Restore into new folder")).on_press(Message::StartRestore));
+        scrollable(sheet).height(Fill).into()
+    }
+
+    fn sheet_title(title: &str) -> Element<'static, Message> {
+        let title = title.to_owned();
+        row![
+            text(title).size(22),
+            button(text("Back")).on_press(Message::CloseSheet),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center)
+        .into()
+    }
+
 
     fn reload(&mut self) {
         let Some(book) = self.notebook.as_ref() else {

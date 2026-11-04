@@ -37,6 +37,18 @@ Do not add a per-share Space type, a second access list, or a "deleted everywher
 | Phone clients | SwiftUI and Compose over the same core. Content-free push. | Desktop first |
 | Agent | A delegated key plus a grant. Every member must agree before it reads a shared Space | No agent runtime in the core |
 
+These are the structural problems that decide whether a later version is still user-owned. They are not v0.1 work. Do not scaffold them. Each one has to be a Space, a grant on a Space, or a copy. None of them is a second authority beside the owner.
+
+| Problem | The constraint | What it is not |
+|:--|:--|:--|
+| Recovery for people who will lose a phrase | A threshold of guardians or devices can authorize a key rotation after a timelock. No single party can seize the root. The v0.1 phrase remains the backup until that exists. | A custodian. A passkey that is the root. |
+| Someone has to keep nodes on | People who need a relay, a host, or compute pay the operator who provides it. Reputation is uptime and quality. Most people stay clients. | A token that is the product. An obligation to run a home server. |
+| Agents that can publish or spend | An agent starts with nothing. It receives a short-lived scoped grant. The grant expires or is revoked. Enforcement is on a device or node the owner controls. Consequential actions are in a local log the owner can read. | Standing power. A model that is trusted because it said it would ask. |
+| Sensing | Inference and temporary context stay on the owner's devices. Raw sensor data leaves only when chosen for one task. Sensing has a visible indicator. Agents ask for the narrowest context. | A permanent life log. A wearable that uploads by default. |
+| Nodes that sleep | Public content can be mirrored as signed snapshots the mirror cannot alter. Relays are several and interchangeable. An agent that acts while the owner is offline already holds a grant, or it escalates to a person or another device. Intermittent nodes are the normal case. | A home server that must stay up for a public page to exist. |
+| Finding anyone without a center | Signed announcements, local discovery, and an out-of-band introduction (the v0.1 link or QR). An operator may publish a bootstrap set. The protocol still works if that set is gone. | A directory that is the only way in. |
+| Abuse without a central delete | Clients filter. People and communities share blocklists. A node refuses content under its own policy. The operator's nodes are legally separate from nodes other people run. | A moderator who can erase someone else's log. |
+
 ## Pieces
 
 ```
@@ -56,7 +68,7 @@ Layering is in [AGENTS.md](AGENTS.md). Dependencies point down.
 
 ## What the code does today
 
-The CLI and the Linux window append notes into a sealed file, pair a second folder that does not hold the root, and sync those notes through `ambient-relay` on `127.0.0.1`. They can open one conversation and exchange text the same way. The window calls the client in `ambient-cli` and does not seal events itself. There is a recovery seal, a contact invite as a link or a QR, a revoke command, and a command that copies a note into a chat. Message events carry the advisory unix time from the event envelope. The key file can be wrapped with a passphrase; that passphrase is not a platform passkey. Search uses a SQLCipher FTS5 index next to the sealed log. The log is still the source of truth, and `ambient-store` is still not SQLCipher. Two folders on one computer is not a second machine, and the cleartext relay is not a public deployment.
+The CLI and the Linux window append notes into a sealed file, pair a second folder that does not hold the root, and sync those notes through `ambient-relay` on `127.0.0.1`. They can open one conversation and exchange text the same way. The window is a notes and chat shell: Sync sits in the toolbar, an invite is part of the conversation, and devices and recovery are their own screens. It calls the client in `ambient-cli` and does not seal events itself. There is a recovery seal, a contact invite as a link or a QR, a revoke command, and a command that copies a note into a chat. Message events carry the advisory unix time from the event envelope. The key file can be wrapped with a passphrase; that passphrase is not a platform passkey. Search uses a SQLCipher FTS5 index next to the sealed log. The log is still the source of truth, and `ambient-store` is still not SQLCipher. Two folders on one computer is not a second machine, and the cleartext relay is not a public deployment.
 
 ## What happens to a note
 

@@ -26,7 +26,19 @@ Build in this order. Do not skip ahead.
 
 **Exit.** The owner uses the notes for real work, and uses 1:1 with at least one person, including an offline gap and one restore from the recovery phrase. A green test run is not the exit.
 
-**Still true at the end of v0.1.** Concurrent edits of one note are kept as a conflict, not merged. A stolen device key can open what was already sealed to it. The product is not anonymous.
+**Still true at the end of v0.1.** Concurrent edits of one note are kept as a conflict, not merged. A stolen device key can open what was already sealed to it. The product is not anonymous. Recovery is a phrase, not a threshold of guardians. The owner runs the loopback relay; nobody is paid to keep a node up. There is no agent, no sensing, and no public mirror.
+
+## Not a version yet
+
+These are requirements for the system to stay user-owned after the shell exists. They are not permission to start. They do not add a second membership model. See [ARCHITECTURE.md](ARCHITECTURE.md).
+
+- Social recovery: guardians or devices, a threshold, a timelock, no single party able to seize the root.
+- Operators paid for relay, hosting, or compute. Most people stay clients. Reputation is uptime, not capacity.
+- Agent grants that start empty, expire, and can be revoked, with a local audit log.
+- Sensing that stays on the device unless one task explicitly sends it. No life log.
+- Signed mirrors and interchangeable relays, so a sleeping node is normal.
+- Bootstrap that survives the loss of the operator's introduction set.
+- Client-side filters, shared blocklists, and node-local refusal. No central delete.
 
 ## After v0.1
 

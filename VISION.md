@@ -273,6 +273,20 @@ The original landscape omits the projects closest to the *messaging and sync* la
 
 If step 6 works end to end over a real network, with two devices and an offline gap in the middle, the rest is execution.
 
+## 17. What still has to be true
+
+The shell and an approval step do not keep the system user-owned. These are the remaining problems. They use the primitives above. They are not a reason to start them during v0.1.
+
+- **Recovery.** A phrase is the v0.1 backup and it is too fragile for most people. Later, a threshold of guardians or devices authorizes a rotation after a timelock. No one of them can seize the root. There is still no custodian.
+- **Nodes.** Most people are clients. Operators who keep a relay, a host, or compute online are paid by the people who need that uptime, in fiat or in whatever credit the network already uses. Reputation is uptime and quality. A token is not the product.
+- **Agents.** An agent starts with nothing. A grant is short-lived and scoped (send this, update this page). It expires or is revoked. Enforcement is on a machine the owner controls. Consequential actions are in a local log.
+- **Sensing.** Inference stays on the device. Raw sensor data leaves only for one chosen task. Sensing is visibly on. There is no permanent life log.
+- **Sleep.** Public pages are signed snapshots on mirrors that cannot edit them. Relays are interchangeable. An agent that acts while the owner is offline already has a grant, or it asks a person. Intermittent nodes are normal.
+- **Bootstrap.** A link, a QR, a signed announcement, or local discovery. An operator may offer a first set of relays. The network still works if that set disappears.
+- **Abuse.** Clients filter. Communities share blocklists. A node refuses what it will not host. Nobody can delete someone else's log. The operator's own nodes are legally separate from nodes other people run.
+
+Where this disagrees with an ADR, the spec, or STACK, those win.
+
 ---
 
 *This document is a position, not a mandate. Disagree with any row of §2 and I'll update the plan around your choice.*
