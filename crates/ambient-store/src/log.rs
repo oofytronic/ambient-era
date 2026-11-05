@@ -86,6 +86,9 @@ pub fn read_log(path: &Path, key: &[u8; 32]) -> Result<Vec<Vec<u8>>, StoreError>
 
 /// Write a log file, incrementing the counter when the file already exists.
 ///
+/// The sealed bytes are written to a sibling `*.part` file and then renamed over
+/// `path`, so a reader does not observe a torn file.
+///
 /// # Errors
 ///
 /// Returns [`StoreError::Io`] or [`StoreError::Corrupt`] from the previous file.
@@ -96,7 +99,9 @@ pub fn write_log(path: &Path, key: &[u8; 32], wires: &[Vec<u8>]) -> Result<(), S
         Err(_) => return Err(StoreError::Io),
     };
     let sealed = seal_log(key, counter, wires)?;
-    fs::write(path, sealed).map_err(|_| StoreError::Io)
+    let tmp = path.with_extension("part");
+    fs::write(&tmp, sealed).map_err(|_| StoreError::Io)?;
+    fs::rename(&tmp, path).map_err(|_| StoreError::Io)
 }
 
 fn nonce(counter: u64) -> Nonce {

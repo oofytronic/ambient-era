@@ -5,17 +5,30 @@
 //! Sync, pairing, and chat call `ambient-cli`. This file does not seal events.
 //! The relay it can start is cleartext on `127.0.0.1` only.
 
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use ambient_cli::{Draft, NoteSummary, Notebook};
 use iced::clipboard;
 use iced::keyboard::Key;
 use iced::widget::image as iced_image;
 use iced::widget::{button, column, container, row, scrollable, text, text_editor, text_input};
-use iced::{Element, Fill, Task, Theme};
+use iced::{Color, Element, Fill, Font, Task, Theme};
 use image::ImageEncoder;
 use qrcode::QrCode;
-use std::io::Cursor;
+
+const SANS_BYTES: &[u8] = include_bytes!("../fonts/DMSans-Regular.ttf");
+const SERIF_BYTES: &[u8] = include_bytes!("../fonts/CrimsonPro-Regular.ttf");
+
+fn sans() -> Font {
+    Font::with_name("DM Sans 9pt")
+}
+
+fn serif() -> Font {
+    Font::with_name("Crimson Pro")
+}
 
 fn main() -> iced::Result {
     iced::application(App::boot, App::update, App::view)
@@ -23,11 +36,29 @@ fn main() -> iced::Result {
         .subscription(App::subscription)
         .window_size((1280.0, 820.0))
         .theme(theme)
+        .default_font(sans())
+        .font(SANS_BYTES)
+        .font(SERIF_BYTES)
         .run()
 }
 
-fn theme(_app: &App) -> Theme {
-    Theme::Dark
+fn theme(app: &App) -> Theme {
+    let ink = Ink::from_dark(app.dark);
+    Theme::custom(
+        if app.dark {
+            "parchment-dark"
+        } else {
+            "parchment-light"
+        },
+        iced::theme::Palette {
+            background: ink.bg,
+            text: ink.text,
+            primary: ink.accent,
+            success: Color::from_rgb8(46, 140, 96),
+            warning: Color::from_rgb8(176, 122, 48),
+            danger: Color::from_rgb8(184, 78, 62),
+        },
+    )
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -66,6 +97,10 @@ struct App {
     qr_bytes: Option<Vec<u8>>,
     unlock_input: String,
     sheet: Sheet,
+    dark: bool,
+    syncing: bool,
+    edited_at: Option<Instant>,
+    writes: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -106,6 +141,8 @@ enum Message {
     CloseSheet,
     SelectChat(String),
     Revoke(String),
+    ToggleTheme,
+    Synced(SyncOutcome),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -156,6 +193,10 @@ impl App {
             qr_bytes: None,
             unlock_input: String::new(),
             sheet: Sheet::None,
+            dark: true,
+            syncing: false,
+            edited_at: None,
+            writes: 0,
         };
         match open_notebook(&app.dir) {
             Ok(book) => {
@@ -216,14 +257,16 @@ impl App {
             }
             Message::TitleChanged(title) => {
                 self.title_text = title;
+                self.edited_at = Some(Instant::now());
                 Task::none()
             }
             Message::BodyEdited(action) => {
                 self.body.perform(action);
+                self.edited_at = Some(Instant::now());
                 Task::none()
             }
             Message::Save => {
-                self.save();
+                self.save_keeping_editor();
                 Task::none()
             }
             Message::ShowNotes => {
@@ -238,10 +281,7 @@ impl App {
                 self.reload_chat();
                 Task::none()
             }
-            Message::AutoSync => {
-                self.sync_quiet();
-                Task::none()
-            }
+            Message::AutoSync => self.begin_sync(),
             Message::ToggleSyncPop => {
                 self.sync_open = !self.sync_open;
                 Task::none()
@@ -249,13 +289,14 @@ impl App {
             Message::ToggleRelay => {
                 if self.relay_ready && !self.relay_ours {
                     "This window did not start the relay.".clone_into(&mut self.sync_detail);
+                    Task::none()
                 } else if self.relay_ready {
                     self.stop_relay();
+                    Task::none()
                 } else {
                     self.start_relay();
-                    self.sync_quiet();
+                    self.begin_sync()
                 }
-                Task::none()
             }
             Message::OpenPaired => {
                 self.open_paired();
@@ -323,10 +364,7 @@ impl App {
                 self.unlock_input = text;
                 Task::none()
             }
-            Message::SubmitUnlock => {
-                self.submit_unlock();
-                Task::none()
-            }
+            Message::SubmitUnlock => self.submit_unlock(),
             Message::ShowInvite => {
                 if let Ok(link) = ambient_cli::contact_link(&self.dir) {
                     if link != self.contact_link {
@@ -355,6 +393,11 @@ impl App {
                 self.sheet = Sheet::None;
                 Task::none()
             }
+            Message::ToggleTheme => {
+                self.dark = !self.dark;
+                Task::none()
+            }
+            Message::Synced(outcome) => self.finish_sync(outcome),
         }
     }
 
@@ -364,54 +407,55 @@ impl App {
         }
         column![
             self.toolbar(),
-            row![self.sidebar(), self.main()].height(Fill)
+            hairline(),
+            row![self.sidebar(), hairline_v(), self.main()].height(Fill)
         ]
         .height(Fill)
         .into()
     }
 
     fn toolbar(&self) -> Element<'_, Message> {
+        let ink = self.ink();
         let role = match self.notebook.as_ref() {
             Some(book) if book.holds_root() => "Holds the root",
             Some(_) => "Paired device",
             None => "Not open",
         };
         let mut bar = row![
-            text("Ambient").size(20),
-            text(role).size(12),
-            text(self.message.as_str()).size(12).width(Fill),
-            button(text("Devices")).on_press(Message::ShowDevices),
+            text("Ambient").font(serif()).size(24),
+            text(role).size(12).color(ink.muted),
+            text(self.message.as_str())
+                .size(13)
+                .color(ink.muted)
+                .width(Fill),
+            ghost_label("Devices", Message::ShowDevices),
         ]
         .spacing(12)
         .align_y(iced::Alignment::Center)
-        .padding(12);
+        .padding([10.0, 16.0]);
         if self.notebook.as_ref().is_some_and(Notebook::holds_root) {
-            bar = bar.push(button(text("Recovery")).on_press(Message::ShowRecovery));
+            bar = bar.push(ghost_label("Recovery", Message::ShowRecovery));
         }
+        bar = bar.push(icon_button(mode_handle(self.dark), Message::ToggleTheme));
         bar = bar.push(anchored(
-            button(
-                iced_image::Image::new(globe_handle(self.globe_color()))
-                    .width(28)
-                    .height(28),
-            )
-            .on_press(Message::ToggleSyncPop)
-            .style(globe_button),
+            icon_button(globe_handle(self.globe_color()), Message::ToggleSyncPop),
             self.sync_open.then(|| self.sync_card()),
         ));
-        bar.into()
+        container(bar).width(Fill).into()
     }
 
     fn globe_color(&self) -> [u8; 3] {
         if !self.relay_ready {
-            [138, 143, 152]
+            [140, 133, 122]
         } else if self.pending {
-            [232, 93, 76]
+            [184, 78, 62]
         } else {
-            [61, 220, 151]
+            [46, 140, 96]
         }
     }
 
     fn sync_card(&self) -> Element<'_, Message> {
+        let ink = self.ink();
         let relay = if !self.relay_ready {
             "Relay is off."
         } else if self.relay_ours {
@@ -439,103 +483,119 @@ impl App {
             "Turn the relay on to sync."
         };
         let line = iced::Length::Fixed(276.0);
+        let switch_button = if self.relay_ready && !self.relay_ours {
+            ghost_label(switch, Message::ToggleRelay)
+        } else {
+            action_label(switch, Message::ToggleRelay)
+        };
         container(
             column![
-                text(state).size(16).width(line),
-                text(cadence).size(12).width(line),
-                text(relay).size(12).width(line),
-                text(self.sync_detail.as_str()).size(12).width(line),
-                button(text(switch)).on_press(Message::ToggleRelay),
+                text(state).font(serif()).size(20).width(line),
+                text(cadence).size(13).color(ink.muted).width(line),
+                text(relay).size(13).color(ink.muted).width(line),
+                text(self.sync_detail.as_str())
+                    .size(13)
+                    .color(ink.text)
+                    .width(line),
+                switch_button,
             ]
             .spacing(8),
         )
-        .padding(12)
+        .padding(14)
         .width(300)
-        .style(|_theme| container::Style {
-            background: Some(iced::Background::Color(iced::Color::from_rgb(
-                0.12, 0.12, 0.12,
-            ))),
-            border: iced::Border {
-                radius: 8.0.into(),
-                width: 1.0,
-                color: iced::Color::from_rgb(0.3, 0.3, 0.3),
-            },
-            ..Default::default()
-        })
+        .style(card_style)
         .into()
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
-        let notes_style = if self.show_chat { "Notes" } else { "Notes ·" };
-        let chat_style = if self.show_chat { "Chat ·" } else { "Chat" };
-        let mut side = column![
+        let ink = self.ink();
+        let modes = container(
             row![
-                button(text(notes_style))
-                    .on_press(Message::ShowNotes)
-                    .width(Fill),
-                button(text(chat_style))
-                    .on_press(Message::ShowChat)
-                    .width(Fill),
+                segment("Notes", !self.show_chat, Message::ShowNotes),
+                segment("Chat", self.show_chat, Message::ShowChat),
             ]
-            .spacing(8),
-        ]
-        .spacing(12)
-        .padding(16)
-        .width(260)
-        .height(Fill);
+            .spacing(4),
+        )
+        .padding(4)
+        .width(Fill)
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(ink.bg)),
+            border: iced::Border {
+                radius: 10.0.into(),
+                width: 0.0,
+                color: Color::TRANSPARENT,
+            },
+            ..Default::default()
+        });
+        let mut side = column![modes]
+            .spacing(14)
+            .padding(16)
+            .width(Fill)
+            .height(Fill);
         if self.show_chat {
-            side = side.push(
-                button(text("Invite"))
-                    .width(Fill)
-                    .on_press(Message::ShowInvite),
-            );
+            side = side.push(action_fill("Invite", Message::ShowInvite));
             if self.chats.is_empty() {
-                side = side.push(text("No conversations yet.").size(12));
+                side = side.push(text("No conversations yet.").size(13).color(ink.muted));
             }
             for chat in &self.chats {
-                let mut label = chat.label.clone();
-                if self.chat_id.as_deref() == Some(chat.id.as_str()) {
-                    label.insert_str(0, "● ");
-                }
-                side = side.push(
-                    button(text(label))
-                        .width(Fill)
-                        .on_press(Message::SelectChat(chat.id.clone())),
-                );
+                let selected = self.chat_id.as_deref() == Some(chat.id.as_str());
+                side = side.push(chat_row(&chat.label, &chat.id, selected));
             }
-            return side.into();
-        }
-        let mut notes = column![];
-        for note in &self.notes {
-            let mut label = if note.title.is_empty() {
-                "Untitled".to_owned()
-            } else {
-                note.title.clone()
-            };
-            if self.selected.as_deref() == Some(note.id.as_str()) {
-                label.insert_str(0, "● ");
-            }
-            if !note.writer.is_empty() {
-                label.push_str("  ");
-                label.push_str(&note.writer);
-            }
-            if note.conflict {
-                label.push_str("  conflict");
-            }
-            notes = notes.push(
-                button(text(label))
-                    .width(Fill)
-                    .on_press(Message::Select(note.id.clone())),
+        } else {
+            side = side.push(
+                text_input("Search notes", &self.query)
+                    .on_input(Message::QueryChanged)
+                    .padding(10)
+                    .size(14)
+                    .style(field_style),
             );
+            side = side.push(action_fill("New note", Message::NewNote));
+            if self.notes.is_empty() {
+                let empty = if self.query.is_empty() {
+                    "No notes yet."
+                } else {
+                    "No notes match."
+                };
+                side = side.push(text(empty).size(13).color(ink.muted));
+            }
+            let mut notes = column![].spacing(2);
+            for note in &self.notes {
+                notes = notes.push(self.note_row(note));
+            }
+            side = side.push(scrollable(notes).height(Fill));
         }
-        side = side.push(text_input("Search", &self.query).on_input(Message::QueryChanged));
-        side = side.push(
-            button(text("New note"))
-                .width(Fill)
-                .on_press(Message::NewNote),
-        );
-        side = side.push(scrollable(notes).height(Fill));
-        side.into()
+        container(side)
+            .width(280)
+            .height(Fill)
+            .style(surface_pane)
+            .into()
+    }
+
+    fn note_row(&self, note: &NoteSummary) -> Element<'_, Message> {
+        let ink = self.ink();
+        let selected = self.selected.as_deref() == Some(note.id.as_str());
+        let title = if note.title.is_empty() {
+            "Untitled".to_owned()
+        } else {
+            note.title.clone()
+        };
+        let mut lines = column![text(title).font(serif()).size(17).width(Fill)].spacing(2);
+        let mut meta = note.writer.clone();
+        if note.conflict {
+            if !meta.is_empty() {
+                meta.push_str(" · ");
+            }
+            meta.push_str("conflict");
+        }
+        if !meta.is_empty() {
+            lines = lines.push(text(meta).size(12).color(ink.muted).width(Fill));
+        }
+        button(lines)
+            .width(Fill)
+            .padding([8.0, 10.0])
+            .on_press(Message::Select(note.id.clone()))
+            .style(list_row(selected))
+            .into()
     }
 
     fn main(&self) -> Element<'_, Message> {
@@ -546,27 +606,42 @@ impl App {
             Sheet::None if self.show_chat => self.chat_pane(),
             Sheet::None => self.notes_pane(),
         };
-        container(body).padding(24).width(Fill).height(Fill).into()
+        container(body)
+            .padding([22.0, 32.0])
+            .width(Fill)
+            .height(Fill)
+            .into()
     }
 
     fn unlock_screen(&self) -> Element<'_, Message> {
-        column![
-            text("This folder is locked").size(22),
-            text("The passphrase unwraps the key file for this run. It is not the root, not the recovery phrase, and not a platform passkey.").size(12),
-            text_input("Passphrase", &self.unlock_input)
-                .on_input(Message::UnlockChanged)
-                .on_submit(Message::SubmitUnlock)
-                .secure(true),
-            button(text("Unlock")).on_press(Message::SubmitUnlock),
-            text(self.message.as_str()),
-        ]
-        .spacing(12)
-        .padding(24)
+        let ink = self.ink();
+        container(
+            column![
+                text("This folder is locked").font(serif()).size(32),
+                text("The passphrase unwraps the key file for this run. It is not the root, not the recovery phrase, and not a platform passkey.")
+                    .size(14)
+                    .color(ink.muted),
+                text_input("Passphrase", &self.unlock_input)
+                    .on_input(Message::UnlockChanged)
+                    .on_submit(Message::SubmitUnlock)
+                    .secure(true)
+                    .padding(10)
+                    .style(field_style),
+                action_label("Unlock", Message::SubmitUnlock),
+                text(self.message.as_str()).size(13).color(ink.muted),
+            ]
+            .spacing(14)
+            .max_width(460),
+        )
+        .padding(48)
+        .width(Fill)
+        .height(Fill)
         .into()
     }
 
     fn notes_pane(&self) -> Element<'_, Message> {
-        let mut body = column![].spacing(12).height(Fill);
+        let ink = self.ink();
+        let mut body = column![].spacing(14).height(Fill);
         if !self.open_error.is_empty() {
             body = body.push(text(format!(
                 "Could not open this folder. {}",
@@ -574,64 +649,73 @@ impl App {
             )));
         }
         if !self.conflicts.is_empty() {
-            let mut versions = column![text(
-                "Two versions. Write the one you want to keep, then save."
-            )]
+            let mut versions = column![
+                text("Two versions. Write the one you want to keep, then save.").color(ink.muted)
+            ]
             .spacing(8);
             for (index, (writer, title, note_body)) in self.conflicts.iter().enumerate() {
                 let number = index.saturating_add(1);
                 versions = versions.push(text(format!("Version {number} · {writer}: {title}")));
-                versions = versions.push(text(note_body));
+                versions = versions.push(text(note_body).color(ink.muted));
             }
             body = body.push(scrollable(versions).height(160));
         }
         if !self.note_writer.is_empty() && self.conflicts.is_empty() {
-            body = body.push(text(format!("Written by {}", self.note_writer)).size(12));
+            body = body.push(
+                text(format!("Written by {}", self.note_writer))
+                    .size(13)
+                    .color(ink.muted),
+            );
         }
         body = body.push(
             text_input("Title", &self.title_text)
                 .on_input(Message::TitleChanged)
-                .size(28),
+                .font(serif())
+                .size(32)
+                .padding([2.0, 0.0])
+                .style(title_style),
         );
         body = body.push(
             text_editor(&self.body)
                 .height(Fill)
+                .padding(14)
+                .size(16)
+                .font(sans())
                 .placeholder("Write")
                 .on_action(Message::BodyEdited)
-                .key_binding(binding),
+                .key_binding(binding)
+                .style(editor_style),
         );
-        let mut actions = row![button(text("Save")).on_press(Message::Save)].spacing(8);
+        let mut actions = row![action_label("Save", Message::Save)].spacing(8);
         if self.selected.is_some() {
-            actions = actions.push(button(text("Send to chat")).on_press(Message::SendNoteToChat));
+            actions = actions.push(ghost_label("Send to chat", Message::SendNoteToChat));
         }
         body = body.push(actions);
         body.into()
     }
 
     fn chat_pane(&self) -> Element<'_, Message> {
+        let ink = self.ink();
         let mut lines = column![].spacing(10);
         if self.chat.is_empty() {
-            lines = lines.push(text("No messages yet."));
-            lines = lines.push(button(text("Invite someone")).on_press(Message::ShowInvite));
+            lines = lines.push(text("No messages yet.").color(ink.muted));
+            lines = lines.push(action_label("Invite someone", Message::ShowInvite));
         }
         for line in &self.chat {
             lines = lines.push(
-                container(text(line))
-                    .padding(8)
-                    .style(|_theme| container::Style {
-                        background: Some(iced::Background::Color(iced::Color::from_rgb(
-                            0.15, 0.15, 0.15,
-                        ))),
-                        ..Default::default()
-                    }),
+                container(text(line).size(15))
+                    .padding([10.0, 12.0])
+                    .style(bubble_style),
             );
         }
         column![
             scrollable(lines).height(Fill),
             text_input("Message", &self.draft_chat)
                 .on_input(Message::DraftChat)
-                .on_submit(Message::SendChat),
-            button(text("Send")).on_press(Message::SendChat),
+                .on_submit(Message::SendChat)
+                .padding(10)
+                .style(field_style),
+            action_label("Send", Message::SendChat),
         ]
         .spacing(12)
         .height(Fill)
@@ -639,14 +723,15 @@ impl App {
     }
 
     fn invite_sheet(&self) -> Element<'_, Message> {
+        let ink = self.ink();
         let mut sheet = column![
             Self::sheet_title("Invite"),
-            text("Share your link, or paste theirs. A link is for text. A QR is for someone nearby. Only one side starts the conversation.").size(12),
-            text("Your link").size(12),
-            text(&self.contact_link).size(12),
+            text("Share your link, or paste theirs. A link is for text. A QR is for someone nearby. Only one side starts the conversation.").size(14).color(ink.muted),
+            text("Your link").size(12).color(ink.muted),
+            text(&self.contact_link).size(14),
             row![
-                button(text("Copy link")).on_press(Message::CopyLink),
-                button(text(if self.show_qr { "Hide QR" } else { "Show QR" })).on_press(Message::ToggleQr),
+                ghost_label("Copy link", Message::CopyLink),
+                ghost_label(if self.show_qr { "Hide QR" } else { "Show QR" }, Message::ToggleQr),
             ]
             .spacing(8),
         ]
@@ -661,27 +746,40 @@ impl App {
             );
         }
         sheet = sheet.push(
-            text_input("Their link or card", &self.their_card).on_input(Message::TheirCardChanged),
+            text_input("Their link or card", &self.their_card)
+                .on_input(Message::TheirCardChanged)
+                .padding(10)
+                .style(field_style),
         );
-        sheet = sheet.push(button(text("Start conversation")).on_press(Message::StartConversation));
+        sheet = sheet.push(action_label(
+            "Start conversation",
+            Message::StartConversation,
+        ));
         scrollable(sheet).height(Fill).into()
     }
 
     fn devices_sheet(&self) -> Element<'_, Message> {
+        let ink = self.ink();
         let mut sheet = column![
             Self::sheet_title("Devices"),
-            text(self.dir.display().to_string()).size(12),
-            text("Unlock").size(16),
-            text("Wraps the key file. Not the root, and not a platform passkey.").size(12),
+            text(self.dir.display().to_string())
+                .size(13)
+                .color(ink.muted),
+            text("Unlock").font(serif()).size(22),
+            text("Wraps the key file. Not the root, and not a platform passkey.")
+                .size(14)
+                .color(ink.muted),
             text_input("Passphrase", &self.unlock_input)
                 .on_input(Message::UnlockChanged)
-                .secure(true),
-            button(text("Wrap key file")).on_press(Message::SubmitUnlock),
+                .secure(true)
+                .padding(10)
+                .style(field_style),
+            action_label("Wrap key file", Message::SubmitUnlock),
         ]
         .spacing(12);
-        sheet = sheet.push(text("Devices").size(16));
+        sheet = sheet.push(text("Devices").font(serif()).size(22));
         if self.devices.is_empty() {
-            sheet = sheet.push(text("No devices yet.").size(12));
+            sheet = sheet.push(text("No devices yet.").size(13).color(ink.muted));
         }
         for device in &self.devices {
             let state = if device.revoked {
@@ -691,49 +789,53 @@ impl App {
             } else {
                 "active"
             };
-            sheet = sheet.push(text(format!("{} · {state}", device.label)).size(14));
+            sheet = sheet.push(text(format!("{} · {state}", device.label)).size(15));
             if self.notebook.as_ref().is_some_and(Notebook::holds_root)
                 && !device.current
                 && !device.revoked
             {
-                sheet = sheet.push(
-                    button(text(format!("Revoke {}", device.label)))
-                        .on_press(Message::Revoke(device.id.clone())),
-                );
+                let label = format!("Revoke {}", device.label);
+                sheet = sheet.push(ghost_label_owned(label, Message::Revoke(device.id.clone())));
             }
         }
         if self.notebook.as_ref().is_some_and(Notebook::holds_root) {
-            sheet = sheet.push(text("A paired folder does not hold the root. Revoke stops future seals. It does not erase notes that device already opened.").size(12));
-            sheet = sheet.push(button(text("Open paired window")).on_press(Message::OpenPaired));
-            sheet = sheet.push(button(text("Open the other person")).on_press(Message::OpenPerson));
+            sheet = sheet.push(text("A paired folder does not hold the root. Revoke stops future seals. It does not erase notes that device already opened.").size(14).color(ink.muted));
+            sheet = sheet.push(ghost_label("Open paired window", Message::OpenPaired));
+            sheet = sheet.push(ghost_label("Open the other person", Message::OpenPerson));
         }
         scrollable(sheet).height(Fill).into()
     }
 
     fn recovery_sheet(&self) -> Element<'_, Message> {
+        let ink = self.ink();
         let mut sheet = column![
             Self::sheet_title("Recovery"),
-            text("The phrase rebuilds the root on a new folder. It does not recreate the old device keys. The new folder adds itself so it can sync. Revoke the devices you no longer have. This is not social recovery.").size(12),
-            button(text("Show recovery phrase")).on_press(Message::ShowPhrase),
+            text("The phrase rebuilds the root on a new folder. It does not recreate the old device keys. The new folder adds itself so it can sync. Revoke the devices you no longer have. This is not social recovery.").size(14).color(ink.muted),
+            action_label("Show recovery phrase", Message::ShowPhrase),
         ]
         .spacing(12);
         if !self.recovery_phrase.is_empty() {
-            sheet = sheet.push(text(&self.recovery_phrase).size(12));
-            sheet = sheet.push(button(text("Copy phrase")).on_press(Message::CopyPhrase));
+            sheet = sheet.push(text(&self.recovery_phrase).size(15));
+            sheet = sheet.push(ghost_label("Copy phrase", Message::CopyPhrase));
         }
         sheet = sheet.push(
             text_input("Paste phrase to restore", &self.restore_phrase)
-                .on_input(Message::RestorePhraseChanged),
+                .on_input(Message::RestorePhraseChanged)
+                .padding(10)
+                .style(field_style),
         );
-        sheet = sheet.push(button(text("Restore into new folder")).on_press(Message::StartRestore));
+        sheet = sheet.push(action_label(
+            "Restore into new folder",
+            Message::StartRestore,
+        ));
         scrollable(sheet).height(Fill).into()
     }
 
     fn sheet_title(title: &str) -> Element<'static, Message> {
         let title = title.to_owned();
         row![
-            text(title).size(22),
-            button(text("Back")).on_press(Message::CloseSheet),
+            text(title).font(serif()).size(32),
+            ghost_label("Back", Message::CloseSheet),
         ]
         .spacing(12)
         .align_y(iced::Alignment::Center)
@@ -775,9 +877,7 @@ impl App {
     }
 
     fn show_note(&mut self, id: &str) {
-        if self.selected.as_deref() == Some(id)
-            && (self.title_text != self.disk_title || self.body.text() != self.disk_body)
-        {
+        if self.selected.as_deref() == Some(id) && self.editor_dirty() {
             self.show_chat = false;
             self.sheet = Sheet::None;
             return;
@@ -802,9 +902,11 @@ impl App {
                 if let Some((title, body)) = stash {
                     self.title_text = title;
                     self.body = text_editor::Content::with_text(&body);
+                    self.edited_at = Some(Instant::now());
                 } else {
                     self.title_text.clone_from(&draft.title);
                     self.body = text_editor::Content::with_text(&draft.body);
+                    self.edited_at = None;
                 }
                 self.conflicts = draft.conflicts;
                 self.note_writer = note
@@ -837,15 +939,17 @@ impl App {
         if let Some((title, body)) = stash {
             self.title_text = title;
             self.body = text_editor::Content::with_text(&body);
+            self.edited_at = Some(Instant::now());
             return;
         }
         self.title_text.clear();
         self.body = text_editor::Content::new();
+        self.edited_at = None;
         self.message.clear();
     }
 
     fn remember_unsaved(&mut self) {
-        if self.title_text == self.disk_title && self.body.text() == self.disk_body {
+        if !self.editor_dirty() {
             return;
         }
         let key = self.selected.clone();
@@ -854,16 +958,27 @@ impl App {
             .push((key, self.title_text.clone(), self.body.text()));
     }
 
-    fn save(&mut self) {
+    fn editor_dirty(&self) -> bool {
+        self.title_text != self.disk_title || self.body.text() != self.disk_body
+    }
+
+    fn ink(&self) -> Ink {
+        Ink::from_dark(self.dark)
+    }
+
+    fn save_keeping_editor(&mut self) {
         let body = self.body.text();
         let title = self.title_text.clone();
         let current = self.selected.clone();
-        let Some(book) = self.notebook.as_ref() else {
-            return;
-        };
-        let saved = match current.as_deref() {
-            Some(id) => book.edit(id, &title, &body).map(|()| id.to_owned()),
-            None => book.add(&title, &body),
+        let saved = {
+            let _guard = io_lock();
+            let Some(book) = self.notebook.as_ref() else {
+                return;
+            };
+            match current.as_deref() {
+                Some(id) => book.edit(id, &title, &body).map(|()| id.to_owned()),
+                None => book.add(&title, &body),
+            }
         };
         match saved {
             Ok(id) => {
@@ -872,15 +987,99 @@ impl App {
                 if current.is_none() {
                     self.unsaved.retain(|(key, _, _)| key.is_some());
                 }
+                self.selected = Some(id);
                 self.disk_title.clone_from(&self.title_text);
-                self.disk_body = self.body.text();
+                self.disk_body = body;
+                self.edited_at = None;
+                self.conflicts.clear();
                 self.message.clear();
                 self.reload();
-                self.show_note(&id);
-                self.mark_pending();
+                self.writes = self.writes.saturating_add(1);
+                self.pending = true;
+                if self.note_writer.is_empty()
+                    && let Some(note) = self
+                        .notes
+                        .iter()
+                        .find(|note| self.selected.as_deref() == Some(note.id.as_str()))
+                {
+                    self.note_writer.clone_from(&note.writer);
+                }
             }
             Err(err) => self.message = err.to_string(),
         }
+    }
+
+    fn begin_sync(&mut self) -> Task<Message> {
+        if self.syncing || !self.relay_ready {
+            return Task::none();
+        }
+        if self.editor_dirty()
+            && self
+                .edited_at
+                .is_some_and(|at| at.elapsed() >= Duration::from_millis(700))
+        {
+            self.save_keeping_editor();
+        }
+        self.syncing = true;
+        sync_task(self.dir.clone(), self.writes)
+    }
+
+    fn finish_sync(&mut self, outcome: SyncOutcome) -> Task<Message> {
+        self.syncing = false;
+        if outcome.failed {
+            if outcome.detail.contains("unreachable") && !self.relay_ours {
+                self.relay_ready = false;
+            }
+            self.sync_detail = outcome.detail;
+            return Task::none();
+        }
+        self.sync_detail = outcome.detail;
+        match Notebook::open(&self.dir) {
+            Ok(book) => {
+                self.notebook = Some(book);
+                self.reload();
+                self.refresh_open_note();
+            }
+            Err(err) => self.sync_detail = err.to_string(),
+        }
+        self.reload_chat();
+        self.pending = outcome.pending || self.writes != outcome.writes;
+        Task::none()
+    }
+
+    fn refresh_open_note(&mut self) {
+        if self.editor_dirty() {
+            return;
+        }
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        let Some(book) = self.notebook.as_ref() else {
+            return;
+        };
+        let Ok(note) = book.show(&id) else {
+            return;
+        };
+        let draft = Draft::from_note(&note);
+        let writer = note
+            .heads
+            .first()
+            .map(|head| head.writer.clone())
+            .unwrap_or_default();
+        if draft.title == self.disk_title
+            && draft.body == self.disk_body
+            && draft.conflicts == self.conflicts
+        {
+            self.note_writer = writer;
+            return;
+        }
+        self.note_writer = writer;
+        self.conflicts = draft.conflicts;
+        self.disk_title.clone_from(&draft.title);
+        self.disk_body.clone_from(&draft.body);
+        self.title_text.clone_from(&draft.title);
+        self.body = text_editor::Content::with_text(&draft.body);
+        self.edited_at = None;
     }
 
     fn say(&mut self, text: &str) {
@@ -919,35 +1118,9 @@ impl App {
         }
     }
 
-    fn sync_quiet(&mut self) {
-        if !self.relay_ready {
-            return;
-        }
-        match ambient_cli::sync_folder(&self.dir, ambient_cli::LOOPBACK_URL) {
-            Ok(detail) => {
-                self.sync_detail = detail;
-                match Notebook::open(&self.dir) {
-                    Ok(book) => {
-                        self.notebook = Some(book);
-                        self.reload();
-                    }
-                    Err(err) => self.sync_detail = err.to_string(),
-                }
-                self.reload_chat();
-                self.pending = ambient_cli::has_unsent(&self.dir).unwrap_or(true);
-            }
-            Err(err) => {
-                let text = err.to_string();
-                if text.contains("unreachable") && !self.relay_ours {
-                    self.relay_ready = false;
-                }
-                self.sync_detail = text;
-            }
-        }
-    }
-
     fn mark_pending(&mut self) {
-        self.pending = ambient_cli::has_unsent(&self.dir).unwrap_or(true);
+        self.pending = true;
+        self.writes = self.writes.saturating_add(1);
     }
 
     fn open_paired(&mut self) {
@@ -1189,7 +1362,7 @@ impl App {
         }
     }
 
-    fn submit_unlock(&mut self) {
+    fn submit_unlock(&mut self) -> Task<Message> {
         let passphrase = self.unlock_input.trim().to_owned();
         if self.open_error == "this folder is locked" {
             match ambient_cli::unlock_folder(&self.dir, &passphrase) {
@@ -1208,16 +1381,16 @@ impl App {
                                 self.contact_link = link;
                             }
                             self.say("Unlocked for this run. The key file on disk stays wrapped.");
-                            self.pending = ambient_cli::has_unsent(&self.dir).unwrap_or(false);
+                            self.pending = false;
                             self.start_relay();
-                            self.sync_quiet();
+                            return self.begin_sync();
                         }
                         Err(err) => self.open_error = err.to_string(),
                     }
                 }
                 Err(err) => self.message = err.to_string(),
             }
-            return;
+            return Task::none();
         }
         match ambient_cli::set_folder_unlock(&self.dir, &passphrase) {
             Ok(()) => {
@@ -1228,14 +1401,459 @@ impl App {
             }
             Err(err) => self.message = err.to_string(),
         }
+        Task::none()
     }
 }
 
-fn globe_button(_theme: &Theme, _status: button::Status) -> button::Style {
+#[derive(Clone, Copy)]
+struct Ink {
+    bg: Color,
+    text: Color,
+    muted: Color,
+    accent: Color,
+    on_accent: Color,
+    surface: Color,
+    hairline: Color,
+    field: Color,
+}
+
+impl Ink {
+    fn from_dark(dark: bool) -> Self {
+        if dark {
+            Self {
+                bg: Color::from_rgb8(0x1C, 0x19, 0x17),
+                text: Color::from_rgb8(0xED, 0xEA, 0xDE),
+                muted: Color::from_rgb8(0xA8, 0xA2, 0x9E),
+                accent: Color::from_rgb8(0x66, 0xA5, 0xE1),
+                on_accent: Color::from_rgb8(0x1C, 0x19, 0x17),
+                surface: Color::from_rgb8(0x26, 0x22, 0x20),
+                hairline: Color::from_rgb8(0x3A, 0x34, 0x2E),
+                field: Color::from_rgb8(0x14, 0x12, 0x10),
+            }
+        } else {
+            Self {
+                bg: Color::from_rgb8(0xED, 0xEA, 0xDE),
+                text: Color::from_rgb8(0x1C, 0x19, 0x17),
+                muted: Color::from_rgb8(0x6B, 0x65, 0x60),
+                accent: Color::from_rgb8(0x16, 0x44, 0x6F),
+                on_accent: Color::from_rgb8(0xED, 0xEA, 0xDE),
+                surface: Color::from_rgb8(0xE4, 0xE0, 0xD2),
+                hairline: Color::from_rgb8(0xD0, 0xCB, 0xBC),
+                field: Color::from_rgb8(0xF7, 0xF5, 0xEE),
+            }
+        }
+    }
+}
+
+fn ink_of(theme: &Theme) -> Ink {
+    Ink::from_dark(theme.palette().background.r < 0.5)
+}
+
+fn mix(from: Color, to: Color, t: f32) -> Color {
+    Color {
+        r: from.r + (to.r - from.r) * t,
+        g: from.g + (to.g - from.g) * t,
+        b: from.b + (to.b - from.b) * t,
+        a: from.a + (to.a - from.a) * t,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SyncOutcome {
+    detail: String,
+    pending: bool,
+    failed: bool,
+    writes: u64,
+}
+
+fn io_lock() -> std::sync::MutexGuard<'static, ()> {
+    static IO: Mutex<()> = Mutex::new(());
+    IO.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn run_sync(dir: &Path) -> SyncOutcome {
+    let _guard = io_lock();
+    match ambient_cli::sync_folder(dir, ambient_cli::LOOPBACK_URL) {
+        Ok(detail) => SyncOutcome {
+            pending: ambient_cli::has_unsent(dir).unwrap_or(true),
+            detail,
+            failed: false,
+            writes: 0,
+        },
+        Err(err) => SyncOutcome {
+            detail: err.to_string(),
+            pending: true,
+            failed: true,
+            writes: 0,
+        },
+    }
+}
+
+fn sync_task(dir: PathBuf, writes: u64) -> Task<Message> {
+    Task::perform(
+        async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = sender.send(run_sync(&dir));
+            });
+            let mut outcome = receiver.await.unwrap_or_else(|_| SyncOutcome {
+                detail: "Sync stopped before it finished.".to_owned(),
+                pending: true,
+                failed: true,
+                writes: 0,
+            });
+            outcome.writes = writes;
+            outcome
+        },
+        Message::Synced,
+    )
+}
+
+fn action_style(theme: &Theme, status: button::Status) -> button::Style {
+    let ink = ink_of(theme);
+    let background = match status {
+        button::Status::Hovered => mix(ink.accent, Color::WHITE, 0.12),
+        button::Status::Pressed => mix(ink.accent, Color::BLACK, 0.16),
+        button::Status::Disabled => mix(ink.accent, ink.bg, 0.45),
+        button::Status::Active => ink.accent,
+    };
     button::Style {
-        background: None,
+        background: Some(iced::Background::Color(background)),
+        text_color: ink.on_accent,
+        border: iced::Border {
+            radius: 8.0.into(),
+            width: 0.0,
+            color: Color::TRANSPARENT,
+        },
         ..Default::default()
     }
+}
+
+fn ghost_style(theme: &Theme, status: button::Status) -> button::Style {
+    let ink = ink_of(theme);
+    let background = match status {
+        button::Status::Hovered => Some(iced::Background::Color(ink.surface)),
+        button::Status::Pressed => Some(iced::Background::Color(mix(ink.accent, ink.bg, 0.85))),
+        _ => None,
+    };
+    button::Style {
+        background,
+        text_color: ink.text,
+        border: iced::Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: ink.hairline,
+        },
+        ..Default::default()
+    }
+}
+
+fn icon_style(theme: &Theme, status: button::Status) -> button::Style {
+    let ink = ink_of(theme);
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => {
+            Some(iced::Background::Color(ink.surface))
+        }
+        _ => None,
+    };
+    button::Style {
+        background,
+        text_color: ink.text,
+        border: iced::Border {
+            radius: 8.0.into(),
+            width: 0.0,
+            color: Color::TRANSPARENT,
+        },
+        ..Default::default()
+    }
+}
+
+fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let ink = ink_of(theme);
+        let background = if selected {
+            Some(iced::Background::Color(mix(ink.bg, ink.accent, 0.18)))
+        } else if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+            Some(iced::Background::Color(mix(ink.surface, ink.bg, 0.35)))
+        } else {
+            None
+        };
+        button::Style {
+            background,
+            text_color: ink.text,
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: 0.0,
+                color: Color::TRANSPARENT,
+            },
+            ..Default::default()
+        }
+    }
+}
+
+fn segment_style(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        if active {
+            action_style(theme, status)
+        } else {
+            let ink = ink_of(theme);
+            let background = match status {
+                button::Status::Hovered | button::Status::Pressed => {
+                    Some(iced::Background::Color(mix(ink.bg, ink.surface, 0.6)))
+                }
+                _ => None,
+            };
+            button::Style {
+                background,
+                text_color: ink.muted,
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    width: 0.0,
+                    color: Color::TRANSPARENT,
+                },
+                ..Default::default()
+            }
+        }
+    }
+}
+
+fn field_style(theme: &Theme, _status: text_input::Status) -> text_input::Style {
+    let ink = ink_of(theme);
+    text_input::Style {
+        background: iced::Background::Color(ink.field),
+        border: iced::Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: ink.hairline,
+        },
+        icon: ink.muted,
+        placeholder: ink.muted,
+        value: ink.text,
+        selection: mix(ink.accent, ink.bg, 0.35),
+    }
+}
+
+fn title_style(theme: &Theme, _status: text_input::Status) -> text_input::Style {
+    let ink = ink_of(theme);
+    text_input::Style {
+        background: iced::Background::Color(Color::TRANSPARENT),
+        border: iced::Border {
+            radius: 0.0.into(),
+            width: 0.0,
+            color: Color::TRANSPARENT,
+        },
+        icon: ink.muted,
+        placeholder: ink.muted,
+        value: ink.text,
+        selection: mix(ink.accent, ink.bg, 0.35),
+    }
+}
+
+fn editor_style(theme: &Theme, _status: text_editor::Status) -> text_editor::Style {
+    let ink = ink_of(theme);
+    text_editor::Style {
+        background: iced::Background::Color(ink.field),
+        border: iced::Border {
+            radius: 10.0.into(),
+            width: 1.0,
+            color: ink.hairline,
+        },
+        placeholder: ink.muted,
+        value: ink.text,
+        selection: mix(ink.accent, ink.bg, 0.35),
+    }
+}
+
+fn surface_pane(theme: &Theme) -> container::Style {
+    let ink = ink_of(theme);
+    container::Style {
+        background: Some(iced::Background::Color(ink.surface)),
+        text_color: Some(ink.text),
+        ..Default::default()
+    }
+}
+
+fn card_style(theme: &Theme) -> container::Style {
+    let ink = ink_of(theme);
+    container::Style {
+        background: Some(iced::Background::Color(ink.surface)),
+        text_color: Some(ink.text),
+        border: iced::Border {
+            radius: 12.0.into(),
+            width: 1.0,
+            color: ink.hairline,
+        },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.18),
+            offset: iced::Vector::new(0.0, 8.0),
+            blur_radius: 18.0,
+        },
+        ..Default::default()
+    }
+}
+
+fn bubble_style(theme: &Theme) -> container::Style {
+    let ink = ink_of(theme);
+    container::Style {
+        background: Some(iced::Background::Color(ink.surface)),
+        text_color: Some(ink.text),
+        border: iced::Border {
+            radius: 10.0.into(),
+            width: 0.0,
+            color: Color::TRANSPARENT,
+        },
+        ..Default::default()
+    }
+}
+
+fn hairline() -> Element<'static, Message> {
+    container(column![])
+        .height(1)
+        .width(Fill)
+        .style(|theme| {
+            let ink = ink_of(theme);
+            container::Style {
+                background: Some(iced::Background::Color(ink.hairline)),
+                ..Default::default()
+            }
+        })
+        .into()
+}
+
+fn hairline_v() -> Element<'static, Message> {
+    container(column![])
+        .width(1)
+        .height(Fill)
+        .style(|theme| {
+            let ink = ink_of(theme);
+            container::Style {
+                background: Some(iced::Background::Color(ink.hairline)),
+                ..Default::default()
+            }
+        })
+        .into()
+}
+
+fn action_label(label: &str, message: Message) -> Element<'_, Message> {
+    button(text(label).size(14))
+        .padding([8.0, 14.0])
+        .on_press(message)
+        .style(action_style)
+        .into()
+}
+
+fn action_fill(label: &str, message: Message) -> Element<'_, Message> {
+    button(text(label).size(14).width(Fill))
+        .width(Fill)
+        .padding([8.0, 14.0])
+        .on_press(message)
+        .style(action_style)
+        .into()
+}
+
+fn ghost_label(label: &str, message: Message) -> Element<'_, Message> {
+    button(text(label).size(14))
+        .padding([8.0, 14.0])
+        .on_press(message)
+        .style(ghost_style)
+        .into()
+}
+
+fn ghost_label_owned(label: String, message: Message) -> Element<'static, Message> {
+    button(text(label).size(14))
+        .padding([8.0, 14.0])
+        .on_press(message)
+        .style(ghost_style)
+        .into()
+}
+
+fn segment(label: &str, active: bool, message: Message) -> Element<'_, Message> {
+    button(text(label).size(14).width(Fill))
+        .width(Fill)
+        .padding([8.0, 10.0])
+        .on_press(message)
+        .style(segment_style(active))
+        .into()
+}
+
+fn chat_row(label: &str, id: &str, selected: bool) -> Element<'static, Message> {
+    let label = label.to_owned();
+    let id = id.to_owned();
+    button(text(label).size(15).width(Fill))
+        .width(Fill)
+        .padding([8.0, 10.0])
+        .on_press(Message::SelectChat(id))
+        .style(list_row(selected))
+        .into()
+}
+
+fn icon_button(handle: iced_image::Handle, message: Message) -> Element<'static, Message> {
+    button(iced_image::Image::new(handle).width(22).height(22))
+        .padding(6)
+        .on_press(message)
+        .style(icon_style)
+        .into()
+}
+
+fn mode_handle(dark: bool) -> iced_image::Handle {
+    use std::sync::OnceLock;
+    static HANDLES: OnceLock<[iced_image::Handle; 2]> = OnceLock::new();
+    let handles = HANDLES.get_or_init(|| {
+        [
+            iced_image::Handle::from_bytes(mode_png(true, [0x66, 0xA5, 0xE1])),
+            iced_image::Handle::from_bytes(mode_png(false, [0x16, 0x44, 0x6F])),
+        ]
+    });
+    if dark {
+        handles[0].clone()
+    } else {
+        handles[1].clone()
+    }
+}
+
+fn mode_png(sun: bool, color: [u8; 3]) -> Vec<u8> {
+    let size = 64_u32;
+    let mut pixels = vec![0_u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let dx = f64::from(x) - 31.5;
+            let dy = f64::from(y) - 31.5;
+            if !mode_ink(sun, dx, dy) {
+                continue;
+            }
+            let index = ((y * size + x) * 4) as usize;
+            if let Some(pixel) = pixels.get_mut(index..index.saturating_add(4)) {
+                pixel.copy_from_slice(&[color[0], color[1], color[2], 255]);
+            }
+        }
+    }
+    encode_png(&pixels, size)
+}
+
+fn mode_ink(sun: bool, dx: f64, dy: f64) -> bool {
+    let radius = dx.hypot(dy);
+    if sun {
+        if radius < 9.5 {
+            return true;
+        }
+        if !(13.5..22.0).contains(&radius) {
+            return false;
+        }
+        let angle = dy.atan2(dx);
+        let step = std::f64::consts::FRAC_PI_4;
+        let nearest = (angle / step).round() * step;
+        (angle - nearest).abs() < 0.18
+    } else {
+        let bite = (dx - 9.0).hypot(dy - 1.0);
+        radius < 16.0 && bite > 13.5
+    }
+}
+
+fn encode_png(pixels: &[u8], size: u32) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let encoder = ::image::codecs::png::PngEncoder::new(Cursor::new(&mut buf));
+    let _ = encoder.write_image(pixels, size, size, ::image::ExtendedColorType::Rgba8);
+    buf
 }
 
 fn globe_handle(color: [u8; 3]) -> iced_image::Handle {
@@ -1243,14 +1861,14 @@ fn globe_handle(color: [u8; 3]) -> iced_image::Handle {
     static HANDLES: OnceLock<[iced_image::Handle; 3]> = OnceLock::new();
     let handles = HANDLES.get_or_init(|| {
         [
-            iced_image::Handle::from_bytes(globe_png([138, 143, 152])),
-            iced_image::Handle::from_bytes(globe_png([232, 93, 76])),
-            iced_image::Handle::from_bytes(globe_png([61, 220, 151])),
+            iced_image::Handle::from_bytes(globe_png([140, 133, 122])),
+            iced_image::Handle::from_bytes(globe_png([184, 78, 62])),
+            iced_image::Handle::from_bytes(globe_png([46, 140, 96])),
         ]
     });
-    if color == [232, 93, 76] {
+    if color == [184, 78, 62] {
         handles[1].clone()
-    } else if color == [61, 220, 151] {
+    } else if color == [46, 140, 96] {
         handles[2].clone()
     } else {
         handles[0].clone()

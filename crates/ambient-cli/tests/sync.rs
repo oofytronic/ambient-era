@@ -31,6 +31,52 @@ fn note_reaches_the_second_device() -> Result<(), String> {
 }
 
 #[test]
+fn edited_note_reaches_the_second_device() -> Result<(), String> {
+    let port = spawn_relay()?;
+    let url = format!("ws://127.0.0.1:{port}");
+    let root = std::env::temp_dir().join(format!("ambient-edit-sync-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let owner = root.join("owner");
+    let other = root.join("other");
+    let owner_s = owner.to_string_lossy().to_string();
+    let other_s = other.to_string_lossy().to_string();
+    run_ok(&["init", &owner_s], "")?;
+    run_ok(&["add", &owner_s, "Market"], "buy milk")?;
+    let offer = run_ok(&["device", &other_s], "")?;
+    run_ok(&["pair", &owner_s, offer.trim()], "")?;
+    run_ok(&["sync", &owner_s, &url], "")?;
+    run_ok(&["sync", &other_s, &url], "")?;
+    let listed = run_ok(&["list", &owner_s], "")?;
+    let id = listed
+        .lines()
+        .find(|line| line.contains("Market"))
+        .and_then(|line| line.split_whitespace().next())
+        .ok_or_else(|| format!("missing note id: {listed}"))?;
+    run_ok(&["edit", &owner_s, id, "Market"], "buy milk and bread")?;
+    run_ok(&["add", &owner_s, "Later"], "eggs")?;
+    run_ok(&["sync", &owner_s, &url], "")?;
+    run_ok(&["sync", &other_s, &url], "")?;
+    let book = ambient_cli::Notebook::open(&other).map_err(|err| err.to_string())?;
+    let notes = book.list().map_err(|err| err.to_string())?;
+    if !notes.iter().any(|note| note.title == "Market")
+        || !notes.iter().any(|note| note.title == "Later")
+    {
+        return Err(format!("second device missed a note: {notes:?}"));
+    }
+    let shown = book.show(id).map_err(|err| err.to_string())?;
+    let body = shown
+        .heads
+        .first()
+        .map(|head| head.body.as_str())
+        .unwrap_or("");
+    if body != "buy milk and bread" {
+        return Err(format!("edit did not arrive: {body}"));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
 fn one_message_crosses() -> Result<(), String> {
     let port = spawn_relay()?;
     let url = format!("ws://127.0.0.1:{port}");

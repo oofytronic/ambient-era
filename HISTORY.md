@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-05 — typing, notes on the other folder, parchment
+
+Typing does not wait on sync. The window runs sync off its own thread, and a short pause writes the open note without moving the cursor, so a new note or an edit reaches the paired folder without a separate Save. A note that is already saved refreshes when the other folder's version arrives. The window is parchment: light `#EDEADE` with `#16446F`, dark `#1C1917` with `#66A5E1`. Titles are Crimson Pro. The rest is DM Sans. A sun or moon beside the globe switches them. Notes and chats in the list are rows, not the same control as Save, Send, or New note.
+
 ## 2026-11-04 — globe, auto-sync, drafts, restore enrolls
 
 The window no longer has a Sync button or a relay button. A globe at the right of the toolbar is gray when the relay is off, green when it is on and nothing is unsent, and red when it is on and something has not been pushed. Clicking it opens a popover under the icon, over the notes, with the last sync line and a control to start or stop the relay this window started. The relay starts when the folder opens, and the window syncs on its own while that relay is on. The relay is still cleartext on `127.0.0.1`. It is not a public server.
