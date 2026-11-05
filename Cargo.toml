@@ -45,7 +45,8 @@ chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["
 getrandom = { version = "0.2.16" }
 # Linux notes window. Iced draws its own controls in a system window. Not a webview.
 # tokio: the notes window's auto-sync timer (`iced::time::every`). Not a protocol dependency.
-iced = { version = "=0.14.0", features = ["image", "tokio"] }
+# advanced: the sync globe draws its own popover over the notes. Not a protocol dependency.
+iced = { version = "=0.14.0", features = ["image", "tokio", "advanced"] }
 # Test vectors, and the relay's newline-delimited JSON (docs/spec/04-relay-api.md).
 serde_json = { version = "1.0.154" }
 # HPKE base mode for a private Space (RFC 9180, ADR-0005). X25519 and ChaCha20-Poly1305 only.

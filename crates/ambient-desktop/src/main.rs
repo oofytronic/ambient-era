@@ -364,7 +364,6 @@ impl App {
         }
         column![
             self.toolbar(),
-            self.sync_pop(),
             row![self.sidebar(), self.main()].height(Fill)
         ]
         .height(Fill)
@@ -389,7 +388,7 @@ impl App {
         if self.notebook.as_ref().is_some_and(Notebook::holds_root) {
             bar = bar.push(button(text("Recovery")).on_press(Message::ShowRecovery));
         }
-        bar = bar.push(
+        bar = bar.push(anchored(
             button(
                 iced_image::Image::new(globe_handle(self.globe_color()))
                     .width(28)
@@ -397,7 +396,8 @@ impl App {
             )
             .on_press(Message::ToggleSyncPop)
             .style(globe_button),
-        );
+            self.sync_open.then(|| self.sync_card()),
+        ));
         bar.into()
     }
 
@@ -411,10 +411,7 @@ impl App {
         }
     }
 
-    fn sync_pop(&self) -> Element<'_, Message> {
-        if !self.sync_open {
-            return column![].into();
-        }
+    fn sync_card(&self) -> Element<'_, Message> {
         let relay = if !self.relay_ready {
             "Relay is off."
         } else if self.relay_ours {
@@ -441,34 +438,30 @@ impl App {
         } else {
             "Turn the relay on to sync."
         };
-        row![
-            column![].width(Fill),
-            container(
-                column![
-                    text(state).size(16),
-                    text(cadence).size(12),
-                    text(relay).size(12),
-                    text(self.sync_detail.as_str()).size(12),
-                    button(text(switch)).on_press(Message::ToggleRelay),
-                ]
-                .spacing(8)
-                .width(320),
-            )
-            .padding(12)
-            .width(320)
-            .style(|_theme| container::Style {
-                background: Some(iced::Background::Color(iced::Color::from_rgb(
-                    0.12, 0.12, 0.12
-                ))),
-                border: iced::Border {
-                    radius: 8.0.into(),
-                    width: 1.0,
-                    color: iced::Color::from_rgb(0.3, 0.3, 0.3),
-                },
-                ..Default::default()
-            }),
-        ]
-        .padding([0, 16])
+        let line = iced::Length::Fixed(276.0);
+        container(
+            column![
+                text(state).size(16).width(line),
+                text(cadence).size(12).width(line),
+                text(relay).size(12).width(line),
+                text(self.sync_detail.as_str()).size(12).width(line),
+                button(text(switch)).on_press(Message::ToggleRelay),
+            ]
+            .spacing(8),
+        )
+        .padding(12)
+        .width(300)
+        .style(|_theme| container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgb(
+                0.12, 0.12, 0.12,
+            ))),
+            border: iced::Border {
+                radius: 8.0.into(),
+                width: 1.0,
+                color: iced::Color::from_rgb(0.3, 0.3, 0.3),
+            },
+            ..Default::default()
+        })
         .into()
     }
 
@@ -1347,4 +1340,268 @@ fn generate_qr(data: &str) -> Result<Vec<u8>, String> {
         )
         .map_err(|_| "could not encode QR")?;
     Ok(buf)
+}
+
+fn anchored<'a>(
+    anchor: impl Into<Element<'a, Message>>,
+    card: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    Anchored {
+        anchor: anchor.into(),
+        card,
+    }
+    .into()
+}
+
+struct Anchored<'a> {
+    anchor: Element<'a, Message>,
+    card: Option<Element<'a, Message>>,
+}
+
+impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for Anchored<'_> {
+    fn size(&self) -> iced::Size<iced::Length> {
+        self.anchor.as_widget().size()
+    }
+
+    fn size_hint(&self) -> iced::Size<iced::Length> {
+        self.anchor.as_widget().size_hint()
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        let mut children = vec![iced::advanced::widget::Tree::new(&self.anchor)];
+        if let Some(card) = &self.card {
+            children.push(iced::advanced::widget::Tree::new(card));
+        }
+        children
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        match &self.card {
+            Some(card) => tree.diff_children(&[self.anchor.as_widget(), card.as_widget()]),
+            None => tree.diff_children(&[self.anchor.as_widget()]),
+        }
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        let Some(child) = tree.children.first_mut() else {
+            return iced::advanced::layout::Node::new(iced::Size::ZERO);
+        };
+        self.anchor.as_widget_mut().layout(child, renderer, limits)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+        viewport: &iced::Rectangle,
+    ) {
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        self.anchor.as_widget_mut().update(
+            child, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        let Some(child) = tree.children.first() else {
+            return;
+        };
+        self.anchor
+            .as_widget()
+            .draw(child, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+        renderer: &iced::Renderer,
+    ) -> iced::advanced::mouse::Interaction {
+        let Some(child) = tree.children.first() else {
+            return iced::advanced::mouse::Interaction::None;
+        };
+        self.anchor
+            .as_widget()
+            .mouse_interaction(child, layout, cursor, viewport, renderer)
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'b>,
+        renderer: &iced::Renderer,
+        viewport: &iced::Rectangle,
+        translation: iced::Vector,
+    ) -> Option<iced::advanced::overlay::Element<'b, Message, Theme, iced::Renderer>> {
+        let (anchor_tree, card_trees) = tree.children.split_first_mut()?;
+        let anchor_overlay = self.anchor.as_widget_mut().overlay(
+            anchor_tree,
+            layout,
+            renderer,
+            viewport,
+            translation,
+        );
+        let Some(card) = self.card.as_mut() else {
+            return anchor_overlay;
+        };
+        let Some(card_tree) = card_trees.first_mut() else {
+            return anchor_overlay;
+        };
+        let mut anchor = layout.bounds();
+        anchor.x += translation.x;
+        anchor.y += translation.y;
+        let card_overlay = iced::advanced::overlay::Element::new(Box::new(CardOverlay {
+            anchor,
+            viewport: *viewport,
+            card,
+            tree: card_tree,
+        }));
+        let mut layers = Vec::new();
+        if let Some(layer) = anchor_overlay {
+            layers.push(layer);
+        }
+        layers.push(card_overlay);
+        Some(iced::advanced::overlay::Group::with_children(layers).overlay())
+    }
+}
+
+impl<'a> From<Anchored<'a>> for Element<'a, Message> {
+    fn from(anchored: Anchored<'a>) -> Self {
+        Element::new(anchored)
+    }
+}
+
+struct CardOverlay<'a, 'b> {
+    anchor: iced::Rectangle,
+    viewport: iced::Rectangle,
+    card: &'b mut Element<'a, Message>,
+    tree: &'b mut iced::advanced::widget::Tree,
+}
+
+impl iced::advanced::Overlay<Message, Theme, iced::Renderer> for CardOverlay<'_, '_> {
+    fn layout(
+        &mut self,
+        renderer: &iced::Renderer,
+        bounds: iced::Size,
+    ) -> iced::advanced::layout::Node {
+        let node = self.card.as_widget_mut().layout(
+            self.tree,
+            renderer,
+            &iced::advanced::layout::Limits::new(iced::Size::ZERO, bounds),
+        );
+        let size = node.size();
+        let mut x = self.anchor.x + self.anchor.width - size.width;
+        let mut y = self.anchor.y + self.anchor.height + 4.0;
+        if x < 8.0 {
+            x = 8.0;
+        }
+        let right = bounds.width - 8.0;
+        if x + size.width > right {
+            x = (right - size.width).max(8.0);
+        }
+        let bottom = bounds.height - 8.0;
+        if y + size.height > bottom {
+            let above = self.anchor.y - size.height - 4.0;
+            y = if above >= 8.0 { above } else { 8.0 };
+        }
+        node.move_to(iced::Point::new(x, y))
+    }
+
+    fn update(
+        &mut self,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+    ) {
+        let press = matches!(
+            event,
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_))
+        );
+        let on_card = cursor.is_over(layout.bounds());
+        let on_anchor = cursor.is_over(self.anchor);
+        if press && !on_card && !on_anchor {
+            shell.publish(Message::ToggleSyncPop);
+            shell.capture_event();
+            return;
+        }
+        self.card.as_widget_mut().update(
+            self.tree,
+            event,
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            &self.viewport,
+        );
+        if press && on_card {
+            shell.capture_event();
+        }
+    }
+
+    fn draw(
+        &self,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+    ) {
+        self.card.as_widget().draw(
+            self.tree,
+            renderer,
+            theme,
+            style,
+            layout,
+            cursor,
+            &self.viewport,
+        );
+    }
+
+    fn mouse_interaction(
+        &self,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        renderer: &iced::Renderer,
+    ) -> iced::advanced::mouse::Interaction {
+        let interaction = self.card.as_widget().mouse_interaction(
+            self.tree,
+            layout,
+            cursor,
+            &self.viewport,
+            renderer,
+        );
+        if cursor.is_over(layout.bounds())
+            && interaction == iced::advanced::mouse::Interaction::None
+        {
+            iced::advanced::mouse::Interaction::Idle
+        } else {
+            interaction
+        }
+    }
 }

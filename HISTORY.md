@@ -6,7 +6,7 @@ When a turn changes direction, scope, or a locked design choice, add an entry he
 
 ## 2026-11-04 — globe, auto-sync, drafts, restore enrolls
 
-The window no longer has a Sync button or a relay button. A globe at the right of the toolbar is gray when the relay is off, green when it is on and nothing is unsent, and red when it is on and something has not been pushed. Clicking it opens a panel under the icon with the last sync line and a control to start or stop the relay this window started. The relay starts when the folder opens, and the window syncs on its own while that relay is on. The relay is still cleartext on `127.0.0.1`. It is not a public server.
+The window no longer has a Sync button or a relay button. A globe at the right of the toolbar is gray when the relay is off, green when it is on and nothing is unsent, and red when it is on and something has not been pushed. Clicking it opens a popover under the icon, over the notes, with the last sync line and a control to start or stop the relay this window started. The relay starts when the folder opens, and the window syncs on its own while that relay is on. The relay is still cleartext on `127.0.0.1`. It is not a public server.
 
 An unsaved note is kept when you switch notes, start a new note, or open chat. Restore from the phrase still does not recreate old device keys. It appends `id.device-add` and one `space.member-add` signed by the identity key, so the new folder can sync. See [spec 02](docs/spec/02-identity-log.md).
 
