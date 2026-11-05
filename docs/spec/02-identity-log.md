@@ -39,7 +39,7 @@ Every device that holds the root also holds the ability to bless another device.
 
 Clients that hold the root MUST seal the identity log and the accepted Notes-space events to the identity seal key and put those blobs in the recovery mailbox, using the same HPKE construction as any other inbox. Conversation history SHOULD be included.
 
-A new install from the mnemonic derives the seal key and the mailbox id, fetches the blobs, and projects them. It then revokes any device key the owner no longer has.
+A new install from the mnemonic derives the seal key and the mailbox id, fetches the blobs, and projects them. It appends `id.device-add` for the new device, signed by the identity key, and `space.member-add` for that same device, also signed by the identity key. The Notes projection applies that one `space.member-add` even though the identity key is not a device member. Its `prev` is the identity-log head, which is not a Notes event. No other space event from the identity key is treated as an owner. The owner can then revoke device keys they no longer have.
 
 ## Genesis
 

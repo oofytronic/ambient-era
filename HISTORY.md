@@ -1,8 +1,14 @@
-## 2026-10-31 — Recovery seal and phrase restore
-
-The root device seals the identity log and Notes-space events to the identity seal key (HKDF `identity-seal`) and puts the blobs in the recovery mailbox (HKDF `recovery-mailbox`). A new folder can be created from the BIP39 phrase of the root seed; it fetches and opens those blobs. Device keys are still not derived from the root. See [spec 02](docs/spec/02-identity-log.md).
-
 # History
+
+A log of meaningful decisions. Newest first. This is not a commit changelog.
+
+When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
+
+## 2026-11-04 — globe, auto-sync, drafts, restore enrolls
+
+The window no longer has a Sync button or a relay button. A globe at the right of the toolbar is gray when the relay is off, green when it is on and nothing is unsent, and red when it is on and something has not been pushed. Clicking it opens a panel under the icon with the last sync line and a control to start or stop the relay this window started. The relay starts when the folder opens, and the window syncs on its own while that relay is on. The relay is still cleartext on `127.0.0.1`. It is not a public server.
+
+An unsaved note is kept when you switch notes, start a new note, or open chat. Restore from the phrase still does not recreate old device keys. It appends `id.device-add` and one `space.member-add` signed by the identity key, so the new folder can sync. See [spec 02](docs/spec/02-identity-log.md).
 
 ## 2026-11-04 — revoke, writers, and more than one conversation
 
@@ -26,9 +32,9 @@ Native search builds a SQLCipher FTS5 index beside the sealed log. The log is st
 
 The notes window shows a shareable `ambient://contact/` link and a QR of that link. Pasting the link or the raw card starts a conversation. A selected note can be copied into the chat as text. The recovery phrase and restore remain in the window.
 
-A log of meaningful decisions. Newest first. This is not a commit changelog.
+## 2026-10-31 — Recovery seal and phrase restore
 
-When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
+The root device seals the identity log and Notes-space events to the identity seal key (HKDF `identity-seal`) and puts the blobs in the recovery mailbox (HKDF `recovery-mailbox`). A new folder can be created from the BIP39 phrase of the root seed; it fetches and opens those blobs. Device keys are still not derived from the root. See [spec 02](docs/spec/02-identity-log.md).
 
 ## 2026-10-29 — The notes window syncs on loopback
 

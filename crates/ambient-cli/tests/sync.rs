@@ -81,6 +81,50 @@ fn paired_folder_lists_nothing_before_sync() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn restored_folder_writes_back() -> Result<(), String> {
+    let port = spawn_relay()?;
+    let url = format!("ws://127.0.0.1:{port}");
+    let root = std::env::temp_dir().join(format!("ambient-restore-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let owner = root.join("owner");
+    let restored = root.join("restored");
+    let owner_s = owner.to_string_lossy().to_string();
+    let restored_s = restored.to_string_lossy().to_string();
+    run_ok(&["init", &owner_s], "")?;
+    run_ok(&["add", &owner_s, "Market"], "buy milk")?;
+    run_ok(&["sync", &owner_s, &url], "")?;
+    let phrase = ambient_cli::recovery_phrase(&owner).map_err(|err| err.to_string())?;
+    ambient_cli::restore_folder(&restored, &phrase, &url).map_err(|err| err.to_string())?;
+    let book = ambient_cli::Notebook::open(&restored).map_err(|err| err.to_string())?;
+    if !book.holds_root() {
+        return Err("restored folder must hold the root".to_owned());
+    }
+    let devices = book.devices().map_err(|err| err.to_string())?;
+    if !devices
+        .iter()
+        .any(|device| device.current && !device.revoked)
+    {
+        return Err(format!("restored device was not enrolled: {devices:?}"));
+    }
+    let listed = book.list().map_err(|err| err.to_string())?;
+    if !listed.iter().any(|note| note.title == "Market") {
+        return Err(format!("restore missed the note: {listed:?}"));
+    }
+    book.add("Later", "from the new device")
+        .map_err(|err| err.to_string())?;
+    run_ok(&["sync", &restored_s, &url], "")?;
+    run_ok(&["sync", &owner_s, &url], "")?;
+    let listed = run_ok(&["list", &owner_s], "")?;
+    if !listed.contains("Later") {
+        return Err(format!(
+            "owner did not see the restored device's note: {listed}"
+        ));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
 fn spawn_relay() -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|err| err.to_string())?;
     let port = listener.local_addr().map_err(|err| err.to_string())?.port();

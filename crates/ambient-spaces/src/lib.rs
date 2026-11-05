@@ -13,5 +13,6 @@ pub use notes::{
     ChatLine, Conversation, GenesisMember, MemberInfo, NoteHead, Projection, Revocation, Skip,
     conversation_genesis_payload, member_add_payload, member_remove_payload, msg_put_payload,
     note_put_payload, notes_genesis_payload, project_conversation, project_notes,
+    project_notes_for_root,
 };
 pub use seal::{open_blob, seal_blob};

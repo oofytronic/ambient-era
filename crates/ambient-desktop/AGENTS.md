@@ -1,6 +1,6 @@
 # ambient-desktop
 
-The Linux notes window. Iced draws the controls. There is no webview. The shell is notes and conversations. Sync is a toolbar action. Invite, devices, and recovery are screens, not a permanent instruction column. A device list can revoke a key from the root folder. A note shows which device wrote it.
+The Linux notes window. Iced draws the controls. There is no webview. The shell is notes and conversations. A globe at the right of the toolbar is the sync status: gray when the relay is off, green when it is on and caught up, red when it is on and something is unsent. Clicking it opens the detail and the relay switch. The relay starts when the folder opens and the window syncs on its own. Invite, devices, and recovery are screens, not a permanent instruction column. A device list can revoke a key from the root folder. A note shows which device wrote it. An unsaved note stays when you leave it.
 
 It calls [`Notebook`](../ambient-cli/src/session.rs) and the sync helpers in `ambient-cli`. The folder is the same one the CLI uses.
 

@@ -8,7 +8,7 @@ use ambient_identity::{
 };
 use ambient_spaces::{
     GenesisMember, Revocation, member_add_payload, member_remove_payload, note_put_payload,
-    notes_genesis_payload, project_notes,
+    notes_genesis_payload, project_notes_for_root,
 };
 use ambient_store::{read_log, write_log};
 
@@ -279,6 +279,70 @@ impl Notebook {
         self.local.identity.is_some()
     }
 
+    /// Add this folder's device to the identity log and the Notes space.
+    ///
+    /// Used after a phrase restore. The identity key signs both events. The
+    /// device key is new. Old device keys stay until the owner revokes them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when this folder does not hold the root or the log rejects the events.
+    pub fn enroll_self(&self) -> Result<(), CliError> {
+        let identity = self
+            .local
+            .identity
+            .as_ref()
+            .ok_or_else(|| CliError::message("only the root folder can enroll a device"))?;
+        let mut wires = load(&self.local)?;
+        let log = project_log(
+            &self.local.identity_public,
+            &identity_wires(&self.local, &wires)?,
+        )
+        .map_err(|_| CliError::message("identity log rejected"))?;
+        let mut head = log.head;
+        if !log.devices.contains_key(&self.local.device.signing_key) {
+            let payload = device_add_payload(
+                &self.local.device.signing_key,
+                &self.local.device.encryption_key,
+                &self.local.device.label,
+                &self.local.device.mailbox,
+            )
+            .map_err(|_| CliError::message("could not encode device"))?;
+            let add = identity
+                .sign_log(head, "id.device-add", &payload)
+                .map_err(|_| CliError::message("could not sign device"))?;
+            let event = verify(&add).map_err(|_| CliError::message("could not sign device"))?;
+            head = Some(event.id);
+            wires.push(add);
+        }
+        let view = view_notes(&self.local, &wires)?;
+        if !view.members.contains_key(&self.local.device.signing_key) {
+            let member = GenesisMember {
+                signing_key: self.local.device.signing_key,
+                encryption_key: self.local.device.encryption_key,
+                role: 1,
+                mailbox: self.local.device.mailbox,
+            };
+            let payload = member_add_payload(&member)
+                .map_err(|_| CliError::message("could not encode member"))?;
+            let unsigned = encode_unsigned(
+                &identity.signing_key,
+                head.map(|id| id.0),
+                None,
+                Some(view.space_id.0),
+                "space.member-add",
+                &payload,
+            )
+            .map_err(|_| CliError::message("could not encode member"))?;
+            let add = sign_wire(&unsigned, identity.signing_seed())
+                .map_err(|_| CliError::message("could not sign member"))?;
+            wires.push(add);
+        }
+        write_log(&self.local.notes_path, &self.local.store_key, &wires)
+            .map_err(|_| CliError::message("could not write notes file"))?;
+        Ok(())
+    }
+
     /// Authorize a device from its offer and add it to the Notes space.
     ///
     /// The offer is the text the other device printed. This folder must hold the root.
@@ -534,12 +598,13 @@ fn view_notes(local: &Local, wires: &[Vec<u8>]) -> Result<ambient_spaces::Projec
         .iter()
         .copied()
         .filter(|wire| {
-            verify(wire)
-                .ok()
-                .is_some_and(|event| event.signer != local.identity_public)
+            verify(wire).ok().is_some_and(|event| {
+                event.signer != local.identity_public || event.event_type == "space.member-add"
+            })
         })
         .collect();
-    project_notes(&space_wires, &revoked).map_err(|_| CliError::message("notes log rejected"))
+    project_notes_for_root(&space_wires, &revoked, Some(local.identity_public))
+        .map_err(|_| CliError::message("notes log rejected"))
 }
 
 fn load(local: &Local) -> Result<Vec<Vec<u8>>, CliError> {

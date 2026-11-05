@@ -20,6 +20,7 @@ use std::io::Cursor;
 fn main() -> iced::Result {
     iced::application(App::boot, App::update, App::view)
         .title(App::title)
+        .subscription(App::subscription)
         .window_size((1280.0, 820.0))
         .theme(theme)
         .run()
@@ -29,6 +30,7 @@ fn theme(_app: &App) -> Theme {
     Theme::Dark
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct App {
     dir: PathBuf,
     notebook: Option<Notebook>,
@@ -50,6 +52,13 @@ struct App {
     my_card: String,
     their_card: String,
     relay_ready: bool,
+    relay_ours: bool,
+    sync_open: bool,
+    sync_detail: String,
+    pending: bool,
+    unsaved: Vec<(Option<String>, String, String)>,
+    disk_title: String,
+    disk_body: String,
     recovery_phrase: String,
     restore_phrase: String,
     contact_link: String,
@@ -69,8 +78,9 @@ enum Message {
     Save,
     ShowNotes,
     ShowChat,
-    StartRelay,
-    Sync,
+    AutoSync,
+    ToggleSyncPop,
+    ToggleRelay,
     OpenPaired,
     OpenPerson,
     #[allow(dead_code)]
@@ -132,6 +142,13 @@ impl App {
             my_card: String::new(),
             their_card: String::new(),
             relay_ready: false,
+            relay_ours: false,
+            sync_open: false,
+            sync_detail: "Relay is starting.".to_owned(),
+            pending: false,
+            unsaved: Vec::new(),
+            disk_title: String::new(),
+            disk_body: String::new(),
             recovery_phrase: String::new(),
             restore_phrase: String::new(),
             contact_link: String::new(),
@@ -153,12 +170,23 @@ impl App {
                     app.contact_link = link;
                 }
                 if paired && app.notes.is_empty() {
-                    app.say("Paired device. It does not hold the root. Press Sync after the first window has synced.");
+                    app.say("Paired device. It does not hold the root. It syncs on its own while the relay is on.");
                 }
+                app.pending = ambient_cli::has_unsent(&app.dir).unwrap_or(false);
             }
             Err(err) => app.open_error = err,
         }
-        (app, Task::none())
+        if app.open_error != "this folder is locked" {
+            app.start_relay();
+        }
+        (app, Task::done(Message::AutoSync))
+    }
+
+    fn subscription(app: &App) -> iced::Subscription<Message> {
+        if !app.relay_ready {
+            return iced::Subscription::none();
+        }
+        iced::time::every(std::time::Duration::from_secs(3)).map(|_| Message::AutoSync)
     }
 
     fn title(&self) -> String {
@@ -204,17 +232,29 @@ impl App {
                 Task::none()
             }
             Message::ShowChat => {
+                self.remember_unsaved();
                 self.show_chat = true;
                 self.sheet = Sheet::None;
                 self.reload_chat();
                 Task::none()
             }
-            Message::StartRelay => {
-                self.start_relay();
+            Message::AutoSync => {
+                self.sync_quiet();
                 Task::none()
             }
-            Message::Sync => {
-                self.sync_now();
+            Message::ToggleSyncPop => {
+                self.sync_open = !self.sync_open;
+                Task::none()
+            }
+            Message::ToggleRelay => {
+                if self.relay_ready && !self.relay_ours {
+                    "This window did not start the relay.".clone_into(&mut self.sync_detail);
+                } else if self.relay_ready {
+                    self.stop_relay();
+                } else {
+                    self.start_relay();
+                    self.sync_quiet();
+                }
                 Task::none()
             }
             Message::OpenPaired => {
@@ -324,6 +364,7 @@ impl App {
         }
         column![
             self.toolbar(),
+            self.sync_pop(),
             row![self.sidebar(), self.main()].height(Fill)
         ]
         .height(Fill)
@@ -340,7 +381,6 @@ impl App {
             text("Ambient").size(20),
             text(role).size(12),
             text(self.message.as_str()).size(12).width(Fill),
-            button(text("Sync")).on_press(Message::Sync),
             button(text("Devices")).on_press(Message::ShowDevices),
         ]
         .spacing(12)
@@ -349,7 +389,87 @@ impl App {
         if self.notebook.as_ref().is_some_and(Notebook::holds_root) {
             bar = bar.push(button(text("Recovery")).on_press(Message::ShowRecovery));
         }
+        bar = bar.push(
+            button(
+                iced_image::Image::new(globe_handle(self.globe_color()))
+                    .width(28)
+                    .height(28),
+            )
+            .on_press(Message::ToggleSyncPop)
+            .style(globe_button),
+        );
         bar.into()
+    }
+
+    fn globe_color(&self) -> [u8; 3] {
+        if !self.relay_ready {
+            [138, 143, 152]
+        } else if self.pending {
+            [232, 93, 76]
+        } else {
+            [61, 220, 151]
+        }
+    }
+
+    fn sync_pop(&self) -> Element<'_, Message> {
+        if !self.sync_open {
+            return column![].into();
+        }
+        let relay = if !self.relay_ready {
+            "Relay is off."
+        } else if self.relay_ours {
+            "Relay is on. Cleartext on this computer only. Not a public server."
+        } else {
+            "Relay is on, started by another window. Cleartext on this computer only."
+        };
+        let switch = if self.relay_ready && self.relay_ours {
+            "Turn relay off"
+        } else if self.relay_ready {
+            "Relay is not this window's"
+        } else {
+            "Turn relay on"
+        };
+        let state = if !self.relay_ready {
+            "Not syncing."
+        } else if self.pending {
+            "Changes have not synced."
+        } else {
+            "Synced."
+        };
+        let cadence = if self.relay_ready {
+            "Syncs on its own every few seconds."
+        } else {
+            "Turn the relay on to sync."
+        };
+        row![
+            column![].width(Fill),
+            container(
+                column![
+                    text(state).size(16),
+                    text(cadence).size(12),
+                    text(relay).size(12),
+                    text(self.sync_detail.as_str()).size(12),
+                    button(text(switch)).on_press(Message::ToggleRelay),
+                ]
+                .spacing(8)
+                .width(320),
+            )
+            .padding(12)
+            .width(320)
+            .style(|_theme| container::Style {
+                background: Some(iced::Background::Color(iced::Color::from_rgb(
+                    0.12, 0.12, 0.12
+                ))),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    width: 1.0,
+                    color: iced::Color::from_rgb(0.3, 0.3, 0.3),
+                },
+                ..Default::default()
+            }),
+        ]
+        .padding([0, 16])
+        .into()
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
@@ -528,7 +648,7 @@ impl App {
     fn invite_sheet(&self) -> Element<'_, Message> {
         let mut sheet = column![
             Self::sheet_title("Invite"),
-            text("Share your link, or paste theirs. A link is for text. A QR is for someone nearby. Only one side starts the conversation. Then Sync.").size(12),
+            text("Share your link, or paste theirs. A link is for text. A QR is for someone nearby. Only one side starts the conversation.").size(12),
             text("Your link").size(12),
             text(&self.contact_link).size(12),
             row![
@@ -555,17 +675,9 @@ impl App {
     }
 
     fn devices_sheet(&self) -> Element<'_, Message> {
-        let relay_label = if self.relay_ready {
-            "Relay is on"
-        } else {
-            "Start relay"
-        };
         let mut sheet = column![
             Self::sheet_title("Devices"),
             text(self.dir.display().to_string()).size(12),
-            text("The relay is cleartext on this computer only. It is not a public server.")
-                .size(12),
-            button(text(relay_label)).on_press(Message::StartRelay),
             text("Unlock").size(16),
             text("Wraps the key file. Not the root, and not a platform passkey.").size(12),
             text_input("Passphrase", &self.unlock_input)
@@ -608,7 +720,7 @@ impl App {
     fn recovery_sheet(&self) -> Element<'_, Message> {
         let mut sheet = column![
             Self::sheet_title("Recovery"),
-            text("The phrase rebuilds the root on a new folder. It does not recreate device keys. It is not a social recovery.").size(12),
+            text("The phrase rebuilds the root on a new folder. It does not recreate the old device keys. The new folder adds itself so it can sync. Revoke the devices you no longer have. This is not social recovery.").size(12),
             button(text("Show recovery phrase")).on_press(Message::ShowPhrase),
         ]
         .spacing(12);
@@ -670,6 +782,21 @@ impl App {
     }
 
     fn show_note(&mut self, id: &str) {
+        if self.selected.as_deref() == Some(id)
+            && (self.title_text != self.disk_title || self.body.text() != self.disk_body)
+        {
+            self.show_chat = false;
+            self.sheet = Sheet::None;
+            return;
+        }
+        if self.selected.as_deref() != Some(id) {
+            self.remember_unsaved();
+        }
+        let stash = self
+            .unsaved
+            .iter()
+            .find(|(key, _, _)| key.as_deref() == Some(id))
+            .map(|(_, title, body)| (title.clone(), body.clone()));
         let Some(book) = self.notebook.as_ref() else {
             return;
         };
@@ -677,8 +804,15 @@ impl App {
             Ok(note) => {
                 let draft = Draft::from_note(&note);
                 self.selected = Some(id.to_owned());
-                self.title_text = draft.title;
-                self.body = text_editor::Content::with_text(&draft.body);
+                self.disk_title.clone_from(&draft.title);
+                self.disk_body.clone_from(&draft.body);
+                if let Some((title, body)) = stash {
+                    self.title_text = title;
+                    self.body = text_editor::Content::with_text(&body);
+                } else {
+                    self.title_text.clone_from(&draft.title);
+                    self.body = text_editor::Content::with_text(&draft.body);
+                }
                 self.conflicts = draft.conflicts;
                 self.note_writer = note
                     .heads
@@ -686,6 +820,7 @@ impl App {
                     .map(|head| head.writer.clone())
                     .unwrap_or_default();
                 self.show_chat = false;
+                self.sheet = Sheet::None;
                 self.message.clear();
             }
             Err(err) => self.message = err.to_string(),
@@ -693,13 +828,37 @@ impl App {
     }
 
     fn clear_editor(&mut self) {
+        self.remember_unsaved();
+        let stash = self
+            .unsaved
+            .iter()
+            .find(|(key, _, _)| key.is_none())
+            .map(|(_, title, body)| (title.clone(), body.clone()));
         self.selected = None;
-        self.title_text.clear();
-        self.body = text_editor::Content::new();
+        self.disk_title.clear();
+        self.disk_body.clear();
         self.conflicts.clear();
         self.note_writer.clear();
         self.show_chat = false;
+        self.sheet = Sheet::None;
+        if let Some((title, body)) = stash {
+            self.title_text = title;
+            self.body = text_editor::Content::with_text(&body);
+            return;
+        }
+        self.title_text.clear();
+        self.body = text_editor::Content::new();
         self.message.clear();
+    }
+
+    fn remember_unsaved(&mut self) {
+        if self.title_text == self.disk_title && self.body.text() == self.disk_body {
+            return;
+        }
+        let key = self.selected.clone();
+        self.unsaved.retain(|(id, _, _)| id != &key);
+        self.unsaved
+            .push((key, self.title_text.clone(), self.body.text()));
     }
 
     fn save(&mut self) {
@@ -715,9 +874,17 @@ impl App {
         };
         match saved {
             Ok(id) => {
+                self.unsaved
+                    .retain(|(key, _, _)| key.as_deref() != Some(id.as_str()));
+                if current.is_none() {
+                    self.unsaved.retain(|(key, _, _)| key.is_some());
+                }
+                self.disk_title.clone_from(&self.title_text);
+                self.disk_body = self.body.text();
                 self.message.clear();
                 self.reload();
                 self.show_note(&id);
+                self.mark_pending();
             }
             Err(err) => self.message = err.to_string(),
         }
@@ -731,42 +898,75 @@ impl App {
         match ambient_cli::start_loopback_relay() {
             Ok(()) => {
                 self.relay_ready = true;
-                self.say("Relay is listening on 127.0.0.1:8787. This computer only.");
+                self.relay_ours = true;
+                "Relay is listening on 127.0.0.1:8787.".clone_into(&mut self.sync_detail);
             }
             Err(err) => {
-                self.relay_ready = true;
-                self.message = format!("{err}. Press Sync if that relay is already this app.");
+                if err.to_string().contains("already running") {
+                    self.relay_ready = true;
+                    self.relay_ours = false;
+                    self.sync_detail = err.to_string();
+                } else {
+                    self.relay_ready = false;
+                    self.relay_ours = false;
+                    self.sync_detail = err.to_string();
+                }
             }
         }
     }
 
-    fn sync_now(&mut self) {
+    fn stop_relay(&mut self) {
+        match ambient_cli::stop_loopback_relay() {
+            Ok(()) => {
+                self.relay_ready = false;
+                self.relay_ours = false;
+                "Relay stopped.".clone_into(&mut self.sync_detail);
+            }
+            Err(err) => self.sync_detail = err.to_string(),
+        }
+    }
+
+    fn sync_quiet(&mut self) {
+        if !self.relay_ready {
+            return;
+        }
         match ambient_cli::sync_folder(&self.dir, ambient_cli::LOOPBACK_URL) {
-            Ok(_) => {
-                self.say("Synced. Press Sync in the other window too.");
+            Ok(detail) => {
+                self.sync_detail = detail;
                 match Notebook::open(&self.dir) {
                     Ok(book) => {
                         self.notebook = Some(book);
                         self.reload();
                     }
-                    Err(err) => self.message = err.to_string(),
+                    Err(err) => self.sync_detail = err.to_string(),
                 }
                 self.reload_chat();
+                self.pending = ambient_cli::has_unsent(&self.dir).unwrap_or(true);
             }
-            Err(err) => self.message = err.to_string(),
+            Err(err) => {
+                let text = err.to_string();
+                if text.contains("unreachable") && !self.relay_ours {
+                    self.relay_ready = false;
+                }
+                self.sync_detail = text;
+            }
         }
+    }
+
+    fn mark_pending(&mut self) {
+        self.pending = ambient_cli::has_unsent(&self.dir).unwrap_or(true);
     }
 
     fn open_paired(&mut self) {
         if !self.notebook.as_ref().is_some_and(Notebook::holds_root) {
-            self.say("This window is the paired device. It does not hold the root. Press Sync.");
+            self.say("This window is the paired device. It does not hold the root.");
             return;
         }
         let path = sibling(&self.dir, "-device");
         if path.join("key").exists() {
             self.spawn_at(
                 &path,
-                "Opened the paired window. Press Sync in both. Close a duplicate if one was already open.",
+                "Opened the paired window. Close a duplicate if one was already open.",
             );
             return;
         }
@@ -792,7 +992,7 @@ impl App {
         }
         self.spawn_at(
             &path,
-            "Paired. That window does not hold the root. Save a note, then press Sync in both.",
+            "Paired. That window does not hold the root. Both windows sync while the relay is on.",
         );
     }
 
@@ -810,7 +1010,7 @@ impl App {
         }
         self.spawn_at(
             &path,
-            "Opened the other person. In that window press Copy card, then paste it here. Only this window presses Start conversation. Then Sync both.",
+            "Opened the other person. In that window open Invite and copy the link. Paste it here. Only this window presses Start conversation.",
         );
     }
 
@@ -818,7 +1018,7 @@ impl App {
         match ambient_cli::contact_card(&self.dir) {
             Ok(card) => {
                 self.my_card.clone_from(&card);
-                self.say("Card copied. Paste it into Their card on the other window. This is not a device offer.");
+                self.say("Card copied. The other window wants the invite link, not this card.");
                 clipboard::write(card)
             }
             Err(err) => {
@@ -831,7 +1031,7 @@ impl App {
     fn start_chat(&mut self) {
         let card = self.their_card.trim();
         if card.is_empty() {
-            self.say("Paste their card first. Copy it from their window.");
+            self.say("Paste their link first. In their window open Invite and copy the link.");
             return;
         }
         match ambient_cli::start_conversation(&self.dir, card) {
@@ -840,8 +1040,9 @@ impl App {
                 self.show_chat = true;
                 self.sheet = Sheet::None;
                 self.their_card.clear();
-                self.say("Conversation saved here. Press Sync, then Sync in their window.");
+                self.say("Conversation saved here. Both windows sync while the relay is on.");
                 self.reload_chat();
+                self.mark_pending();
             }
             Err(err) => self.message = err.to_string(),
         }
@@ -861,8 +1062,9 @@ impl App {
             Ok(()) => {
                 self.draft_chat.clear();
                 self.show_chat = true;
-                self.say("Saved here. Press Sync, then Sync in the other window.");
+                self.say("Saved here. It syncs while the relay is on.");
                 self.reload_chat();
+                self.mark_pending();
             }
             Err(err) => self.message = err.to_string(),
         }
@@ -916,7 +1118,7 @@ impl App {
             Ok(()) => {
                 self.spawn_at(
                     &path,
-                    "Restored. That window holds the root. The notes from the sealed log should be there.",
+                    "Restored. That window holds the root and enrolled this computer. Old devices stay until you revoke them.",
                 );
             }
             Err(err) => self.message = err.to_string(),
@@ -953,6 +1155,7 @@ impl App {
             Ok(()) => {
                 self.devices = book.devices().unwrap_or_default();
                 self.say("Revoked. New events are no longer sealed to that device. Notes it already wrote stay.");
+                self.mark_pending();
             }
             Err(err) => self.message = err.to_string(),
         }
@@ -978,9 +1181,11 @@ impl App {
                 match self.chat_id.clone() {
                     Some(chat) => match ambient_cli::send_chat_in(&self.dir, &chat, &text) {
                         Ok(()) => {
+                            self.remember_unsaved();
                             self.show_chat = true;
-                            self.say("Note copied into the chat. Press Sync so the other window sees it.");
+                            self.say("Note copied into the chat. It syncs while the relay is on.");
                             self.reload_chat();
+                            self.mark_pending();
                         }
                         Err(err) => self.message = err.to_string(),
                     },
@@ -1010,6 +1215,9 @@ impl App {
                                 self.contact_link = link;
                             }
                             self.say("Unlocked for this run. The key file on disk stays wrapped.");
+                            self.pending = ambient_cli::has_unsent(&self.dir).unwrap_or(false);
+                            self.start_relay();
+                            self.sync_quiet();
                         }
                         Err(err) => self.open_error = err.to_string(),
                     }
@@ -1028,6 +1236,61 @@ impl App {
             Err(err) => self.message = err.to_string(),
         }
     }
+}
+
+fn globe_button(_theme: &Theme, _status: button::Status) -> button::Style {
+    button::Style {
+        background: None,
+        ..Default::default()
+    }
+}
+
+fn globe_handle(color: [u8; 3]) -> iced_image::Handle {
+    use std::sync::OnceLock;
+    static HANDLES: OnceLock<[iced_image::Handle; 3]> = OnceLock::new();
+    let handles = HANDLES.get_or_init(|| {
+        [
+            iced_image::Handle::from_bytes(globe_png([138, 143, 152])),
+            iced_image::Handle::from_bytes(globe_png([232, 93, 76])),
+            iced_image::Handle::from_bytes(globe_png([61, 220, 151])),
+        ]
+    });
+    if color == [232, 93, 76] {
+        handles[1].clone()
+    } else if color == [61, 220, 151] {
+        handles[2].clone()
+    } else {
+        handles[0].clone()
+    }
+}
+
+fn globe_png(color: [u8; 3]) -> Vec<u8> {
+    let size = 64_u32;
+    let mut pixels = vec![0_u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let dx = f64::from(x) - 31.5;
+            let dy = f64::from(y) - 31.5;
+            let radius = dx.hypot(dy);
+            if radius > 28.0 {
+                continue;
+            }
+            let ring = radius > 25.5;
+            let equator = dy.abs() < 1.3;
+            let meridian = dx.abs() < 1.3;
+            let ellipse = ((dx / 16.0).powi(2) + (dy / 28.0).powi(2) - 1.0).abs() < 0.12;
+            let ink = ring || equator || meridian || ellipse;
+            let alpha = if ink { 255 } else { 48 };
+            let index = ((y * size + x) * 4) as usize;
+            if let Some(pixel) = pixels.get_mut(index..index.saturating_add(4)) {
+                pixel.copy_from_slice(&[color[0], color[1], color[2], alpha]);
+            }
+        }
+    }
+    let mut buf = Vec::new();
+    let encoder = ::image::codecs::png::PngEncoder::new(Cursor::new(&mut buf));
+    let _ = encoder.write_image(&pixels, size, size, ::image::ExtendedColorType::Rgba8);
+    buf
 }
 
 fn sibling(dir: &Path, suffix: &str) -> PathBuf {

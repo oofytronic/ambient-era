@@ -141,6 +141,7 @@ fn apply(devices: &mut BTreeMap<[u8; 32], DeviceState>, item: &Item) -> Result<(
         "id.device-add" => apply_add(devices, &item.payload),
         "id.inbox" => apply_inbox(devices, &item.payload),
         "id.device-revoke" => apply_revoke(devices, &item.payload),
+        "space.member-add" => Ok(()),
         _ => Err(IdentityError::Event(ambient_events::EventError::BadType)),
     }
 }

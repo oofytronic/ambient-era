@@ -25,11 +25,79 @@ use crate::session::Notebook;
 pub(crate) fn start_loopback() -> Result<(), CliError> {
     let listener = std::net::TcpListener::bind("127.0.0.1:8787")
         .map_err(|_| CliError::message("relay already running on 127.0.0.1:8787"))?;
+    let generation = RELAY_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    RELAY_OURS.store(true, std::sync::atomic::Ordering::SeqCst);
     std::thread::spawn(move || {
-        let _ = ambient_relay::serve_listener(&listener);
+        let _ = ambient_relay::serve_until(&listener, &RELAY_GEN, generation);
+        if RELAY_GEN.load(std::sync::atomic::Ordering::SeqCst) == generation {
+            RELAY_OURS.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
     });
     Ok(())
 }
+
+pub(crate) fn stop_loopback() -> Result<(), CliError> {
+    if !RELAY_OURS.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(CliError::message("this window did not start the relay"));
+    }
+    RELAY_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    RELAY_OURS.store(false, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+pub(crate) fn relay_is_ours() -> bool {
+    RELAY_OURS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub(crate) fn has_unsent(dir: &Path) -> Result<bool, CliError> {
+    let local = keys::open(dir)?;
+    let notes = read_wires(&local.notes_path, &local.store_key)?;
+    let pushed = read_pushed(&dir.join("pushed"))?;
+    if !notes.is_empty() {
+        let recipients = Notebook::open(dir)?.recipients()?;
+        if missing_push(&local.device.mailbox, &notes, &recipients, &pushed)? {
+            return Ok(true);
+        }
+    }
+    if let Some(identity) = &local.identity {
+        for wire in &notes {
+            let event = verify(wire).map_err(|_| CliError::message("notes log rejected"))?;
+            if !pushed.contains(&(identity.recovery_mailbox, event.id.0)) {
+                return Ok(true);
+            }
+        }
+    }
+    for slot in load_slots(dir, &local.store_key)? {
+        let members = chat_members(&slot.wires)?;
+        if missing_push(&slot.card.mailbox, &slot.wires, &members, &pushed)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn missing_push(
+    own_mailbox: &[u8; 32],
+    wires: &[Vec<u8>],
+    members: &[ambient_spaces::MemberInfo],
+    pushed: &PushSet,
+) -> Result<bool, CliError> {
+    for wire in wires {
+        let event = verify(wire).map_err(|_| CliError::message("notes log rejected"))?;
+        for member in members {
+            if member.mailbox == *own_mailbox {
+                continue;
+            }
+            if !pushed.contains(&(member.mailbox, event.id.0)) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+static RELAY_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RELAY_OURS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn device(dir: &Path, label: &str) -> Result<String, CliError> {
     let (_local, offer) = keys::create_device(dir, label)?;
@@ -245,6 +313,8 @@ pub(crate) fn sync(dir: &Path, url: &str) -> Result<String, CliError> {
             arrived.push(plain);
         }
     }
+    let notes_before = notes.len();
+    let chats_before: usize = slots.iter().map(|slot| slot.wires.len()).sum();
     let mut dropped = Vec::new();
     file_incoming(&mut local, &mut notes, &mut dropped, &arrived)?;
     for (index, slot) in slots.iter_mut().enumerate() {
@@ -281,7 +351,18 @@ pub(crate) fn sync(dir: &Path, url: &str) -> Result<String, CliError> {
     }
     write_cursor(&dir.join("cursor-device"), device_cursor)?;
     write_pushed(&dir.join("pushed"), &pushed)?;
-    Ok(format!("synced {url}"))
+    let notes_in = notes.len().saturating_sub(notes_before);
+    let chats_in: usize = slots
+        .iter()
+        .map(|slot| slot.wires.len())
+        .sum::<usize>()
+        .saturating_sub(chats_before);
+    if push_count == 0 && notes_in == 0 && chats_in == 0 {
+        return Ok("Nothing new.".to_owned());
+    }
+    Ok(format!(
+        "{push_count} sent, {notes_in} notes in, {chats_in} messages in"
+    ))
 }
 
 fn queue_pushes(
@@ -866,6 +947,7 @@ pub(crate) fn restore(dir: &Path, phrase: &str, url: &str) -> Result<(), CliErro
     if dir.join("key").exists() {
         return Err(CliError::message("folder already has a key"));
     }
+    fs::create_dir_all(dir).map_err(|_| CliError::message("could not create directory"))?;
     let root = crate::keys::root_from_phrase(phrase)?;
     let identity =
         ambient_identity::derive(&root).map_err(|_| CliError::message("derivation failed"))?;
@@ -903,10 +985,6 @@ pub(crate) fn restore(dir: &Path, phrase: &str, url: &str) -> Result<(), CliErro
     }
     write_log(&local.notes_path, &local.store_key, &notes)
         .map_err(|_| CliError::message("could not write notes file"))?;
-    // The new device is not yet in the log. The owner can revoke old ones and pair new ones
-    // after this point. For v0.1 the restore gives back the notes and identity.
-    // Adding the new device is left as a follow-up pair step, or we do it here.
-    // For simplicity in v0.1, the restore succeeds if the log is written.
-    // The new machine holds the root, so it can later call pair_device on itself or we add it.
+    Notebook::open(dir)?.enroll_self()?;
     Ok(())
 }

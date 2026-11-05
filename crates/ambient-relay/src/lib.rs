@@ -9,6 +9,7 @@ use std::fmt;
 use std::io::ErrorKind;
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{self, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -187,6 +188,37 @@ pub fn serve_listener(listener: &TcpListener) -> Result<(), RelayError> {
         });
     }
     Ok(())
+}
+
+/// Accept until `generation` is no longer `mine`. The listener is set non-blocking.
+///
+/// # Errors
+///
+/// Returns [`RelayError::Io`] when the listener cannot be made non-blocking, or accept fails.
+pub fn serve_until(listener: &TcpListener, generation: &AtomicU64, mine: u64) -> Result<(), RelayError> {
+    listener.set_nonblocking(true).map_err(|_| RelayError::Io)?;
+    let hub = Arc::new(Hub {
+        relay: Mutex::new(Relay::new()),
+        subs: Mutex::new(Vec::new()),
+    });
+    loop {
+        if generation.load(Ordering::SeqCst) != mine {
+            return Ok(());
+        }
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let _ = stream.set_nonblocking(false);
+                let hub = Arc::clone(&hub);
+                thread::spawn(move || {
+                    let _ = connection(stream, &hub);
+                });
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return Err(RelayError::Io),
+        }
+    }
 }
 
 fn connection(stream: TcpStream, hub: &Arc<Hub>) -> Result<(), RelayError> {

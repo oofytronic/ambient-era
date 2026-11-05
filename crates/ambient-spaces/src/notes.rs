@@ -123,7 +123,24 @@ struct Member {
 ///
 /// Missing genesis, a malformed payload, or a wire that does not verify.
 pub fn project_notes(wires: &[&[u8]], revoked: &[Revocation]) -> Result<Projection, SpaceError> {
-    let projected = project(wires, revoked, "notes")?;
+    project_notes_for_root(wires, revoked, None)
+}
+
+/// Project a Notes space.
+///
+/// `identity` is the root signing key. A `space.member-add` it signs is applied
+/// even though that key is not a device member. Its `prev` may be an identity-log
+/// event that is not in this Space. No other event from that key is treated as an owner.
+///
+/// # Errors
+///
+/// Missing genesis, a malformed payload, or a wire that does not verify.
+pub fn project_notes_for_root(
+    wires: &[&[u8]],
+    revoked: &[Revocation],
+    identity: Option<[u8; 32]>,
+) -> Result<Projection, SpaceError> {
+    let projected = project(wires, revoked, "notes", identity)?;
     Ok(Projection {
         space_id: projected.space_id,
         tip: projected.tip,
@@ -142,7 +159,7 @@ pub fn project_conversation(
     wires: &[&[u8]],
     revoked: &[Revocation],
 ) -> Result<Conversation, SpaceError> {
-    let projected = project(wires, revoked, "conversation")?;
+    let projected = project(wires, revoked, "conversation", None)?;
     Ok(Conversation {
         space_id: projected.space_id,
         tip: projected.tip,
@@ -165,6 +182,7 @@ fn project(
     wires: &[&[u8]],
     revoked: &[Revocation],
     expected: &str,
+    identity: Option<[u8; 32]>,
 ) -> Result<Projected, SpaceError> {
     let mut items = Vec::new();
     for wire in wires {
@@ -233,6 +251,7 @@ fn project(
         &revoked_ids,
         space_id,
         expected == "conversation",
+        identity,
     )?;
     for item in by_prev.into_values() {
         skipped.push((item.id, Skip::Gap));
@@ -260,11 +279,12 @@ fn apply_ready(
     revoked_ids: &BTreeSet<EventId>,
     space_id: EventId,
     conversation: bool,
+    identity: Option<[u8; 32]>,
 ) -> Result<(), SpaceError> {
     loop {
         let mut ready = Vec::new();
         for (key, item) in by_prev.iter() {
-            if is_ready(item, tip, space_id) {
+            if is_ready(item, tip, space_id, identity) {
                 ready.push(*key);
             }
         }
@@ -291,7 +311,7 @@ fn apply_ready(
                 "msg.put" if conversation => apply_message(messages, members, &item, skipped)?,
                 "note.put" | "msg.put" => skipped.push((item.id, Skip::WrongKind)),
                 "space.member-add" | "space.member-remove" | "space.inbox" => {
-                    apply_membership(members, &item, skipped)?;
+                    apply_membership(members, &item, skipped, identity)?;
                 }
                 _ => return Err(SpaceError::Event(ambient_events::EventError::BadType)),
             }
@@ -308,9 +328,20 @@ struct StoredNote {
     parents: Vec<EventId>,
 }
 
-fn is_ready(item: &Item, tip: &BTreeMap<[u8; 32], EventId>, space_id: EventId) -> bool {
+fn is_ready(
+    item: &Item,
+    tip: &BTreeMap<[u8; 32], EventId>,
+    space_id: EventId,
+    identity: Option<[u8; 32]>,
+) -> bool {
     if item.space != Some(space_id) {
         return false;
+    }
+    if identity == Some(item.signer)
+        && item.event_type == "space.member-add"
+        && !tip.contains_key(&item.signer)
+    {
+        return true;
     }
     match item.prev {
         Some(prev) => tip.get(&item.signer).copied() == Some(prev),
@@ -385,14 +416,18 @@ fn apply_membership(
     members: &mut BTreeMap<[u8; 32], Member>,
     item: &Item,
     skipped: &mut Vec<(EventId, Skip)>,
+    identity: Option<[u8; 32]>,
 ) -> Result<(), SpaceError> {
-    let Some(actor) = members.get(&item.signer) else {
-        skipped.push((item.id, Skip::NotMember));
-        return Ok(());
-    };
-    if actor.role != 1 {
-        skipped.push((item.id, Skip::NotMember));
-        return Ok(());
+    let root_adding = identity == Some(item.signer) && item.event_type == "space.member-add";
+    if !root_adding {
+        let Some(actor) = members.get(&item.signer) else {
+            skipped.push((item.id, Skip::NotMember));
+            return Ok(());
+        };
+        if actor.role != 1 {
+            skipped.push((item.id, Skip::NotMember));
+            return Ok(());
+        }
     }
     match item.event_type.as_str() {
         "space.member-add" => {

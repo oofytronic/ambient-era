@@ -33,6 +33,30 @@ pub fn start_loopback_relay() -> Result<(), CliError> {
     sync::start_loopback()
 }
 
+/// Ask the relay this process started to stop. The port frees after the accept loop notices.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when this process did not bind the relay.
+pub fn stop_loopback_relay() -> Result<(), CliError> {
+    sync::stop_loopback()
+}
+
+/// True when this process bound the loopback relay and has not stopped it.
+#[must_use]
+pub fn loopback_is_ours() -> bool {
+    sync::relay_is_ours()
+}
+
+/// True when a local event has not been sealed to another member, or the recovery copy is behind.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when the folder cannot be opened.
+pub fn has_unsent(dir: &Path) -> Result<bool, CliError> {
+    sync::has_unsent(dir)
+}
+
 /// Create a paired folder and return the device offer. The folder does not hold the root.
 ///
 /// # Errors

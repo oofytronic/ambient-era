@@ -2,7 +2,7 @@
 
 Stores and forwards opaque encrypted blobs between mailbox addresses. See `VISION.md` section 6.
 
-**Public API:** `Relay::handle_line`, `serve`, `serve_listener`. Mailboxes are in memory. The binary binds `127.0.0.1` and speaks cleartext. Spec 04 says that is not a conforming public deployment. There is no TTL, quota, or rate limit. This process does not parse blobs.
+**Public API:** `Relay::handle_line`, `serve`, `serve_listener`, `serve_until`. Mailboxes are in memory. The binary binds `127.0.0.1` and speaks cleartext. Spec 04 says that is not a conforming public deployment. There is no TTL, quota, or rate limit. This process does not parse blobs. `serve_until` returns when a generation counter changes, so the notes window can stop a relay it started.
 
 ## Invariants
 
