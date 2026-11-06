@@ -8,4 +8,4 @@ mod error;
 mod log;
 
 pub use error::StoreError;
-pub use log::{open_log, read_log, seal_log, write_log};
+pub use log::{log_stamp, open_log, read_log, seal_log, write_log};

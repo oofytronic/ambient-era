@@ -1,5 +1,7 @@
 //! The notebook both the CLI and the desktop window use.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use ambient_events::{EventId, encode_unsigned, sign_wire, verify};
@@ -66,6 +68,20 @@ pub struct ShownNote {
 /// An open notebook directory. The same files the CLI reads.
 pub struct Notebook {
     local: Local,
+    /// Last projection. Reused until [`log_stamp`] changes, so a click does not verify again.
+    cache: RefCell<Option<NoteCache>>,
+}
+
+struct NoteCache {
+    stamp: Option<(u64, u64)>,
+    wires: Vec<Vec<u8>>,
+    projected: Projected,
+}
+
+struct Projected {
+    view: Option<ambient_spaces::Projection>,
+    names: BTreeMap<[u8; 32], String>,
+    devices: Vec<DeviceLine>,
 }
 
 impl Notebook {
@@ -108,7 +124,10 @@ impl Notebook {
         let space = sign_device(&local, None, None, "space.genesis", &space_payload)?;
         write_log(&local.notes_path, &local.store_key, &[genesis, add, space])
             .map_err(|_| CliError::message("could not write notes file"))?;
-        Ok(Self { local })
+        Ok(Self {
+            local,
+            cache: RefCell::new(None),
+        })
     }
 
     /// Open a notebook created earlier, including one created by the CLI.
@@ -118,8 +137,12 @@ impl Notebook {
     /// Returns [`CliError`] when the key file is missing or the log does not open.
     pub fn open(dir: &Path) -> Result<Self, CliError> {
         let local = keys::open(dir)?;
-        let _ = load(&local)?;
-        Ok(Self { local })
+        let book = Self {
+            local,
+            cache: RefCell::new(None),
+        };
+        book.ensure()?;
+        Ok(book)
     }
 
     /// Notes in id order. An empty file, or no file yet, is an empty list.
@@ -128,15 +151,18 @@ impl Notebook {
     ///
     /// Returns [`CliError`] when the log cannot be projected.
     pub fn list(&self) -> Result<Vec<NoteSummary>, CliError> {
-        if load(&self.local)?.is_empty() {
+        self.ensure()?;
+        let guard = self.cache.borrow();
+        let Some(item) = guard.as_ref() else {
             return Ok(Vec::new());
-        }
-        let view = self.project()?;
-        let names = device_labels(&self.local)?;
+        };
+        let Some(view) = item.projected.view.as_ref() else {
+            return Ok(Vec::new());
+        };
         Ok(view
             .notes
             .iter()
-            .map(|(id, heads)| summary(id, heads, &names))
+            .map(|(id, heads)| summary(id, heads, &item.projected.names))
             .collect())
     }
 
@@ -153,11 +179,17 @@ impl Notebook {
         if query.is_empty() {
             return Err(CliError::message("empty query"));
         }
-        if load(&self.local)?.is_empty() {
-            return Ok(Vec::new());
-        }
-        let view = self.project()?;
-        let names = device_labels(&self.local)?;
+        self.ensure()?;
+        let (view, names) = {
+            let guard = self.cache.borrow();
+            let Some(item) = guard.as_ref() else {
+                return Ok(Vec::new());
+            };
+            let Some(view) = item.projected.view.clone() else {
+                return Ok(Vec::new());
+            };
+            (view, item.projected.names.clone())
+        };
         let Some(dir) = self.local.key_path.parent() else {
             return Ok(search_scan(&view, query, &names));
         };
@@ -194,8 +226,14 @@ impl Notebook {
     /// Returns [`CliError`] when the id is not 64 hex characters or the note does not exist.
     pub fn show(&self, id_hex: &str) -> Result<ShownNote, CliError> {
         let note_id = parse_hex32(id_hex)?;
-        let view = self.project()?;
-        let names = device_labels(&self.local)?;
+        self.ensure()?;
+        let guard = self.cache.borrow();
+        let Some(item) = guard.as_ref() else {
+            return Err(CliError::message("no such note"));
+        };
+        let Some(view) = item.projected.view.as_ref() else {
+            return Err(CliError::message("no such note"));
+        };
         let heads = view
             .notes
             .get(&note_id)
@@ -208,7 +246,9 @@ impl Notebook {
                 .map(|head| ShownHead {
                     title: head.title.clone(),
                     body: head.body.clone(),
-                    writer: names
+                    writer: item
+                        .projected
+                        .names
                         .get(&head.signer)
                         .cloned()
                         .unwrap_or_else(|| short_hex(&head.signer)),
@@ -223,11 +263,22 @@ impl Notebook {
     ///
     /// Returns [`CliError`] when the title is too long or the log cannot be written.
     pub fn add(&self, title: &str, body: &str) -> Result<String, CliError> {
-        let mut wires = load(&self.local)?;
-        if wires.is_empty() {
-            return Err(CliError::message("sync this device before writing a note"));
-        }
-        let view = view_notes(&self.local, &wires)?;
+        self.ensure()?;
+        let (mut wires, view) = {
+            let guard = self.cache.borrow();
+            let Some(item) = guard.as_ref() else {
+                return Err(CliError::message("could not open notes file"));
+            };
+            if item.wires.is_empty() {
+                return Err(CliError::message("sync this device before writing a note"));
+            }
+            let view = item
+                .projected
+                .view
+                .clone()
+                .ok_or_else(|| CliError::message("notes log rejected"))?;
+            (item.wires.clone(), view)
+        };
         let note_id = random_note()?;
         let payload = note_put_payload(&note_id, title, body, &[])
             .map_err(|_| CliError::message("title must be at most 200 bytes"))?;
@@ -251,8 +302,19 @@ impl Notebook {
     /// Returns [`CliError`] when the note does not exist or the title is too long.
     pub fn edit(&self, id_hex: &str, title: &str, body: &str) -> Result<(), CliError> {
         let note_id = parse_hex32(id_hex)?;
-        let mut wires = load(&self.local)?;
-        let view = view_notes(&self.local, &wires)?;
+        self.ensure()?;
+        let (mut wires, view) = {
+            let guard = self.cache.borrow();
+            let Some(item) = guard.as_ref() else {
+                return Err(CliError::message("could not open notes file"));
+            };
+            let view = item
+                .projected
+                .view
+                .clone()
+                .ok_or_else(|| CliError::message("no such note"))?;
+            (item.wires.clone(), view)
+        };
         let heads = view
             .notes
             .get(&note_id)
@@ -406,14 +468,12 @@ impl Notebook {
     ///
     /// Returns [`CliError`] when the log does not project.
     pub fn recipients(&self) -> Result<Vec<ambient_spaces::MemberInfo>, CliError> {
-        let wires = load(&self.local)?;
-        if wires.is_empty() {
+        self.ensure()?;
+        let guard = self.cache.borrow();
+        let Some(view) = guard.as_ref().and_then(|item| item.projected.view.as_ref()) else {
             return Ok(Vec::new());
-        }
-        Ok(view_notes(&self.local, &wires)?
-            .members
-            .into_values()
-            .collect())
+        };
+        Ok(view.members.values().copied().collect())
     }
 
     /// Devices on the identity log. A paired folder can read the list. Only the root can revoke.
@@ -422,26 +482,12 @@ impl Notebook {
     ///
     /// Returns [`CliError`] when the identity log does not project.
     pub fn devices(&self) -> Result<Vec<DeviceLine>, CliError> {
-        let wires = load(&self.local)?;
-        let log = project_log(
-            &self.local.identity_public,
-            &identity_wires(&self.local, &wires)?,
-        )
-        .map_err(|_| CliError::message("identity log rejected"))?;
-        let mut lines = Vec::new();
-        for (key, state) in log.devices {
-            let (label, revoked) = match state {
-                DeviceState::Active { label, .. } => (label, false),
-                DeviceState::Revoked { label, .. } => (label, true),
-            };
-            lines.push(DeviceLine {
-                id: hex(&key),
-                label,
-                revoked,
-                current: key == self.local.device.signing_key,
-            });
-        }
-        Ok(lines)
+        self.ensure()?;
+        let guard = self.cache.borrow();
+        Ok(guard
+            .as_ref()
+            .map(|item| item.projected.devices.clone())
+            .unwrap_or_default())
     }
 
     /// Revoke a device key. Keeps the notes it already wrote. Stops sealing new events to it.
@@ -500,8 +546,25 @@ impl Notebook {
         Ok(())
     }
 
-    fn project(&self) -> Result<ambient_spaces::Projection, CliError> {
-        view_notes(&self.local, &load(&self.local)?)
+    fn ensure(&self) -> Result<(), CliError> {
+        let stamp = ambient_store::log_stamp(&self.local.notes_path)
+            .map_err(|_| CliError::message("could not open notes file"))?;
+        if self
+            .cache
+            .borrow()
+            .as_ref()
+            .is_some_and(|item| item.stamp == stamp)
+        {
+            return Ok(());
+        }
+        let wires = load(&self.local)?;
+        let projected = open_projected(&self.local, &wires)?;
+        *self.cache.borrow_mut() = Some(NoteCache {
+            stamp,
+            wires,
+            projected,
+        });
+        Ok(())
     }
 }
 
@@ -543,20 +606,6 @@ fn summary(
     }
 }
 
-fn device_labels(local: &Local) -> Result<std::collections::BTreeMap<[u8; 32], String>, CliError> {
-    let wires = load(local)?;
-    let log = project_log(&local.identity_public, &identity_wires(local, &wires)?)
-        .map_err(|_| CliError::message("identity log rejected"))?;
-    let mut names = std::collections::BTreeMap::new();
-    for (key, state) in log.devices {
-        let label = match state {
-            DeviceState::Active { label, .. } | DeviceState::Revoked { label, .. } => label,
-        };
-        names.insert(key, label);
-    }
-    Ok(names)
-}
-
 fn short_hex(bytes: &[u8; 32]) -> String {
     hex(bytes).chars().take(8).collect()
 }
@@ -573,38 +622,67 @@ fn identity_wires<'a>(local: &Local, wires: &'a [Vec<u8>]) -> Result<Vec<&'a [u8
 }
 
 fn view_notes(local: &Local, wires: &[Vec<u8>]) -> Result<ambient_spaces::Projection, CliError> {
-    let refs: Vec<&[u8]> = wires.iter().map(Vec::as_slice).collect();
-    let identity_wires: Vec<&[u8]> = refs
-        .iter()
-        .copied()
-        .filter(|wire| {
-            verify(wire)
-                .ok()
-                .is_some_and(|event| event.signer == local.identity_public)
-        })
-        .collect();
+    open_projected(local, wires)?
+        .view
+        .ok_or_else(|| CliError::message("notes log rejected"))
+}
+
+fn open_projected(local: &Local, wires: &[Vec<u8>]) -> Result<Projected, CliError> {
+    if wires.is_empty() {
+        return Ok(Projected {
+            view: None,
+            names: BTreeMap::new(),
+            devices: Vec::new(),
+        });
+    }
+    let mut identity_wires = Vec::new();
+    let mut space_wires = Vec::new();
+    for wire in wires {
+        let Ok(event) = verify(wire) else {
+            continue;
+        };
+        if event.signer == local.identity_public && event.event_type != "space.member-add" {
+            identity_wires.push(wire.as_slice());
+            continue;
+        }
+        if event.signer == local.identity_public {
+            identity_wires.push(wire.as_slice());
+        }
+        space_wires.push(wire.as_slice());
+    }
     let log = project_log(&local.identity_public, &identity_wires)
         .map_err(|_| CliError::message("identity log rejected"))?;
-    let mut revoked = Vec::new();
+    let mut names = BTreeMap::new();
+    let mut devices = Vec::new();
+    for (key, state) in &log.devices {
+        let (label, revoked) = match state {
+            DeviceState::Active { label, .. } => (label.clone(), false),
+            DeviceState::Revoked { label, .. } => (label.clone(), true),
+        };
+        names.insert(*key, label.clone());
+        devices.push(DeviceLine {
+            id: hex(key),
+            label,
+            revoked,
+            current: *key == local.device.signing_key,
+        });
+    }
+    let mut revoked_keys = Vec::new();
     for (key, state) in &log.devices {
         if let DeviceState::Revoked { up_to, .. } = state {
-            revoked.push(Revocation {
+            revoked_keys.push(Revocation {
                 signing_key: *key,
                 up_to: *up_to,
             });
         }
     }
-    let space_wires: Vec<&[u8]> = refs
-        .iter()
-        .copied()
-        .filter(|wire| {
-            verify(wire).ok().is_some_and(|event| {
-                event.signer != local.identity_public || event.event_type == "space.member-add"
-            })
-        })
-        .collect();
-    project_notes_for_root(&space_wires, &revoked, Some(local.identity_public))
-        .map_err(|_| CliError::message("notes log rejected"))
+    let view = project_notes_for_root(&space_wires, &revoked_keys, Some(local.identity_public))
+        .map_err(|_| CliError::message("notes log rejected"))?;
+    Ok(Projected {
+        view: Some(view),
+        names,
+        devices,
+    })
 }
 
 fn load(local: &Local) -> Result<Vec<Vec<u8>>, CliError> {

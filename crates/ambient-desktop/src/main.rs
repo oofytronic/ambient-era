@@ -236,7 +236,7 @@ impl App {
             Some(_) => "paired device",
             None => "not open",
         };
-        format!("Ambient — {} ({role})", self.dir.display())
+        format!("Aerodash — {} ({role})", self.dir.display())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -422,7 +422,7 @@ impl App {
             None => "Not open",
         };
         let mut bar = row![
-            text("Ambient").font(serif()).size(24),
+            text("Aerodash").font(serif()).size(24),
             text(role).size(12).color(ink.muted),
             text(self.message.as_str())
                 .size(13)
@@ -1034,15 +1034,17 @@ impl App {
             return Task::none();
         }
         self.sync_detail = outcome.detail;
-        match Notebook::open(&self.dir) {
-            Ok(book) => {
-                self.notebook = Some(book);
-                self.reload();
-                self.refresh_open_note();
+        if content_arrived(&self.sync_detail) {
+            match Notebook::open(&self.dir) {
+                Ok(book) => {
+                    self.notebook = Some(book);
+                    self.reload();
+                    self.refresh_open_note();
+                }
+                Err(err) => self.sync_detail = err.to_string(),
             }
-            Err(err) => self.sync_detail = err.to_string(),
+            self.reload_chat();
         }
-        self.reload_chat();
         self.pending = outcome.pending || self.writes != outcome.writes;
         Task::none()
     }
@@ -1443,6 +1445,29 @@ impl Ink {
             }
         }
     }
+}
+
+fn content_arrived(detail: &str) -> bool {
+    if detail == "Nothing new." {
+        return false;
+    }
+    let mut saw = false;
+    let mut arrived = false;
+    for part in detail.split(',') {
+        let part = part.trim();
+        if let Some(count) = part.strip_suffix(" notes in") {
+            saw = true;
+            if count.trim() != "0" {
+                arrived = true;
+            }
+        } else if let Some(count) = part.strip_suffix(" messages in") {
+            saw = true;
+            if count.trim() != "0" {
+                arrived = true;
+            }
+        }
+    }
+    !saw || arrived
 }
 
 fn ink_of(theme: &Theme) -> Ink {

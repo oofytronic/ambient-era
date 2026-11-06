@@ -2,9 +2,10 @@
 //!
 //! The notes window calls the wrappers in the crate root. It does not seal here.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use ambient_events::{encode_unsigned, sign_wire, verify};
 use ambient_identity::{
@@ -204,40 +205,15 @@ pub(crate) fn hear(dir: &Path) -> Result<String, CliError> {
 }
 
 pub(crate) fn hear_in(dir: &Path, id: &str) -> Result<String, CliError> {
-    let local = keys::open(dir)?;
-    let slots = load_slots(dir, &local.store_key)?;
-    let slot = slots
-        .iter()
-        .find(|slot| slot.space_id().as_deref() == Some(id))
-        .ok_or_else(|| CliError::message("no such conversation"))?;
-    let view = conversation(&slot.wires)?;
-    let mut out = String::new();
-    for line in &view.messages {
-        push_line(&mut out, line);
-    }
-    Ok(out)
+    let snap = chat_snap(dir)?;
+    snap.text
+        .get(id)
+        .cloned()
+        .ok_or_else(|| CliError::message("no such conversation"))
 }
 
 pub(crate) fn conversations(dir: &Path) -> Result<Vec<(String, String)>, CliError> {
-    let local = keys::open(dir)?;
-    let slots = load_slots(dir, &local.store_key)?;
-    let mut out = Vec::new();
-    for slot in slots {
-        let Some(id) = slot.space_id() else {
-            continue;
-        };
-        let view = conversation(&slot.wires)?;
-        let label = view
-            .members
-            .keys()
-            .find(|key| **key != slot.card.signing_key)
-            .map_or_else(
-                || "Conversation".to_owned(),
-                |key| format!("Person {}", short_id(key)),
-            );
-        out.push((id, label));
-    }
-    Ok(out)
+    Ok(chat_snap(dir)?.listed)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -314,7 +290,8 @@ pub(crate) fn sync(dir: &Path, url: &str) -> Result<String, CliError> {
         }
     }
     let notes_before = notes.len();
-    let chats_before: usize = slots.iter().map(|slot| slot.wires.len()).sum();
+    let wire_counts: Vec<usize> = slots.iter().map(|slot| slot.wires.len()).collect();
+    let wires_before: usize = wire_counts.iter().copied().sum();
     let mut dropped = Vec::new();
     file_incoming(&mut local, &mut notes, &mut dropped, &arrived)?;
     for (index, slot) in slots.iter_mut().enumerate() {
@@ -334,12 +311,12 @@ pub(crate) fn sync(dir: &Path, url: &str) -> Result<String, CliError> {
         }
         accept_chat(&mut slot.wires, &got);
     }
-    if !notes.is_empty() {
+    if notes.len() != notes_before {
         write_log(&notes_path, &local.store_key, &notes)
             .map_err(|_| CliError::message("could not write notes file"))?;
     }
-    for slot in &slots {
-        if !slot.wires.is_empty() {
+    for (slot, before) in slots.iter().zip(wire_counts) {
+        if slot.wires.len() != before {
             if let Some(parent) = slot.log_path.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|_| CliError::message("could not write chats"))?;
@@ -356,7 +333,7 @@ pub(crate) fn sync(dir: &Path, url: &str) -> Result<String, CliError> {
         .iter()
         .map(|slot| slot.wires.len())
         .sum::<usize>()
-        .saturating_sub(chats_before);
+        .saturating_sub(wires_before);
     if push_count == 0 && notes_in == 0 && chats_in == 0 {
         return Ok("Nothing new.".to_owned());
     }
@@ -678,6 +655,98 @@ impl Slot {
             .ok()
             .map(|view| hex_id(&view.space_id.0))
     }
+}
+
+#[derive(Clone)]
+struct ChatSnap {
+    stamps: Vec<(PathBuf, u64, u64)>,
+    listed: Vec<(String, String)>,
+    text: HashMap<String, String>,
+}
+
+fn chat_cache() -> &'static Mutex<HashMap<PathBuf, ChatSnap>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, ChatSnap>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn chat_snap(dir: &Path) -> Result<ChatSnap, CliError> {
+    let stamps = chat_stamps(dir);
+    let key = dir.to_path_buf();
+    if let Some(stamps) = &stamps {
+        let guard = chat_cache().lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(hit) = guard.get(&key)
+            && hit.stamps == *stamps
+        {
+            return Ok(hit.clone());
+        }
+    }
+    let local = keys::open(dir)?;
+    let slots = load_slots(dir, &local.store_key)?;
+    let mut listed = Vec::new();
+    let mut text = HashMap::new();
+    for slot in &slots {
+        let Ok(view) = conversation(&slot.wires) else {
+            continue;
+        };
+        let id = hex_id(&view.space_id.0);
+        let label = view
+            .members
+            .keys()
+            .find(|key| **key != slot.card.signing_key)
+            .map_or_else(
+                || "Conversation".to_owned(),
+                |key| format!("Person {}", short_id(key)),
+            );
+        let mut body = String::new();
+        for line in &view.messages {
+            push_line(&mut body, line);
+        }
+        listed.push((id.clone(), label));
+        text.insert(id, body);
+    }
+    let snap = ChatSnap {
+        stamps: stamps.clone().unwrap_or_default(),
+        listed,
+        text,
+    };
+    if stamps.is_some() {
+        chat_cache()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key, snap.clone());
+    }
+    Ok(snap)
+}
+
+fn chat_stamps(dir: &Path) -> Option<Vec<(PathBuf, u64, u64)>> {
+    let mut paths = Vec::new();
+    if dir.join("card").is_file() {
+        paths.push(dir.join("chats"));
+    }
+    if let Ok(read) = fs::read_dir(dir.join("conversations")) {
+        let mut folders: Vec<_> = read
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect();
+        folders.sort();
+        for folder in folders {
+            if folder.join("card").is_file() {
+                paths.push(folder.join("log"));
+            }
+        }
+    }
+    let invite = dir.join("invite");
+    if invite.join("card").is_file() {
+        paths.push(invite.join("log"));
+    }
+    let mut stamps = Vec::new();
+    for path in paths {
+        match ambient_store::log_stamp(&path) {
+            Ok(Some((counter, len))) => stamps.push((path, counter, len)),
+            Ok(None) => stamps.push((path, 0, 0)),
+            Err(_) => return None,
+        }
+    }
+    Some(stamps)
 }
 
 fn load_slots(dir: &Path, key: &[u8; 32]) -> Result<Vec<Slot>, CliError> {

@@ -3,13 +3,30 @@
 //! The sealed notes log stays the source of truth. This file is a projection.
 //! It is not uploaded. The protocol store crate does not link SQLCipher.
 
-use std::path::Path;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use rusqlite::{Connection, params};
 
 use crate::notes::CliError;
 
+struct Held {
+    path: PathBuf,
+    stamp: u64,
+    conn: Connection,
+}
+
+fn held() -> &'static Mutex<Option<Held>> {
+    static HELD: OnceLock<Mutex<Option<Held>>> = OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(None))
+}
+
 /// Note ids whose indexed text matches `query` as FTS5 tokens.
+///
+/// The database stays open for this process. The key derivation runs once
+/// per folder, not on every keystroke. The rows are rewritten only when they change.
 ///
 /// # Errors
 ///
@@ -24,22 +41,52 @@ pub(crate) fn match_ids(
         return Err(CliError::message("query has no words"));
     };
     let path = dir.join("search.db");
+    let stamp = rows_stamp(rows);
+    {
+        let guard = held().lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(open) = guard.as_ref()
+            && open.path == path
+            && open.stamp == stamp
+        {
+            return query_ids(&open.conn, &match_query);
+        }
+    }
     let conn = open_db(&path, key)?;
+    rebuild(&conn, rows)?;
+    let ids = query_ids(&conn, &match_query)?;
+    *held().lock().unwrap_or_else(PoisonError::into_inner) = Some(Held { path, stamp, conn });
+    Ok(ids)
+}
+
+fn rows_stamp(rows: &[(String, String, String)]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    rows.len().hash(&mut hasher);
+    for (id, title, body) in rows {
+        id.hash(&mut hasher);
+        title.hash(&mut hasher);
+        body.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn rebuild(conn: &Connection, rows: &[(String, String, String)]) -> Result<(), CliError> {
     conn.execute_batch(
         "CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(id UNINDEXED, title, body, tokenize = 'unicode61');
          DELETE FROM notes_fts;",
     )
     .map_err(|_| CliError::message("could not build search index"))?;
-    {
-        let mut insert = conn
-            .prepare("INSERT INTO notes_fts (id, title, body) VALUES (?1, ?2, ?3)")
+    let mut insert = conn
+        .prepare("INSERT INTO notes_fts (id, title, body) VALUES (?1, ?2, ?3)")
+        .map_err(|_| CliError::message("could not build search index"))?;
+    for (id, title, body) in rows {
+        insert
+            .execute(params![id, title, body])
             .map_err(|_| CliError::message("could not build search index"))?;
-        for (id, title, body) in rows {
-            insert
-                .execute(params![id, title, body])
-                .map_err(|_| CliError::message("could not build search index"))?;
-        }
     }
+    Ok(())
+}
+
+fn query_ids(conn: &Connection, match_query: &str) -> Result<Vec<String>, CliError> {
     let mut select = conn
         .prepare("SELECT id FROM notes_fts WHERE notes_fts MATCH ?1")
         .map_err(|_| CliError::message("could not search notes"))?;

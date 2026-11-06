@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-05 — Aerodash, and a click does not re-read the log
+
+The window is named Aerodash. Choosing a note, a chat, or Devices reuses the projection already in memory. A sync that brought nothing does not rewrite the sealed file and does not reload the window. Search keeps the SQLCipher index open instead of deriving the key again on every letter.
+
 ## 2026-11-05 — typing, notes on the other folder, parchment
 
 Typing does not wait on sync. The window runs sync off its own thread, and a short pause writes the open note without moving the cursor, so a new note or an edit reaches the paired folder without a separate Save. A note that is already saved refreshes when the other folder's version arrives. The window is parchment: light `#EDEADE` with `#16446F`, dark `#1C1917` with `#66A5E1`. Titles are Crimson Pro. The rest is DM Sans. A sun or moon beside the globe switches them. Notes and chats in the list are rows, not the same control as Save, Send, or New note.

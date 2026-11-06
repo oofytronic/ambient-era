@@ -84,6 +84,37 @@ pub fn read_log(path: &Path, key: &[u8; 32]) -> Result<Vec<Vec<u8>>, StoreError>
     Ok(open_log(key, &bytes)?.1)
 }
 
+/// The counter and length in a log header, without decrypting.
+///
+/// `None` when the file is not there yet. Readers use this to skip a decrypt
+/// when the file has not changed.
+///
+/// # Errors
+///
+/// Returns [`StoreError::Io`] or [`StoreError::Corrupt`] when the header cannot be read.
+pub fn log_stamp(path: &Path) -> Result<Option<(u64, u64)>, StoreError> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(StoreError::Io),
+    };
+    let len = file.metadata().map_err(|_| StoreError::Io)?.len();
+    let mut header = [0_u8; 13];
+    use std::io::Read;
+    if file.read(&mut header).map_err(|_| StoreError::Io)? != header.len() {
+        return Err(StoreError::Corrupt);
+    }
+    if header.get(..4) != Some(MAGIC) || header.get(4) != Some(&1) {
+        return Err(StoreError::Corrupt);
+    }
+    let counter_bytes: [u8; 8] = header
+        .get(5..13)
+        .ok_or(StoreError::Corrupt)?
+        .try_into()
+        .map_err(|_| StoreError::Corrupt)?;
+    Ok(Some((u64::from_be_bytes(counter_bytes), len)))
+}
+
 /// Write a log file, incrementing the counter when the file already exists.
 ///
 /// The sealed bytes are written to a sibling `*.part` file and then renamed over
