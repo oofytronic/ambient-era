@@ -14,12 +14,19 @@ use ambient_cli::{Draft, NoteSummary, Notebook};
 use iced::clipboard;
 use iced::keyboard::Key;
 use iced::widget::image as iced_image;
-use iced::widget::{button, column, container, row, scrollable, text, text_editor, text_input};
+use iced::widget::{
+    button, column, container, row, scrollable, space, text, text_editor, text_input,
+};
 use iced::{Color, Element, Fill, Font, Task, Theme};
 use image::ImageEncoder;
 use qrcode::QrCode;
 
+mod clock;
+mod markdown;
+
 const SANS_BYTES: &[u8] = include_bytes!("../fonts/DMSans-Regular.ttf");
+const SANS_BOLD_BYTES: &[u8] = include_bytes!("../fonts/DMSans-Bold.ttf");
+const SANS_ITALIC_BYTES: &[u8] = include_bytes!("../fonts/DMSans-Italic.ttf");
 const SERIF_BYTES: &[u8] = include_bytes!("../fonts/CrimsonPro-Regular.ttf");
 
 fn sans() -> Font {
@@ -38,6 +45,8 @@ fn main() -> iced::Result {
         .theme(theme)
         .default_font(sans())
         .font(SANS_BYTES)
+        .font(SANS_BOLD_BYTES)
+        .font(SANS_ITALIC_BYTES)
         .font(SERIF_BYTES)
         .run()
 }
@@ -70,7 +79,7 @@ struct App {
     query: String,
     selected: Option<String>,
     title_text: String,
-    body: text_editor::Content,
+    body: markdown::NoteBody,
     conflicts: Vec<(String, String, String)>,
     note_writer: String,
     message: String,
@@ -78,7 +87,7 @@ struct App {
     chats: Vec<ambient_cli::ConversationSummary>,
     chat_id: Option<String>,
     devices: Vec<ambient_cli::DeviceLine>,
-    chat: Vec<String>,
+    chat: Vec<ChatBubble>,
     draft_chat: String,
     my_card: String,
     their_card: String,
@@ -110,6 +119,9 @@ enum Message {
     NewNote,
     TitleChanged(String),
     BodyEdited(text_editor::Action),
+    FocusBlock(usize),
+    EditBelow,
+    ToggleTask(usize),
     Save,
     ShowNotes,
     ShowChat,
@@ -166,7 +178,7 @@ impl App {
             query: String::new(),
             selected: None,
             title_text: String::new(),
-            body: text_editor::Content::new(),
+            body: markdown::NoteBody::new(),
             conflicts: Vec::new(),
             note_writer: String::new(),
             message: String::new(),
@@ -261,8 +273,38 @@ impl App {
                 Task::none()
             }
             Message::BodyEdited(action) => {
-                self.body.perform(action);
-                self.edited_at = Some(Instant::now());
+                let edited = self.body.edit(&action);
+                if edited.changed {
+                    self.edited_at = Some(Instant::now());
+                }
+                if edited.refocus {
+                    focus_note()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::FocusBlock(index) => {
+                if self.body.focus_index(index) {
+                    focus_note()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::EditBelow => {
+                let edited = self.body.focus_below();
+                if edited.changed {
+                    self.edited_at = Some(Instant::now());
+                }
+                if edited.refocus {
+                    focus_note()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::ToggleTask(at) => {
+                if self.body.toggle_task(at) {
+                    self.edited_at = Some(Instant::now());
+                }
                 Task::none()
             }
             Message::Save => {
@@ -675,17 +717,7 @@ impl App {
                 .padding([2.0, 0.0])
                 .style(title_style),
         );
-        body = body.push(
-            text_editor(&self.body)
-                .height(Fill)
-                .padding(14)
-                .size(16)
-                .font(sans())
-                .placeholder("Write")
-                .on_action(Message::BodyEdited)
-                .key_binding(binding)
-                .style(editor_style),
-        );
+        body = body.push(markdown::view(&self.body, ink));
         let mut actions = row![action_label("Save", Message::Save)].spacing(8);
         if self.selected.is_some() {
             actions = actions.push(ghost_label("Send to chat", Message::SendNoteToChat));
@@ -696,26 +728,37 @@ impl App {
 
     fn chat_pane(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        let mut lines = column![].spacing(10);
+        let mut lines = column![].spacing(8);
         if self.chat.is_empty() {
             lines = lines.push(text("No messages yet.").color(ink.muted));
             lines = lines.push(action_label("Invite someone", Message::ShowInvite));
         }
+        let mut day = String::new();
         for line in &self.chat {
-            lines = lines.push(
-                container(text(line).size(15))
-                    .padding([10.0, 12.0])
-                    .style(bubble_style),
-            );
+            if !line.day.is_empty() && line.day != day {
+                day.clone_from(&line.day);
+                lines = lines.push(
+                    container(text(&line.day).size(12).color(ink.muted))
+                        .width(Fill)
+                        .align_x(iced::alignment::Horizontal::Center)
+                        .padding([6, 0]),
+                );
+            }
+            lines = lines.push(chat_bubble(line, ink));
         }
         column![
-            scrollable(lines).height(Fill),
-            text_input("Message", &self.draft_chat)
-                .on_input(Message::DraftChat)
-                .on_submit(Message::SendChat)
-                .padding(10)
-                .style(field_style),
-            action_label("Send", Message::SendChat),
+            scrollable(lines).height(Fill).anchor_bottom(),
+            row![
+                text_input("Message", &self.draft_chat)
+                    .on_input(Message::DraftChat)
+                    .on_submit(Message::SendChat)
+                    .padding(10)
+                    .width(Fill)
+                    .style(field_style),
+                action_label("Send", Message::SendChat),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
         ]
         .spacing(12)
         .height(Fill)
@@ -870,8 +913,23 @@ impl App {
             self.chat.clear();
             return;
         };
-        match ambient_cli::chat_lines_in(&self.dir, &id) {
-            Ok(lines) => self.chat = lines,
+        match ambient_cli::chat_messages_in(&self.dir, &id) {
+            Ok(lines) => {
+                let tz = clock::load_tz();
+                let now = clock::now_ms();
+                self.chat = lines
+                    .into_iter()
+                    .map(|line| {
+                        let when = clock::when(line.unix_ms, &tz, now);
+                        ChatBubble {
+                            text: line.text,
+                            time: when.time,
+                            day: when.day,
+                            mine: line.mine,
+                        }
+                    })
+                    .collect();
+            }
             Err(err) => self.message = err.to_string(),
         }
     }
@@ -901,11 +959,11 @@ impl App {
                 self.disk_body.clone_from(&draft.body);
                 if let Some((title, body)) = stash {
                     self.title_text = title;
-                    self.body = text_editor::Content::with_text(&body);
+                    self.body.load(&body, false);
                     self.edited_at = Some(Instant::now());
                 } else {
                     self.title_text.clone_from(&draft.title);
-                    self.body = text_editor::Content::with_text(&draft.body);
+                    self.body.load(&draft.body, false);
                     self.edited_at = None;
                 }
                 self.conflicts = draft.conflicts;
@@ -938,12 +996,12 @@ impl App {
         self.sheet = Sheet::None;
         if let Some((title, body)) = stash {
             self.title_text = title;
-            self.body = text_editor::Content::with_text(&body);
+            self.body.load(&body, false);
             self.edited_at = Some(Instant::now());
             return;
         }
         self.title_text.clear();
-        self.body = text_editor::Content::new();
+        self.body.load("", true);
         self.edited_at = None;
         self.message.clear();
     }
@@ -1080,7 +1138,7 @@ impl App {
         self.disk_title.clone_from(&draft.title);
         self.disk_body.clone_from(&draft.body);
         self.title_text.clone_from(&draft.title);
-        self.body = text_editor::Content::with_text(&draft.body);
+        self.body.load(&draft.body, false);
         self.edited_at = None;
     }
 
@@ -1330,37 +1388,28 @@ impl App {
     }
 
     fn send_note_to_chat(&mut self) {
-        let Some(id) = self.selected.clone() else {
+        if self.selected.is_none() {
             self.say("Select a note first.");
             return;
-        };
-        let Some(book) = self.notebook.as_ref() else {
-            return;
-        };
-        match book.show(&id) {
-            Ok(note) => {
-                let draft = Draft::from_note(&note);
-                let mut text = String::new();
-                if !draft.title.is_empty() {
-                    text.push_str(&draft.title);
-                    text.push_str("\n\n");
+        }
+        let mut text = String::new();
+        if !self.title_text.is_empty() {
+            text.push_str(&self.title_text);
+            text.push_str("\n\n");
+        }
+        text.push_str(&self.body.text());
+        match self.chat_id.clone() {
+            Some(chat) => match ambient_cli::send_chat_in(&self.dir, &chat, &text) {
+                Ok(()) => {
+                    self.remember_unsaved();
+                    self.show_chat = true;
+                    self.say("Note copied into the chat. It syncs while the relay is on.");
+                    self.reload_chat();
+                    self.mark_pending();
                 }
-                text.push_str(&draft.body);
-                match self.chat_id.clone() {
-                    Some(chat) => match ambient_cli::send_chat_in(&self.dir, &chat, &text) {
-                        Ok(()) => {
-                            self.remember_unsaved();
-                            self.show_chat = true;
-                            self.say("Note copied into the chat. It syncs while the relay is on.");
-                            self.reload_chat();
-                            self.mark_pending();
-                        }
-                        Err(err) => self.message = err.to_string(),
-                    },
-                    None => self.say("Start a conversation before sending a note."),
-                }
-            }
-            Err(err) => self.message = err.to_string(),
+                Err(err) => self.message = err.to_string(),
+            },
+            None => self.say("Start a conversation before sending a note."),
         }
     }
 
@@ -1728,6 +1777,66 @@ fn bubble_style(theme: &Theme) -> container::Style {
             color: Color::TRANSPARENT,
         },
         ..Default::default()
+    }
+}
+
+fn mine_style(theme: &Theme) -> container::Style {
+    let ink = ink_of(theme);
+    container::Style {
+        background: Some(iced::Background::Color(ink.accent)),
+        text_color: Some(ink.on_accent),
+        border: iced::Border {
+            radius: 14.0.into(),
+            width: 0.0,
+            color: Color::TRANSPARENT,
+        },
+        ..Default::default()
+    }
+}
+
+fn theirs_style(theme: &Theme) -> container::Style {
+    let mut style = bubble_style(theme);
+    style.border.radius = 14.0.into();
+    style
+}
+
+struct ChatBubble {
+    text: String,
+    time: String,
+    day: String,
+    mine: bool,
+}
+
+fn focus_note() -> Task<Message> {
+    iced::widget::operation::focus(iced::widget::Id::new("note-body"))
+}
+
+fn chat_bubble(line: &ChatBubble, ink: Ink) -> Element<'_, Message> {
+    let wide = line.text.chars().count() > 42 || line.text.contains('\n');
+    let mut words = text(&line.text).size(15);
+    if wide {
+        words = words.width(420);
+    }
+    let mut body = column![words].spacing(4);
+    if !line.time.is_empty() {
+        let time_color = if line.mine {
+            Color {
+                a: 0.72,
+                ..ink.on_accent
+            }
+        } else {
+            ink.muted
+        };
+        body = body.push(text(&line.time).size(11).color(time_color));
+    }
+    let bubble = container(body)
+        .padding([8, 12])
+        .max_width(460)
+        .style(if line.mine { mine_style } else { theirs_style });
+    if line.mine {
+        row![space().width(Fill), bubble].width(Fill).into()
+    } else {
+        row![bubble, space().width(Fill)].width(Fill).into()
     }
 }
 

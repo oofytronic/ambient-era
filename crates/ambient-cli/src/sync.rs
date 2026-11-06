@@ -212,6 +212,14 @@ pub(crate) fn hear_in(dir: &Path, id: &str) -> Result<String, CliError> {
         .ok_or_else(|| CliError::message("no such conversation"))
 }
 
+pub(crate) fn messages_in(dir: &Path, id: &str) -> Result<Vec<crate::ChatMessage>, CliError> {
+    let snap = chat_snap(dir)?;
+    snap.messages
+        .get(id)
+        .cloned()
+        .ok_or_else(|| CliError::message("no such conversation"))
+}
+
 pub(crate) fn conversations(dir: &Path) -> Result<Vec<(String, String)>, CliError> {
     Ok(chat_snap(dir)?.listed)
 }
@@ -662,6 +670,7 @@ struct ChatSnap {
     stamps: Vec<(PathBuf, u64, u64)>,
     listed: Vec<(String, String)>,
     text: HashMap<String, String>,
+    messages: HashMap<String, Vec<crate::ChatMessage>>,
 }
 
 fn chat_cache() -> &'static Mutex<HashMap<PathBuf, ChatSnap>> {
@@ -684,6 +693,7 @@ fn chat_snap(dir: &Path) -> Result<ChatSnap, CliError> {
     let slots = load_slots(dir, &local.store_key)?;
     let mut listed = Vec::new();
     let mut text = HashMap::new();
+    let mut messages = HashMap::new();
     for slot in &slots {
         let Ok(view) = conversation(&slot.wires) else {
             continue;
@@ -698,16 +708,24 @@ fn chat_snap(dir: &Path) -> Result<ChatSnap, CliError> {
                 |key| format!("Person {}", short_id(key)),
             );
         let mut body = String::new();
+        let mut lines = Vec::new();
         for line in &view.messages {
             push_line(&mut body, line);
+            lines.push(crate::ChatMessage {
+                text: line.text.clone(),
+                unix_ms: line.unix_ms,
+                mine: line.sender == slot.card.signing_key,
+            });
         }
         listed.push((id.clone(), label));
-        text.insert(id, body);
+        text.insert(id.clone(), body);
+        messages.insert(id, lines);
     }
     let snap = ChatSnap {
         stamps: stamps.clone().unwrap_or_default(),
         listed,
         text,
+        messages,
     };
     if stamps.is_some() {
         chat_cache()

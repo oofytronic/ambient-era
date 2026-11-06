@@ -68,7 +68,11 @@ pub struct Projection {
     pub skipped: Vec<(EventId, Skip)>,
 }
 
-/// One applied chat message. Event-id order, not arrival order.
+/// One applied chat message.
+///
+/// [`Conversation::messages`] is reading order: advisory [`ChatLine::unix_ms`],
+/// then the order the log applied them. The prev chain is still the causal
+/// order. Event ids are not an order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChatLine {
     /// Event id of this `msg.put`.
@@ -90,7 +94,10 @@ pub struct Conversation {
     pub tip: BTreeMap<[u8; 32], EventId>,
     /// Current members, keyed by signing key.
     pub members: BTreeMap<[u8; 32], MemberInfo>,
-    /// Applied messages.
+    /// Applied messages, oldest first by advisory `unix_ms`.
+    ///
+    /// This is reading order. It is not the prev-chain order, and a missing
+    /// time sorts as zero so it stays with the earlier messages.
     pub messages: Vec<ChatLine>,
     /// Events that were not applied.
     pub skipped: Vec<(EventId, Skip)>,
@@ -257,7 +264,7 @@ fn project(
         skipped.push((item.id, Skip::Gap));
     }
     skipped.sort_by_key(|item| item.0);
-    messages.sort_by_key(|item| item.event_id);
+    reading_order(&mut messages);
     Ok(Projected {
         space_id,
         tip,
@@ -371,6 +378,16 @@ fn apply_note(
         parents,
     });
     Ok(())
+}
+
+fn reading_order(messages: &mut Vec<ChatLine>) {
+    let mut keyed: Vec<(u64, usize, ChatLine)> = messages
+        .drain(..)
+        .enumerate()
+        .map(|(index, line)| (line.unix_ms.unwrap_or(0), index, line))
+        .collect();
+    keyed.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    messages.extend(keyed.into_iter().map(|(_, _, line)| line));
 }
 
 fn apply_message(
@@ -800,4 +817,27 @@ fn bytes32(value: &Cbor) -> Result<[u8; 32], SpaceError> {
         return Err(SpaceError::BadPayload);
     };
     <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| SpaceError::BadPayload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChatLine, reading_order};
+    use ambient_events::EventId;
+
+    fn line(mark: u8, unix_ms: Option<u64>) -> ChatLine {
+        ChatLine {
+            event_id: EventId([mark; 32]),
+            sender: [0; 32],
+            text: mark.to_string(),
+            unix_ms,
+        }
+    }
+
+    #[test]
+    fn messages_read_by_time_not_by_event_id() {
+        let mut messages = vec![line(1, Some(20)), line(9, Some(10)), line(3, Some(10))];
+        reading_order(&mut messages);
+        let texts: Vec<&str> = messages.iter().map(|item| item.text.as_str()).collect();
+        assert_eq!(texts, ["9", "3", "1"]);
+    }
 }

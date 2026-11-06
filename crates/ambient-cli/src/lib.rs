@@ -161,7 +161,24 @@ pub fn list_conversations(dir: &Path) -> Result<Vec<ConversationSummary>, CliErr
         .collect())
 }
 
-/// Message texts in one conversation, in event-id order.
+/// One chat message for the window, oldest first.
+///
+/// `unix_ms` is the envelope's advisory clock. It is not the order of the log.
+/// The vec is already in reading order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChatMessage {
+    /// Message text. A copy, not a grant.
+    pub text: String,
+    /// Advisory unix milliseconds. `None` when the event did not set one.
+    pub unix_ms: Option<u64>,
+    /// True when this folder's contact card for that conversation signed it.
+    pub mine: bool,
+}
+
+/// Message texts in one conversation, oldest first.
+///
+/// A message that contains a newline is split across strings. The window uses
+/// [`chat_messages_in`] so one message stays one bubble.
 ///
 /// # Errors
 ///
@@ -173,6 +190,15 @@ pub fn chat_lines_in(dir: &Path, id: &str) -> Result<Vec<String>, CliError> {
         .filter(|line| !line.is_empty())
         .map(str::to_owned)
         .collect())
+}
+
+/// Messages in one conversation, oldest first.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when that conversation does not exist.
+pub fn chat_messages_in(dir: &Path, id: &str) -> Result<Vec<ChatMessage>, CliError> {
+    sync::messages_in(dir, id)
 }
 
 /// Wrap the key file with a passphrase. The passphrase is not the root and not a passkey.
