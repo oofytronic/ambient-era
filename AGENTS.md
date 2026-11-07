@@ -52,7 +52,7 @@ The relay never depends on the core, the store, or anything that holds a user's 
 - **No panics on untrusted input.** `unwrap`, `expect`, `panic!`, `todo!`, and unchecked indexing are denied in production code by workspace lints. Return typed errors. Tests may use them.
 - **No `unsafe`.** It is forbidden workspace-wide. If a crate truly needs it (for example UniFFI output), change that crate's lint setting explicitly, explain why in the PR, and expect review.
 - **Crypto.** Use audited libraries and standard constructions only. Never invent a protocol, cipher mode, KDF, or key schedule. Changes to `ambient-events`, `ambient-identity`, `ambient-spaces`, `ambient-capabilities`, or `ambient-relay` need owner review.
-- **Dependencies are a budget.** Add one only with a stated reason, in `[workspace.dependencies]`, then run `just deny`. Prefer fewer and well-maintained over convenient.
+- **Dependencies are a budget.** Add one only with a stated reason, in `[workspace.dependencies]`, then run `just deny`. A new crate is allowed only when it is crucial and the standard for that job: ubiquitous, as small as the job allows, and actually fast. Iced, the audited crypto crates, and the protocol libraries already chosen meet that bar. A crate that is merely convenient, popular, or "good enough" does not. Build the feature. See [ADR-0003](docs/adr/0003-workspace-and-tooling.md).
 - **Browser-compatible by default.** Protocol crates must keep passing `just wasm-check`. Platform-specific code goes behind traits in the crates built for it.
 - **Do not weaken checks.** Never disable, skip, or loosen a test, lint, or CI job to get green. Fix the cause. If a check is wrong, say so and propose the change separately.
 - **No telemetry, no user data in logs.** Ever.

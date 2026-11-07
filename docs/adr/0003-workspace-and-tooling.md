@@ -1,6 +1,6 @@
 # ADR-0003: Workspace layout, lints, dependency policy, and CI
 
-**Status:** Accepted.
+**Status:** Accepted. Amended 2026-11-06. The dependency bar is now "the standard for that job," not "well maintained and convenient."
 
 ## Context
 
@@ -21,6 +21,7 @@ The codebase will be written largely by agents and must stay trustworthy for yea
 
 **Dependencies**
 - Every new external dependency is added to `[workspace.dependencies]` with a stated reason.
+- A crate earns that reason only when it is crucial and the standard for the job: ubiquitous, as small as the job allows, and actually fast. Iced, audited crypto, and the protocol libraries already in the workspace are in. A convenient parser, widget kit, or helper crate is not. Build that feature.
 - `cargo-deny` enforces an allow-list of licenses, rejects wildcard versions and unknown registries or git sources, and fails on known advisories. A scheduled job re-checks advisories weekly, independent of code changes.
 - Dependabot proposes cargo and GitHub Actions updates weekly.
 

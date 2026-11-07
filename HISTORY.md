@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-06 — crates only when they are the standard
+
+Dependencies stay on a short list. A new crate is allowed only when it is crucial and the standard for that job: ubiquitous, as small as the job allows, and actually fast. Iced, the audited crypto crates, and the protocol libraries already chosen stay. A convenient or merely popular crate does not. Build the feature. The note preview is the example: a small parser in the window, not a markdown crate. See [ADR-0003](docs/adr/0003-workspace-and-tooling.md).
+
 ## 2026-11-06 — markdown preview, chat in time order
 
 The note body previews a small markdown set: headings, emphasis, lists, task boxes, quotes, code, links, and rules. A line shows the rendered text until you click it, and then the marks come back. Enter or an arrow leaves that line and renders it. What is saved is still the raw markdown. Chat messages are reading order by the advisory clock, oldest first, so the latest sits at the bottom. The prev chain is unchanged, and the clock is still not a protocol order. Your messages sit on the right. Theirs sit on the left.
