@@ -26,6 +26,38 @@ Anything new is one of these, and not a third mechanism:
 
 Do not add a per-share Space type, a second access list, or a "deleted everywhere" promise. Revocation stops future seals. It does not pull back plaintext a member already opened. See [THREAT_MODEL.md](THREAT_MODEL.md).
 
+## Adding a feature
+
+Read this before adding a screen, a type, or a table. The note editor is a view: it styles Markdown while you type, and the bytes that sync are still the `text-snapshot-v1` snapshot.
+
+A new feature is one of three pieces.
+
+| Piece | What it is | What it is not |
+|:--|:--|:--|
+| **Room** | A Space. The guest list and the signed logs. The notebook's guests are your devices. A conversation's guests are you and one contact. A later site is its own room because strangers are not guests of the notebook. | A content type. Notes and chat are the same machine. |
+| **Record** | One signed event. Today: `note.put` (the whole Markdown document; both versions stay when they diverge) and `msg.put` (a short text, kept, never merged). | A row in a side database. If it has to reach another device, it is a record. |
+| **View** | A picture this device draws from records it already has. Search, a task list, a rendered page, the styling in the editor. | A permission boundary, and not synced. Two views may draw the same records. |
+
+Cursor, scroll, and which screen is open stay on the device. They are not records.
+
+Ask two questions, in order.
+
+1. **Is the guest list the same as a room that already exists?** The same people as the notebook: it stays in the notebook. A different set (a co-author, a leased reader, the public): its own room, the same Space code, not a new protocol. Public rooms are a later spec. Do not fake one by uploading plaintext.
+2. **If two devices change it while apart, what is kept?** The whole text, and both copies when they diverge: a document (`note.put`). Do not invent a type. Small facts that should all apply, such as a chat line, or a checkbox flip that must not collide with editing a paragraph: a small record whose merge is "keep every event," and only then. Character-by-character merge: a new codec and a new type string, specified first. Not a silent change to the current document bytes.
+
+Pointing at another thing is a citation (an id and a version, no key), a copy (the bytes, and then the two diverge), or a grant (membership, or a narrowed expiring capability). Not a relation in an object graph.
+
+Fifteen names are not fifteen types. A person page, a meeting, a chapter, and a website draft are documents. A label inside the Markdown, plus a view that queries those documents, is the difference. A new record is justified only when the merge rule is different. A new room is justified only when the guest list is different. A new view is justified when the screen should look different. Most features are the third.
+
+A plugin, when one exists, is a view with a grant: which rooms, which records, read or append, expiring, and never widened. It does not hold the root, it does not seal, and it does not keep its own guest list. That grant is [ADR-0001](docs/adr/0001-creations-as-spaces.md) and `ambient-capabilities`. It is not a second app beside the log.
+
+Two shapes, so the questions stay concrete:
+
+- **Tasks.** Rows that must survive a bad merge are records in the notebook: a stable id, the text, and a done bit, each change its own event. "Today" is a view. Not a second file the other devices never see.
+- **A website.** Each page is a document. The site is its own room, because its readers are not the notebook's guests. Pages share that room the way chapters share a book. Publishing copies the text, and the draft and the page then diverge. The theme and the navigation are a view. Unpublish stops future reads. It does not delete the draft, and it does not erase a copy someone already opened.
+
+Do not add an object graph of typed things with relations. That is a second model. One document shape plus views is how a notebook grows. The guest list is the part this app adds, because who can read the log is the product.
+
 ## Larger project, not now
 
 | Later | What it is | Why it waits |
@@ -101,4 +133,5 @@ A conversation is the same path with `msg.put`, signed by a per-contact key rath
 | Who may be in a Space | `docs/spec/03-spaces.md` and ADR-0001 if the access ladder changes |
 | How sealing works | A new ADR. ADR-0005 is the current one. |
 | A new crate or dependency | ADR-0003's policy, `deny.toml`, the crate's `AGENTS.md` |
+| A new kind of thing | This file, "Adding a feature." A view needs no spec. A record or a room does. |
 | A product promise | `THREAT_MODEL.md` first. Then the README, if the claim is public. |

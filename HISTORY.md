@@ -4,6 +4,12 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-08 — a feature is a room, a record, or a view
+
+Before adding a kind of thing, read "Adding a feature" in [ARCHITECTURE.md](ARCHITECTURE.md). A room is a Space (who can have the log). A record is one signed event (how two edits merge). A view is a local picture of records and is not synced. Most new screens are views over documents. A new record is only for a different merge rule. A new room is only for a different guest list. Not an object graph.
+
+The note body is one editor. Markdown is styled as it is typed: opening `**` starts bold, and the closing pair ends it, including across lines until a blank line. The marks stay in the text. That text is what is saved. This supersedes the click-a-line preview from 2026-11-06.
+
 ## 2026-11-06 — crates only when they are the standard
 
 Dependencies stay on a short list. A new crate is allowed only when it is crucial and the standard for that job: ubiquitous, as small as the job allows, and actually fast. Iced, the audited crypto crates, and the protocol libraries already chosen stay. A convenient or merely popular crate does not. Build the feature. The note preview is the example: a small parser in the window, not a markdown crate. See [ADR-0003](docs/adr/0003-workspace-and-tooling.md).
