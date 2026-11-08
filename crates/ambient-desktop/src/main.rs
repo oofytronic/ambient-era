@@ -119,9 +119,6 @@ enum Message {
     NewNote,
     TitleChanged(String),
     BodyEdited(text_editor::Action),
-    FocusBlock(usize),
-    EditBelow,
-    ToggleTask(usize),
     Save,
     ShowNotes,
     ShowChat,
@@ -273,36 +270,7 @@ impl App {
                 Task::none()
             }
             Message::BodyEdited(action) => {
-                let edited = self.body.edit(&action);
-                if edited.changed {
-                    self.edited_at = Some(Instant::now());
-                }
-                if edited.refocus {
-                    focus_note()
-                } else {
-                    Task::none()
-                }
-            }
-            Message::FocusBlock(index) => {
-                if self.body.focus_index(index) {
-                    focus_note()
-                } else {
-                    Task::none()
-                }
-            }
-            Message::EditBelow => {
-                let edited = self.body.focus_below();
-                if edited.changed {
-                    self.edited_at = Some(Instant::now());
-                }
-                if edited.refocus {
-                    focus_note()
-                } else {
-                    Task::none()
-                }
-            }
-            Message::ToggleTask(at) => {
-                if self.body.toggle_task(at) {
+                if self.body.edit(&action) {
                     self.edited_at = Some(Instant::now());
                 }
                 Task::none()
@@ -717,7 +685,7 @@ impl App {
                 .padding([2.0, 0.0])
                 .style(title_style),
         );
-        body = body.push(markdown::view(&self.body, ink));
+        body = body.push(markdown::view(&self.body));
         let mut actions = row![action_label("Save", Message::Save)].spacing(8);
         if self.selected.is_some() {
             actions = actions.push(ghost_label("Send to chat", Message::SendNoteToChat));
@@ -959,11 +927,11 @@ impl App {
                 self.disk_body.clone_from(&draft.body);
                 if let Some((title, body)) = stash {
                     self.title_text = title;
-                    self.body.load(&body, false);
+                    self.body.load(&body);
                     self.edited_at = Some(Instant::now());
                 } else {
                     self.title_text.clone_from(&draft.title);
-                    self.body.load(&draft.body, false);
+                    self.body.load(&draft.body);
                     self.edited_at = None;
                 }
                 self.conflicts = draft.conflicts;
@@ -996,12 +964,12 @@ impl App {
         self.sheet = Sheet::None;
         if let Some((title, body)) = stash {
             self.title_text = title;
-            self.body.load(&body, false);
+            self.body.load(&body);
             self.edited_at = Some(Instant::now());
             return;
         }
         self.title_text.clear();
-        self.body.load("", true);
+        self.body.load("");
         self.edited_at = None;
         self.message.clear();
     }
@@ -1138,7 +1106,7 @@ impl App {
         self.disk_title.clone_from(&draft.title);
         self.disk_body.clone_from(&draft.body);
         self.title_text.clone_from(&draft.title);
-        self.body.load(&draft.body, false);
+        self.body.load(&draft.body);
         self.edited_at = None;
     }
 
@@ -1726,11 +1694,11 @@ fn title_style(theme: &Theme, _status: text_input::Status) -> text_input::Style 
 fn editor_style(theme: &Theme, _status: text_editor::Status) -> text_editor::Style {
     let ink = ink_of(theme);
     text_editor::Style {
-        background: iced::Background::Color(ink.field),
+        background: iced::Background::Color(Color::TRANSPARENT),
         border: iced::Border {
-            radius: 10.0.into(),
-            width: 1.0,
-            color: ink.hairline,
+            radius: 0.0.into(),
+            width: 0.0,
+            color: Color::TRANSPARENT,
         },
         placeholder: ink.muted,
         value: ink.text,
@@ -1805,10 +1773,6 @@ struct ChatBubble {
     time: String,
     day: String,
     mine: bool,
-}
-
-fn focus_note() -> Task<Message> {
-    iced::widget::operation::focus(iced::widget::Id::new("note-body"))
 }
 
 fn chat_bubble(line: &ChatBubble, ink: Ink) -> Element<'_, Message> {
