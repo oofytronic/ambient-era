@@ -1,8 +1,8 @@
 # ambient-relay
 
-Stores and forwards opaque encrypted blobs between mailbox addresses. See `VISION.md` section 6.
+Stores and forwards opaque encrypted blobs between mailbox addresses. The connection track, and the order of work for a relay another computer can use, is [docs/network/README.md](../../docs/network/README.md). See `VISION.md` section 6.
 
-**Public API:** `Relay::handle_line`, `serve`, `serve_listener`, `serve_until`. Mailboxes are in memory. The binary binds `127.0.0.1` and speaks cleartext. Spec 04 says that is not a conforming public deployment. There is no TTL, quota, or rate limit. This process does not parse blobs. `serve_until` returns when a generation counter changes, so the notes window can stop a relay it started.
+**Public API:** `Relay::open`, `Relay::handle_line`, `serve`, `serve_tls`, `serve_listener`, `serve_tls_listener`, `serve_until`. `Relay::open` reads and writes `mailboxes` in a directory. `serve` is cleartext and refuses any address that is not this computer. `serve_tls` speaks TLS from a PEM certificate and key the operator supplies. `serve_listener` is memory only, for tests. The binary without `--tls` binds `127.0.0.1` and takes a port and a directory (`relay-data` when omitted). `--tls cert key --store dir --bind addr` is the public listener. The notes window stores its loopback mail in `~/.local/share/ambient/relay`. Spec 04 says cleartext is not a conforming public deployment. There is no TTL, quota, or rate limit. This process does not parse blobs. `serve_until` returns when a generation counter changes, so the notes window can stop a relay it started.
 
 ## Invariants
 

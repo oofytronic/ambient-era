@@ -51,8 +51,13 @@ iced = { version = "=0.14.0", features = ["image", "tokio", "advanced"] }
 serde_json = { version = "1.0.154" }
 # HPKE base mode for a private Space (RFC 9180, ADR-0005). X25519 and ChaCha20-Poly1305 only.
 hpke = { version = "=0.15.1", default-features = false, features = ["alloc", "x25519", "chacha"] }
-# The relay speaks the WebSocket in spec 04. No TLS feature: the binary binds loopback.
-tungstenite = { version = "=0.28.0", default-features = false, features = ["handshake"] }
+# The relay speaks the WebSocket in spec 04. rustls checks a public certificate
+# (webpki roots). Loopback stays cleartext. Not a cipher of our own.
+tungstenite = { version = "=0.28.0", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+# Same rustls the relay client uses. `ring` is the crypto provider. No AWS-LC.
+rustls = { version = "0.23.31", default-features = false, features = ["ring", "std"] }
+# PEM certificate and key the operator already has. Not an ACME client.
+rustls-pemfile = { version = "2.2.0", default-features = false, features = ["std"] }
 bip39 = { version = "3.0.0", default-features = false, features = ["alloc", "zeroize"] }
 # QR for contact invites in the notes window. Pure Rust, no network.
 qrcode = { version = "0.14.1", default-features = false, features = ["image"] }

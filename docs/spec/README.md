@@ -2,7 +2,7 @@
 
 Normative specifications for the wire formats and protocols. Code conforms to these documents, and [conformance vectors](../../conformance/README.md) check that it does.
 
-**Status:** 01 through 04 are version 1, written for v0.1. 05 is not written. `ambient-events` implements the envelope. `ambient-identity` implements derivation and the identity-log rules through revoke. `ambient-spaces` projects notes and a conversation, and opens the published HPKE blob. It does not re-seal that blob's exact ciphertext (see spec 03). `ambient-transport` and `ambient-relay` implement the mailbox operations. The recovery seal is not implemented.
+**Status:** 01 through 04 are version 1, written for v0.1. 05 is not written. `ambient-events` implements the envelope. `ambient-identity` implements derivation and the identity-log rules through revoke. `ambient-spaces` projects notes and a conversation, and opens the published HPKE blob. It does not re-seal that blob's exact ciphertext (see spec 03). `ambient-transport` and `ambient-relay` implement the mailbox operations. The relay another computer can reach is [the connection track](../network/README.md), which does not change these bytes until a spec change says so. The recovery seal is not implemented.
 
 ## Planned documents
 

@@ -171,6 +171,63 @@ fn restored_folder_writes_back() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn a_dead_relay_is_skipped_for_the_backup() -> Result<(), String> {
+    let live = spawn_relay()?;
+    let url = format!("ws://127.0.0.1:{live}");
+    let root = std::env::temp_dir().join(format!("ambient-failover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let owner = root.join("owner");
+    let other = root.join("other");
+    let owner_s = owner.to_string_lossy().to_string();
+    let other_s = other.to_string_lossy().to_string();
+    run_ok(&["init", &owner_s], "")?;
+    run_ok(&["add", &owner_s, "Market"], "buy milk")?;
+    let offer = run_ok(&["device", &other_s], "")?;
+    run_ok(&["pair", &owner_s, offer.trim()], "")?;
+    ambient_cli::set_net_setting(
+        &owner,
+        &ambient_cli::NetSetting {
+            mode: ambient_cli::NetMode::Pin,
+            pin: "ws://127.0.0.1:1".to_owned(),
+            backup: url.clone(),
+            choice: String::new(),
+        },
+    )
+    .map_err(|err| err.to_string())?;
+    ambient_cli::sync_notebook(&owner).map_err(|err| err.to_string())?;
+    run_ok(&["sync", &other_s, &url], "")?;
+    let listed = run_ok(&["list", &other_s], "")?;
+    if !listed.contains("Market") {
+        return Err(format!("backup relay did not carry the note: {listed}"));
+    }
+    if live == u16::MAX {
+        return Err("no spare port".to_owned());
+    }
+    ambient_cli::set_net_setting(
+        &owner,
+        &ambient_cli::NetSetting {
+            mode: ambient_cli::NetMode::Pin,
+            pin: format!("ws://127.0.0.1:{}", live.saturating_add(1)),
+            backup: String::new(),
+            choice: String::new(),
+        },
+    )
+    .map_err(|err| err.to_string())?;
+    if !ambient_cli::has_unsent(&owner).map_err(|err| err.to_string())? {
+        return Err("a new relay was treated as already sent".to_owned());
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn cleartext_off_this_computer_is_refused() {
+    assert!(ambient_cli::check_relay_url("ws://example.com/mailbox").is_err());
+    assert!(ambient_cli::check_relay_url("wss://example.com/mailbox").is_ok());
+    assert!(ambient_cli::check_relay_url("ws://127.0.0.1:8787").is_ok());
+}
+
 fn spawn_relay() -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|err| err.to_string())?;
     let port = listener.local_addr().map_err(|err| err.to_string())?.port();

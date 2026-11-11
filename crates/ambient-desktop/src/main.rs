@@ -7,7 +7,7 @@
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ambient_cli::{Draft, NoteSummary, Notebook};
@@ -15,13 +15,14 @@ use iced::clipboard;
 use iced::keyboard::Key;
 use iced::widget::image as iced_image;
 use iced::widget::{
-    button, column, container, row, scrollable, space, text, text_editor, text_input,
+    button, checkbox, column, container, row, scrollable, space, text, text_editor, text_input,
 };
-use iced::{Color, Element, Fill, Font, Task, Theme};
+use iced::{Color, Element, Fill, Font, Size, Task, Theme};
 use image::ImageEncoder;
 use qrcode::QrCode;
 
 mod clock;
+mod files;
 mod markdown;
 
 const SANS_BYTES: &[u8] = include_bytes!("../fonts/DMSans-Regular.ttf");
@@ -76,6 +77,7 @@ struct App {
     notebook: Option<Notebook>,
     open_error: String,
     notes: Vec<NoteSummary>,
+    tasks: Vec<TaskRow>,
     query: String,
     selected: Option<String>,
     title_text: String,
@@ -83,7 +85,7 @@ struct App {
     conflicts: Vec<(String, String, String)>,
     note_writer: String,
     message: String,
-    show_chat: bool,
+    screen: Screen,
     chats: Vec<ambient_cli::ConversationSummary>,
     chat_id: Option<String>,
     devices: Vec<ambient_cli::DeviceLine>,
@@ -96,6 +98,11 @@ struct App {
     sync_open: bool,
     sync_detail: String,
     pending: bool,
+    net_mode: ambient_cli::NetMode,
+    pin_draft: String,
+    backup_draft: String,
+    advanced: bool,
+    net_up: bool,
     unsaved: Vec<(Option<String>, String, String)>,
     disk_title: String,
     disk_body: String,
@@ -110,6 +117,9 @@ struct App {
     syncing: bool,
     edited_at: Option<Instant>,
     writes: u64,
+    size: Size,
+    detail: bool,
+    pending_files: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -121,10 +131,16 @@ enum Message {
     BodyEdited(text_editor::Action),
     Save,
     ShowNotes,
+    ShowTasks,
     ShowChat,
     AutoSync,
     ToggleSyncPop,
     ToggleRelay,
+    ToggleAdvanced,
+    PinDraft(String),
+    BackupDraft(String),
+    UseThisComputer,
+    SavePinned,
     OpenPaired,
     OpenPerson,
     #[allow(dead_code)]
@@ -149,9 +165,21 @@ enum Message {
     ShowRecovery,
     CloseSheet,
     SelectChat(String),
+    SetTask {
+        id: String,
+        line: usize,
+        done: bool,
+    },
     Revoke(String),
     ToggleTheme,
     Synced(SyncOutcome),
+    Resized(Size),
+    FileDropped(PathBuf),
+    PickFile,
+    FilePicked(Result<PathBuf, String>),
+    DropPending(usize),
+    OpenPath(PathBuf),
+    Format(FormatKind),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,6 +188,33 @@ enum Sheet {
     Invite,
     Devices,
     Recovery,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Screen {
+    Notes,
+    Tasks,
+    Chat,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FormatKind {
+    Bold,
+    Italic,
+    Strike,
+    Code,
+    Heading,
+    List,
+    Quote,
+    Link,
+}
+
+struct TaskRow {
+    note_id: String,
+    note_title: String,
+    line: usize,
+    done: bool,
+    text: String,
 }
 
 impl App {
@@ -172,6 +227,7 @@ impl App {
             notebook: None,
             open_error: String::new(),
             notes: Vec::new(),
+            tasks: Vec::new(),
             query: String::new(),
             selected: None,
             title_text: String::new(),
@@ -179,7 +235,7 @@ impl App {
             conflicts: Vec::new(),
             note_writer: String::new(),
             message: String::new(),
-            show_chat: false,
+            screen: Screen::Notes,
             chats: Vec::new(),
             chat_id: None,
             devices: Vec::new(),
@@ -192,6 +248,11 @@ impl App {
             sync_open: false,
             sync_detail: "Relay is starting.".to_owned(),
             pending: false,
+            net_mode: ambient_cli::NetMode::ThisComputer,
+            pin_draft: String::new(),
+            backup_draft: String::new(),
+            advanced: false,
+            net_up: false,
             unsaved: Vec::new(),
             disk_title: String::new(),
             disk_body: String::new(),
@@ -206,6 +267,9 @@ impl App {
             syncing: false,
             edited_at: None,
             writes: 0,
+            size: Size::new(1280.0, 820.0),
+            detail: false,
+            pending_files: Vec::new(),
         };
         match open_notebook(&app.dir) {
             Ok(book) => {
@@ -223,20 +287,40 @@ impl App {
                     app.say("Paired device. It does not hold the root. It syncs on its own while the relay is on.");
                 }
                 app.pending = ambient_cli::has_unsent(&app.dir).unwrap_or(false);
+                if let Ok(setting) = ambient_cli::net_setting(&app.dir) {
+                    app.net_mode = setting.mode;
+                    app.pin_draft = setting.pin;
+                    app.backup_draft = setting.backup;
+                }
             }
             Err(err) => app.open_error = err,
         }
-        if app.open_error != "this folder is locked" {
+        if app.open_error != "this folder is locked"
+            && app.net_mode == ambient_cli::NetMode::ThisComputer
+        {
             app.start_relay();
         }
         (app, Task::done(Message::AutoSync))
     }
 
     fn subscription(app: &App) -> iced::Subscription<Message> {
-        if !app.relay_ready {
-            return iced::Subscription::none();
+        let window = iced::event::listen_with(|event, _status, _id| match event {
+            iced::Event::Window(
+                iced::window::Event::Resized(size) | iced::window::Event::Opened { size, .. },
+            ) => Some(Message::Resized(size)),
+            iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                Some(Message::FileDropped(path))
+            }
+            _ => None,
+        });
+        let remote = app.net_mode != ambient_cli::NetMode::ThisComputer;
+        if app.notebook.is_none() || (!app.relay_ready && !remote) {
+            return window;
         }
-        iced::time::every(std::time::Duration::from_secs(3)).map(|_| Message::AutoSync)
+        iced::Subscription::batch([
+            window,
+            iced::time::every(std::time::Duration::from_secs(3)).map(|_| Message::AutoSync),
+        ])
     }
 
     fn title(&self) -> String {
@@ -280,15 +364,44 @@ impl App {
                 Task::none()
             }
             Message::ShowNotes => {
-                self.show_chat = false;
+                if self.compact()
+                    && self.screen == Screen::Notes
+                    && self.detail
+                    && self.sheet == Sheet::None
+                {
+                    self.detail = false;
+                } else {
+                    self.screen = Screen::Notes;
+                    self.sheet = Sheet::None;
+                    if self.compact() {
+                        self.detail = false;
+                    }
+                }
+                Task::none()
+            }
+            Message::ShowTasks => {
+                self.rebuild_tasks();
+                self.screen = Screen::Tasks;
                 self.sheet = Sheet::None;
+                self.detail = false;
                 Task::none()
             }
             Message::ShowChat => {
-                self.remember_unsaved();
-                self.show_chat = true;
-                self.sheet = Sheet::None;
-                self.reload_chat();
+                if self.compact()
+                    && self.screen == Screen::Chat
+                    && self.detail
+                    && self.sheet == Sheet::None
+                {
+                    self.detail = false;
+                } else {
+                    self.remember_unsaved();
+                    self.screen = Screen::Chat;
+                    self.sheet = Sheet::None;
+                    if self.compact() {
+                        self.detail = false;
+                    }
+                    self.reload_chat();
+                }
                 Task::none()
             }
             Message::AutoSync => self.begin_sync(),
@@ -307,6 +420,26 @@ impl App {
                     self.start_relay();
                     self.begin_sync()
                 }
+            }
+            Message::ToggleAdvanced => {
+                self.advanced = !self.advanced;
+                Task::none()
+            }
+            Message::PinDraft(text) => {
+                self.pin_draft = text;
+                Task::none()
+            }
+            Message::BackupDraft(text) => {
+                self.backup_draft = text;
+                Task::none()
+            }
+            Message::UseThisComputer => {
+                self.use_this_computer();
+                self.begin_sync()
+            }
+            Message::SavePinned => {
+                self.save_pinned();
+                self.begin_sync()
             }
             Message::OpenPaired => {
                 self.open_paired();
@@ -361,9 +494,14 @@ impl App {
             }
             Message::SelectChat(id) => {
                 self.chat_id = Some(id);
-                self.show_chat = true;
+                self.screen = Screen::Chat;
                 self.sheet = Sheet::None;
+                self.detail = true;
                 self.reload_chat();
+                Task::none()
+            }
+            Message::SetTask { id, line, done } => {
+                self.set_task(&id, line, done);
                 Task::none()
             }
             Message::Revoke(id) => {
@@ -407,6 +545,50 @@ impl App {
                 self.dark = !self.dark;
                 Task::none()
             }
+            Message::Resized(size) => {
+                let was_compact = self.compact();
+                self.size = size;
+                if !was_compact && self.compact() {
+                    self.detail = match self.screen {
+                        Screen::Notes => self.selected.is_some() || self.editor_dirty(),
+                        Screen::Chat => self.chat_id.is_some(),
+                        Screen::Tasks => false,
+                    };
+                }
+                Task::none()
+            }
+            Message::FileDropped(path) => {
+                self.stage_file(path);
+                Task::none()
+            }
+            Message::PickFile => self.pick_file(),
+            Message::FilePicked(result) => {
+                match result {
+                    Ok(path) => self.stage_file(path),
+                    Err(err) => {
+                        if err != "No file chosen." {
+                            self.message = err;
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::DropPending(index) => {
+                if index < self.pending_files.len() {
+                    self.pending_files.remove(index);
+                }
+                Task::none()
+            }
+            Message::OpenPath(path) => {
+                if let Err(err) = files::open_with_system(&path) {
+                    self.message = err;
+                }
+                Task::none()
+            }
+            Message::Format(kind) => {
+                self.insert_mark(kind);
+                Task::none()
+            }
             Message::Synced(outcome) => self.finish_sync(outcome),
         }
     }
@@ -415,13 +597,33 @@ impl App {
         if self.open_error == "this folder is locked" {
             return self.unlock_screen();
         }
-        column![
-            self.toolbar(),
-            hairline(),
-            row![self.sidebar(), hairline_v(), self.main()].height(Fill)
-        ]
-        .height(Fill)
-        .into()
+        if self.compact() {
+            return column![
+                self.compact_title(),
+                hairline(),
+                self.compact_body(),
+                hairline(),
+                self.bottom_bar(),
+            ]
+            .height(Fill)
+            .into();
+        }
+        let body = row![self.sidebar(), hairline_v(), self.main()].height(Fill);
+        if self.editing_note() {
+            column![
+                self.toolbar(),
+                hairline(),
+                Self::format_bar(),
+                hairline(),
+                body,
+            ]
+            .height(Fill)
+            .into()
+        } else {
+            column![self.toolbar(), hairline(), body]
+                .height(Fill)
+                .into()
+        }
     }
 
     fn toolbar(&self) -> Element<'_, Message> {
@@ -432,21 +634,34 @@ impl App {
             None => "Not open",
         };
         let mut bar = row![
-            text("Aerodash").font(serif()).size(24),
-            text(role).size(12).color(ink.muted),
-            text(self.message.as_str())
-                .size(13)
-                .color(ink.muted)
-                .width(Fill),
-            ghost_label("Devices", Message::ShowDevices),
+            text("Aerodash")
+                .font(serif())
+                .size(if self.size.width < 980.0 { 20 } else { 24 })
         ]
         .spacing(12)
         .align_y(iced::Alignment::Center)
         .padding([10.0, 16.0]);
+        if self.size.width >= 1100.0 {
+            bar = bar.push(text(role).size(12).color(ink.muted));
+        }
+        if self.size.width >= 900.0 {
+            bar = bar.push(
+                text(self.message.as_str())
+                    .size(13)
+                    .color(ink.muted)
+                    .width(Fill),
+            );
+        } else {
+            bar = bar.push(space().width(Fill));
+        }
+        bar = bar.push(ghost_label("Devices", Message::ShowDevices));
         if self.notebook.as_ref().is_some_and(Notebook::holds_root) {
             bar = bar.push(ghost_label("Recovery", Message::ShowRecovery));
         }
         bar = bar.push(icon_button(mode_handle(self.dark), Message::ToggleTheme));
+        if self.notebook.is_some() && !self.editor_dirty() {
+            bar = bar.push(text("✓").size(18).color(Color::from_rgb8(46, 140, 96)));
+        }
         bar = bar.push(anchored(
             icon_button(globe_handle(self.globe_color()), Message::ToggleSyncPop),
             self.sync_open.then(|| self.sync_card()),
@@ -455,7 +670,12 @@ impl App {
     }
 
     fn globe_color(&self) -> [u8; 3] {
-        if !self.relay_ready {
+        let on = if self.net_mode == ambient_cli::NetMode::ThisComputer {
+            self.relay_ready
+        } else {
+            self.net_up
+        };
+        if !on {
             [140, 133, 122]
         } else if self.pending {
             [184, 78, 62]
@@ -466,12 +686,21 @@ impl App {
 
     fn sync_card(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        let relay = if !self.relay_ready {
-            "Relay is off."
-        } else if self.relay_ours {
-            "Relay is on. Cleartext on this computer only. Not a public server."
+        let on = if self.net_mode == ambient_cli::NetMode::ThisComputer {
+            self.relay_ready
         } else {
-            "Relay is on, started by another window. Cleartext on this computer only."
+            self.net_up
+        };
+        let relay = match self.net_mode {
+            ambient_cli::NetMode::ThisComputer if self.relay_ready && self.relay_ours => {
+                "Relay is on. Cleartext on this computer only. Not a public server."
+            }
+            ambient_cli::NetMode::ThisComputer if self.relay_ready => {
+                "Relay is on, started by another window. Cleartext on this computer only."
+            }
+            ambient_cli::NetMode::ThisComputer => "Relay is off.",
+            ambient_cli::NetMode::List => "Using the introduction list.",
+            ambient_cli::NetMode::Pin => "Using a pinned relay.",
         };
         let switch = if self.relay_ready && self.relay_ours {
             "Turn relay off"
@@ -480,49 +709,80 @@ impl App {
         } else {
             "Turn relay on"
         };
-        let state = if !self.relay_ready {
-            "Not syncing."
-        } else if self.pending {
+        let state = if self.editor_dirty() {
+            "Still writing."
+        } else if on && self.pending {
             "Changes have not synced."
-        } else {
+        } else if on {
             "Synced."
-        };
-        let cadence = if self.relay_ready {
-            "Syncs on its own every few seconds."
         } else {
-            "Turn the relay on to sync."
+            "Saved on this computer."
         };
-        let line = iced::Length::Fixed(276.0);
+        let cadence = if self.net_mode == ambient_cli::NetMode::ThisComputer && !self.relay_ready {
+            "Turn the relay on to sync."
+        } else if on {
+            "Syncs on its own every few seconds."
+        } else if self.sync_detail == "No relay answered." {
+            "No relay answered."
+        } else {
+            "Syncs on its own every few seconds."
+        };
+        let line = iced::Length::Fixed(if self.advanced { 340.0 } else { 276.0 });
         let switch_button = if self.relay_ready && !self.relay_ours {
             ghost_label(switch, Message::ToggleRelay)
         } else {
             action_label(switch, Message::ToggleRelay)
         };
-        container(
-            column![
-                text(state).font(serif()).size(20).width(line),
-                text(cadence).size(13).color(ink.muted).width(line),
-                text(relay).size(13).color(ink.muted).width(line),
-                text(self.sync_detail.as_str())
-                    .size(13)
-                    .color(ink.text)
-                    .width(line),
-                switch_button,
-            ]
-            .spacing(8),
-        )
-        .padding(14)
-        .width(300)
-        .style(card_style)
-        .into()
+        let mut column = column![
+            text(state).font(serif()).size(20).width(line),
+            text(cadence).size(13).color(ink.muted).width(line),
+            text(relay).size(13).color(ink.muted).width(line),
+            text(self.sync_detail.as_str())
+                .size(13)
+                .color(ink.text)
+                .width(line),
+            switch_button,
+            ghost_label(
+                if self.advanced {
+                    "Hide advanced"
+                } else {
+                    "Advanced"
+                },
+                Message::ToggleAdvanced,
+            ),
+        ]
+        .spacing(8);
+        if self.advanced {
+            column = column
+                .push(text_input("Pinned relay", &self.pin_draft).on_input(Message::PinDraft));
+            column = column.push(
+                text_input("Backup relay", &self.backup_draft).on_input(Message::BackupDraft),
+            );
+            column = column.push(action_label("Save pinned relay", Message::SavePinned));
+            column = column.push(ghost_label("This computer", Message::UseThisComputer));
+            if ambient_cli::INTRODUCTION.is_empty() {
+                column = column.push(
+                    text("No public relays are listed yet.")
+                        .size(13)
+                        .color(ink.muted)
+                        .width(line),
+                );
+            }
+        }
+        container(column)
+            .padding(14)
+            .width(if self.advanced { 380 } else { 300 })
+            .style(card_style)
+            .into()
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
         let ink = self.ink();
         let modes = container(
             row![
-                segment("Notes", !self.show_chat, Message::ShowNotes),
-                segment("Chat", self.show_chat, Message::ShowChat),
+                segment("Notes", self.screen == Screen::Notes, Message::ShowNotes),
+                segment("Tasks", self.screen == Screen::Tasks, Message::ShowTasks),
+                segment("Chat", self.screen == Screen::Chat, Message::ShowChat),
             ]
             .spacing(4),
         )
@@ -542,7 +802,7 @@ impl App {
             .padding(16)
             .width(Fill)
             .height(Fill);
-        if self.show_chat {
+        if self.screen == Screen::Chat {
             side = side.push(action_fill("Invite", Message::ShowInvite));
             if self.chats.is_empty() {
                 side = side.push(text("No conversations yet.").size(13).color(ink.muted));
@@ -551,6 +811,14 @@ impl App {
                 let selected = self.chat_id.as_deref() == Some(chat.id.as_str());
                 side = side.push(chat_row(&chat.label, &chat.id, selected));
             }
+        } else if self.screen == Screen::Tasks {
+            let open = self.tasks.iter().filter(|task| !task.done).count();
+            side = side.push(text(format!("{open} open")).size(13).color(ink.muted));
+            side = side.push(
+                text("Checking a box writes it back into the note.")
+                    .size(13)
+                    .color(ink.muted),
+            );
         } else {
             side = side.push(
                 text_input("Search notes", &self.query)
@@ -575,7 +843,7 @@ impl App {
             side = side.push(scrollable(notes).height(Fill));
         }
         container(side)
-            .width(280)
+            .width(self.side_width())
             .height(Fill)
             .style(surface_pane)
             .into()
@@ -608,16 +876,183 @@ impl App {
             .into()
     }
 
+    fn tasks_pane(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let mut body = column![].spacing(18);
+        let open: Vec<&TaskRow> = self.tasks.iter().filter(|task| !task.done).collect();
+        let done: Vec<&TaskRow> = self.tasks.iter().filter(|task| task.done).collect();
+        if open.is_empty() && done.is_empty() {
+            body = body.push(text("Nothing to do yet.").font(serif()).size(32));
+            body = body.push(
+                text("In a note, write a line like - [ ] call the clinic. It shows up here.")
+                    .size(14)
+                    .color(ink.muted),
+            );
+        } else if open.is_empty() {
+            body = body.push(text("Nothing open.").font(serif()).size(32));
+        } else {
+            body = body.push(text("Open").font(serif()).size(32));
+            for task in open {
+                body = body.push(self.task_row(task));
+            }
+        }
+        if !done.is_empty() {
+            body = body.push(text("Done").font(serif()).size(22));
+            for task in done {
+                body = body.push(self.task_row(task));
+            }
+        }
+        scrollable(body).height(Fill).into()
+    }
+
+    fn task_row(&self, task: &TaskRow) -> Element<'_, Message> {
+        let ink = self.ink();
+        let id = task.note_id.clone();
+        let line = task.line;
+        let open_id = task.note_id.clone();
+        let title = if task.note_title.is_empty() {
+            "Untitled".to_owned()
+        } else {
+            task.note_title.clone()
+        };
+        let label = if task.text.is_empty() {
+            "Empty task".to_owned()
+        } else {
+            task.text.clone()
+        };
+        let words = if task.done { ink.muted } else { ink.text };
+        row![
+            checkbox(task.done).on_toggle(move |done| Message::SetTask {
+                id: id.clone(),
+                line,
+                done,
+            }),
+            button(
+                column![
+                    text(label).size(16).color(words),
+                    text(title).size(12).color(ink.muted),
+                ]
+                .spacing(2)
+                .width(Fill),
+            )
+            .width(Fill)
+            .padding([2, 0])
+            .on_press(Message::Select(open_id))
+            .style(quiet_style),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center)
+        .into()
+    }
+
+    fn rebuild_tasks(&mut self) {
+        let listed = self
+            .notebook
+            .as_ref()
+            .and_then(|book| book.list().ok())
+            .unwrap_or_default();
+        let mut rows = Vec::new();
+        for note in listed {
+            if note.conflict {
+                continue;
+            }
+            let Some((body, conflict, _)) = self.task_source(&note.id) else {
+                continue;
+            };
+            if conflict {
+                continue;
+            }
+            for task in markdown::task_lines(&body) {
+                rows.push(TaskRow {
+                    note_id: note.id.clone(),
+                    note_title: note.title.clone(),
+                    line: task.line,
+                    done: task.done,
+                    text: task.text,
+                });
+            }
+        }
+        rows.sort_by(|left, right| {
+            left.done
+                .cmp(&right.done)
+                .then_with(|| left.note_title.cmp(&right.note_title))
+                .then_with(|| left.line.cmp(&right.line))
+        });
+        self.tasks = rows;
+    }
+
+    fn task_source(&self, id: &str) -> Option<(String, bool, String)> {
+        if self.selected.as_deref() == Some(id) {
+            return Some((
+                self.body.text(),
+                !self.conflicts.is_empty(),
+                self.title_text.clone(),
+            ));
+        }
+        if let Some((_, title, body)) = self
+            .unsaved
+            .iter()
+            .find(|(key, _, _)| key.as_deref() == Some(id))
+        {
+            return Some((body.clone(), false, title.clone()));
+        }
+        let shown = self.notebook.as_ref()?.show(id).ok()?;
+        let head = shown.heads.first()?;
+        Some((head.body.clone(), shown.conflict, head.title.clone()))
+    }
+
+    fn set_task(&mut self, id: &str, line: usize, done: bool) {
+        let Some((body, conflict, title)) = self.task_source(id) else {
+            self.say("That note is not here.");
+            return;
+        };
+        if conflict {
+            self.show_note(id);
+            self.say("Two versions. Write the one you want to keep, then save.");
+            return;
+        }
+        let Some(next) = markdown::set_task_line(&body, line, done) else {
+            return;
+        };
+        if self.selected.as_deref() == Some(id) {
+            self.body.load(&next);
+            self.edited_at = Some(Instant::now());
+            self.save_keeping_editor();
+            return;
+        }
+        if let Some(slot) = self
+            .unsaved
+            .iter_mut()
+            .find(|(key, _, _)| key.as_deref() == Some(id))
+        {
+            slot.2.clone_from(&next);
+        }
+        let saved = match self.notebook.as_ref() {
+            Some(book) => book.edit(id, &title, &next),
+            None => return,
+        };
+        match saved {
+            Ok(()) => {
+                self.writes = self.writes.saturating_add(1);
+                self.pending = true;
+                self.message.clear();
+                self.reload();
+            }
+            Err(err) => self.message = err.to_string(),
+        }
+    }
+
     fn main(&self) -> Element<'_, Message> {
         let body = match self.sheet {
             Sheet::Invite => self.invite_sheet(),
             Sheet::Devices => self.devices_sheet(),
             Sheet::Recovery => self.recovery_sheet(),
-            Sheet::None if self.show_chat => self.chat_pane(),
+            Sheet::None if self.screen == Screen::Chat => self.chat_pane(),
+            Sheet::None if self.screen == Screen::Tasks => self.tasks_pane(),
             Sheet::None => self.notes_pane(),
         };
         container(body)
-            .padding([22.0, 32.0])
+            .padding([self.gutter(), self.gutter_x()])
             .width(Fill)
             .height(Fill)
             .into()
@@ -681,11 +1116,12 @@ impl App {
             text_input("Title", &self.title_text)
                 .on_input(Message::TitleChanged)
                 .font(serif())
-                .size(32)
+                .size(if self.compact() { 26.0 } else { 32.0 })
                 .padding([2.0, 0.0])
                 .style(title_style),
         );
         body = body.push(markdown::view(&self.body));
+        body = body.push(self.note_media());
         let mut actions = row![action_label("Save", Message::Save)].spacing(8);
         if self.selected.is_some() {
             actions = actions.push(ghost_label("Send to chat", Message::SendNoteToChat));
@@ -697,10 +1133,11 @@ impl App {
     fn chat_pane(&self) -> Element<'_, Message> {
         let ink = self.ink();
         let mut lines = column![].spacing(8);
-        if self.chat.is_empty() {
+        if self.chat.is_empty() && self.pending_files.is_empty() {
             lines = lines.push(text("No messages yet.").color(ink.muted));
             lines = lines.push(action_label("Invite someone", Message::ShowInvite));
         }
+        let width = self.bubble_width();
         let mut day = String::new();
         for line in &self.chat {
             if !line.day.is_empty() && line.day != day {
@@ -712,11 +1149,37 @@ impl App {
                         .padding([6, 0]),
                 );
             }
-            lines = lines.push(chat_bubble(line, ink));
+            lines = lines.push(self.chat_bubble(line, width));
         }
-        column![
-            scrollable(lines).height(Fill).anchor_bottom(),
+        let mut composer = column![].spacing(8);
+        if !self.pending_files.is_empty() {
+            let mut chips = column![].spacing(4);
+            for (index, path) in self.pending_files.iter().enumerate() {
+                let name = path
+                    .file_name()
+                    .and_then(|text| text.to_str())
+                    .unwrap_or("file");
+                chips = chips.push(
+                    row![
+                        text(name).size(13).width(Fill),
+                        ghost_label_owned("Remove".to_owned(), Message::DropPending(index)),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
+            composer = composer.push(chips);
+            composer = composer.push(
+                text(
+                    "The file stays on this computer. The message can sync. The file cannot, yet.",
+                )
+                .size(12)
+                .color(ink.muted),
+            );
+        }
+        composer = composer.push(
             row![
+                ghost_label("Add", Message::PickFile),
                 text_input("Message", &self.draft_chat)
                     .on_input(Message::DraftChat)
                     .on_submit(Message::SendChat)
@@ -727,10 +1190,11 @@ impl App {
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
-        ]
-        .spacing(12)
-        .height(Fill)
-        .into()
+        );
+        column![scrollable(lines).height(Fill).anchor_bottom(), composer]
+            .spacing(12)
+            .height(Fill)
+            .into()
     }
 
     fn invite_sheet(&self) -> Element<'_, Message> {
@@ -854,18 +1318,22 @@ impl App {
     }
 
     fn reload(&mut self) {
-        let Some(book) = self.notebook.as_ref() else {
-            return;
-        };
-        let found = if self.query.is_empty() {
-            book.list()
-        } else {
-            book.search(&self.query)
+        let found = {
+            let Some(book) = self.notebook.as_ref() else {
+                self.tasks.clear();
+                return;
+            };
+            if self.query.is_empty() {
+                book.list()
+            } else {
+                book.search(&self.query)
+            }
         };
         match found {
             Ok(notes) => self.notes = notes,
             Err(err) => self.message = err.to_string(),
         }
+        self.rebuild_tasks();
     }
 
     fn reload_chat(&mut self) {
@@ -904,7 +1372,7 @@ impl App {
 
     fn show_note(&mut self, id: &str) {
         if self.selected.as_deref() == Some(id) && self.editor_dirty() {
-            self.show_chat = false;
+            self.screen = Screen::Notes;
             self.sheet = Sheet::None;
             return;
         }
@@ -940,8 +1408,9 @@ impl App {
                     .first()
                     .map(|head| head.writer.clone())
                     .unwrap_or_default();
-                self.show_chat = false;
+                self.screen = Screen::Notes;
                 self.sheet = Sheet::None;
+                self.detail = true;
                 self.message.clear();
             }
             Err(err) => self.message = err.to_string(),
@@ -960,8 +1429,9 @@ impl App {
         self.disk_body.clear();
         self.conflicts.clear();
         self.note_writer.clear();
-        self.show_chat = false;
+        self.screen = Screen::Notes;
         self.sheet = Sheet::None;
+        self.detail = true;
         if let Some((title, body)) = stash {
             self.title_text = title;
             self.body.load(&body);
@@ -1036,7 +1506,10 @@ impl App {
     }
 
     fn begin_sync(&mut self) -> Task<Message> {
-        if self.syncing || !self.relay_ready {
+        if self.syncing || self.notebook.is_none() {
+            return Task::none();
+        }
+        if self.net_mode == ambient_cli::NetMode::ThisComputer && !self.relay_ready {
             return Task::none();
         }
         if self.editor_dirty()
@@ -1053,12 +1526,22 @@ impl App {
     fn finish_sync(&mut self, outcome: SyncOutcome) -> Task<Message> {
         self.syncing = false;
         if outcome.failed {
-            if outcome.detail.contains("unreachable") && !self.relay_ours {
-                self.relay_ready = false;
+            if outcome.transport {
+                self.net_up = false;
+                if self.net_mode == ambient_cli::NetMode::ThisComputer
+                    && outcome.detail.contains("unreachable")
+                    && !self.relay_ours
+                {
+                    self.relay_ready = false;
+                }
+                "No relay answered.".clone_into(&mut self.sync_detail);
+            } else {
+                self.sync_detail = outcome.detail;
             }
-            self.sync_detail = outcome.detail;
+            self.pending = true;
             return Task::none();
         }
+        self.net_up = true;
         self.sync_detail = outcome.detail;
         if content_arrived(&self.sync_detail) {
             match Notebook::open(&self.dir) {
@@ -1110,6 +1593,357 @@ impl App {
         self.edited_at = None;
     }
 
+    fn compact(&self) -> bool {
+        self.size.width < 720.0
+    }
+
+    fn side_width(&self) -> f32 {
+        if self.size.width < 1040.0 {
+            210.0
+        } else {
+            280.0
+        }
+    }
+
+    fn gutter(&self) -> f32 {
+        if self.compact() { 12.0 } else { 22.0 }
+    }
+
+    fn gutter_x(&self) -> f32 {
+        if self.compact() {
+            12.0
+        } else if self.size.width < 1000.0 {
+            20.0
+        } else {
+            32.0
+        }
+    }
+
+    fn editing_note(&self) -> bool {
+        self.sheet == Sheet::None
+            && self.screen == Screen::Notes
+            && (!self.compact() || self.detail)
+    }
+
+    fn bubble_width(&self) -> f32 {
+        let taken = if self.compact() {
+            56.0
+        } else {
+            self.side_width() + 96.0
+        };
+        (self.size.width - taken).clamp(160.0, 460.0)
+    }
+
+    fn format_bar() -> Element<'static, Message> {
+        scrollable(
+            row![
+                format_button("B", FormatKind::Bold),
+                format_button("I", FormatKind::Italic),
+                format_button("S", FormatKind::Strike),
+                format_button("</>", FormatKind::Code),
+                format_button("H", FormatKind::Heading),
+                format_button("List", FormatKind::List),
+                format_button("Quote", FormatKind::Quote),
+                format_button("Link", FormatKind::Link),
+            ]
+            .spacing(4)
+            .padding([6, 10]),
+        )
+        .direction(scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::default(),
+        ))
+        .width(Fill)
+        .into()
+    }
+
+    fn bottom_bar(&self) -> Element<'_, Message> {
+        let mut bar = column![].width(Fill);
+        if self.editing_note() {
+            bar = bar.push(Self::format_bar()).push(hairline());
+        }
+        let mut nav = row![
+            segment(
+                "Notes",
+                self.screen == Screen::Notes && self.sheet == Sheet::None,
+                Message::ShowNotes,
+            ),
+            segment(
+                "Tasks",
+                self.screen == Screen::Tasks && self.sheet == Sheet::None,
+                Message::ShowTasks,
+            ),
+            segment(
+                "Chat",
+                self.screen == Screen::Chat && self.sheet == Sheet::None,
+                Message::ShowChat,
+            ),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center)
+        .width(Fill);
+        if self.notebook.is_some() && !self.editor_dirty() {
+            nav = nav.push(text("✓").size(18).color(Color::from_rgb8(46, 140, 96)));
+        }
+        nav = nav.push(icon_button(mode_handle(self.dark), Message::ToggleTheme));
+        nav = nav.push(anchored(
+            icon_button(globe_handle(self.globe_color()), Message::ToggleSyncPop),
+            self.sync_open.then(|| self.sync_card()),
+        ));
+        bar = bar.push(container(nav).padding([6, 8]).width(Fill));
+        bar.into()
+    }
+
+    fn compact_title(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        row![
+            text("Aerodash").font(serif()).size(20),
+            text(self.message.as_str())
+                .size(12)
+                .color(ink.muted)
+                .width(Fill),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .padding([8, 12])
+        .into()
+    }
+
+    fn compact_body(&self) -> Element<'_, Message> {
+        let body = match self.sheet {
+            Sheet::Invite => self.invite_sheet(),
+            Sheet::Devices => self.devices_sheet(),
+            Sheet::Recovery => self.recovery_sheet(),
+            Sheet::None if self.screen == Screen::Tasks => self.tasks_pane(),
+            Sheet::None if self.screen == Screen::Chat && !self.detail => self.chat_browser(),
+            Sheet::None if self.screen == Screen::Chat => self.chat_pane(),
+            Sheet::None if !self.detail => self.note_browser(),
+            Sheet::None => self.notes_pane(),
+        };
+        container(body)
+            .padding([self.gutter(), self.gutter_x()])
+            .width(Fill)
+            .height(Fill)
+            .into()
+    }
+
+    fn note_browser(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let mut side = column![
+            text_input("Search notes", &self.query)
+                .on_input(Message::QueryChanged)
+                .padding(10)
+                .size(14)
+                .style(field_style),
+            action_fill("New note", Message::NewNote),
+        ]
+        .spacing(8)
+        .width(Fill);
+        if self.notes.is_empty() {
+            let empty = if self.query.is_empty() {
+                "No notes yet."
+            } else {
+                "No notes match."
+            };
+            side = side.push(text(empty).size(13).color(ink.muted));
+        }
+        let mut notes = column![].spacing(2);
+        for note in &self.notes {
+            notes = notes.push(self.note_row(note));
+        }
+        side.push(scrollable(notes).height(Fill)).into()
+    }
+
+    fn chat_browser(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let mut side = column![action_fill("Invite", Message::ShowInvite)]
+            .spacing(8)
+            .width(Fill);
+        if self.chats.is_empty() {
+            side = side.push(text("No conversations yet.").size(13).color(ink.muted));
+        }
+        for chat in &self.chats {
+            let selected = self.chat_id.as_deref() == Some(chat.id.as_str());
+            side = side.push(chat_row(&chat.label, &chat.id, selected));
+        }
+        side.into()
+    }
+
+    fn note_media(&self) -> Element<'_, Message> {
+        let found = files::note_media(&self.dir, &self.body.text());
+        if found.is_empty() {
+            return space().height(0).into();
+        }
+        let mut row = row![].spacing(8);
+        for item in found {
+            match item {
+                files::NoteMedia::Picture(path) => {
+                    row = row.push(
+                        iced_image::Image::new(iced_image::Handle::from_path(path))
+                            .content_fit(iced::ContentFit::Contain)
+                            .height(140)
+                            .width(180),
+                    );
+                }
+                files::NoteMedia::Video(path, name) => {
+                    row = row.push(ghost_label_owned(
+                        format!("Video · {name}"),
+                        Message::OpenPath(path),
+                    ));
+                }
+                files::NoteMedia::File(path, name) => {
+                    row = row.push(ghost_label_owned(name, Message::OpenPath(path)));
+                }
+            }
+        }
+        scrollable(row)
+            .direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::default(),
+            ))
+            .height(156)
+            .into()
+    }
+
+    fn chat_bubble(&self, line: &ChatBubble, width: f32) -> Element<'static, Message> {
+        let ink = self.ink();
+        let words = line.text.clone();
+        let when = line.time.clone();
+        let mine = line.mine;
+        let conv = self.chat_id.clone().unwrap_or_default();
+        let parts = files::pieces(&self.dir, &conv, &words);
+        let mut body = column![].spacing(6);
+        if parts.is_empty() {
+            body = body.push(text(words).size(15));
+        }
+        for part in parts {
+            match part {
+                files::Piece::Text(words) => {
+                    body = body.push(text(words).size(15));
+                }
+                files::Piece::Picture { name, path } => {
+                    if let Some(path) = path {
+                        body = body.push(
+                            iced_image::Image::new(iced_image::Handle::from_path(path))
+                                .content_fit(iced::ContentFit::Contain)
+                                .width(width)
+                                .height(180),
+                        );
+                    } else {
+                        body = body.push(text(format!("{name} · not on this computer")).size(13));
+                    }
+                }
+                files::Piece::Video { name, path } => {
+                    body = body.push(file_chip(&name, path, true));
+                }
+                files::Piece::File { name, path } => {
+                    body = body.push(file_chip(&name, path, false));
+                }
+            }
+        }
+        if !when.is_empty() {
+            let time_color = if mine {
+                Color {
+                    a: 0.72,
+                    ..ink.on_accent
+                }
+            } else {
+                ink.muted
+            };
+            body = body.push(text(when).size(11).color(time_color));
+        }
+        let bubble = container(body)
+            .padding([8, 12])
+            .max_width(width)
+            .style(if mine { mine_style } else { theirs_style });
+        if mine {
+            row![space().width(Fill), bubble].width(Fill).into()
+        } else {
+            row![bubble, space().width(Fill)].width(Fill).into()
+        }
+    }
+
+    fn stage_file(&mut self, path: PathBuf) {
+        if !path.is_file() {
+            self.say("Choose a file, not a folder.");
+            return;
+        }
+        if self.screen == Screen::Chat {
+            if self.chat_id.is_none() {
+                self.say("Invite someone before adding a file.");
+                return;
+            }
+            self.pending_files.push(path);
+            self.detail = true;
+            self.sheet = Sheet::None;
+            return;
+        }
+        match files::store_for_note(&self.dir, &path) {
+            Ok(markdown) => {
+                let insert = if self.body.text().is_empty() || self.body.text().ends_with('\n') {
+                    markdown
+                } else {
+                    format!("\n{markdown}")
+                };
+                self.body
+                    .perform(&text_editor::Action::Edit(text_editor::Edit::Paste(
+                        Arc::new(insert),
+                    )));
+                self.edited_at = Some(Instant::now());
+                self.screen = Screen::Notes;
+                self.sheet = Sheet::None;
+                self.detail = true;
+                self.say("Added to the note on this computer.");
+            }
+            Err(err) => self.message = err,
+        }
+    }
+
+    fn pick_file(&mut self) -> Task<Message> {
+        if self.screen == Screen::Chat && self.chat_id.is_none() {
+            self.say("Invite someone before adding a file.");
+            return Task::none();
+        }
+        Task::perform(
+            async {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(files::choose());
+                });
+                rx.recv()
+                    .unwrap_or_else(|_| Err("No file chosen.".to_owned()))
+            },
+            Message::FilePicked,
+        )
+    }
+
+    fn insert_mark(&mut self, kind: FormatKind) {
+        let (left, right, back) = match kind {
+            FormatKind::Bold => ("**", "**", 2_usize),
+            FormatKind::Italic => ("*", "*", 1),
+            FormatKind::Strike => ("~~", "~~", 2),
+            FormatKind::Code => ("`", "`", 1),
+            FormatKind::Heading => ("# ", "", 0),
+            FormatKind::List => ("- ", "", 0),
+            FormatKind::Quote => ("> ", "", 0),
+            FormatKind::Link => ("[", "](https://)", 10),
+        };
+        let selected = self.body.selection().unwrap_or_default();
+        let insert = if selected.is_empty() {
+            format!("{left}{right}")
+        } else {
+            format!("{left}{selected}{right}")
+        };
+        let back = if selected.is_empty() { back } else { 0 };
+        self.body
+            .perform(&text_editor::Action::Edit(text_editor::Edit::Paste(
+                Arc::new(insert),
+            )));
+        for _ in 0..back {
+            self.body
+                .perform(&text_editor::Action::Move(text_editor::Motion::Left));
+        }
+        self.edited_at = Some(Instant::now());
+    }
+
     fn say(&mut self, text: &str) {
         text.clone_into(&mut self.message);
     }
@@ -1140,7 +1974,47 @@ impl App {
             Ok(()) => {
                 self.relay_ready = false;
                 self.relay_ours = false;
+                self.net_up = false;
                 "Relay stopped.".clone_into(&mut self.sync_detail);
+            }
+            Err(err) => self.sync_detail = err.to_string(),
+        }
+    }
+
+    fn use_this_computer(&mut self) {
+        let choice = ambient_cli::net_setting(&self.dir)
+            .map(|setting| setting.choice)
+            .unwrap_or_default();
+        let setting = ambient_cli::NetSetting {
+            mode: ambient_cli::NetMode::ThisComputer,
+            pin: self.pin_draft.clone(),
+            backup: self.backup_draft.clone(),
+            choice,
+        };
+        if let Err(err) = ambient_cli::set_net_setting(&self.dir, &setting) {
+            self.sync_detail = err.to_string();
+            return;
+        }
+        self.net_mode = ambient_cli::NetMode::ThisComputer;
+        self.net_up = false;
+        self.start_relay();
+    }
+
+    fn save_pinned(&mut self) {
+        let choice = ambient_cli::net_setting(&self.dir)
+            .map(|setting| setting.choice)
+            .unwrap_or_default();
+        let setting = ambient_cli::NetSetting {
+            mode: ambient_cli::NetMode::Pin,
+            pin: self.pin_draft.trim().to_owned(),
+            backup: self.backup_draft.trim().to_owned(),
+            choice,
+        };
+        match ambient_cli::set_net_setting(&self.dir, &setting) {
+            Ok(()) => {
+                self.net_mode = ambient_cli::NetMode::Pin;
+                self.net_up = false;
+                "Pinned relay saved.".clone_into(&mut self.sync_detail);
             }
             Err(err) => self.sync_detail = err.to_string(),
         }
@@ -1231,7 +2105,7 @@ impl App {
         match ambient_cli::start_conversation(&self.dir, card) {
             Ok(id) => {
                 self.chat_id = Some(id);
-                self.show_chat = true;
+                self.screen = Screen::Chat;
                 self.sheet = Sheet::None;
                 self.their_card.clear();
                 self.say("Conversation saved here. Both windows sync while the relay is on.");
@@ -1243,24 +2117,45 @@ impl App {
     }
 
     fn send_chat(&mut self) {
-        let text = self.draft_chat.trim().to_owned();
-        if text.is_empty() {
-            self.say("Write a message first.");
-            return;
-        }
+        let mut text = self.draft_chat.trim().to_owned();
         let Some(id) = self.chat_id.clone() else {
             self.say("Invite someone before sending.");
             return;
         };
+        let files = std::mem::take(&mut self.pending_files);
+        for path in &files {
+            match files::store(&self.dir, &id, path) {
+                Ok(cite) => {
+                    if !text.is_empty() && !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str(&cite);
+                }
+                Err(err) => {
+                    self.pending_files = files;
+                    self.message = err;
+                    return;
+                }
+            }
+        }
+        if text.is_empty() {
+            self.pending_files = files;
+            self.say("Write a message, or add a file.");
+            return;
+        }
         match ambient_cli::send_chat_in(&self.dir, &id, &text) {
             Ok(()) => {
                 self.draft_chat.clear();
-                self.show_chat = true;
-                self.say("Saved here. It syncs while the relay is on.");
+                self.screen = Screen::Chat;
+                self.detail = true;
+                self.say("Saved here. The words sync while a relay is on. A file stays on this computer.");
                 self.reload_chat();
                 self.mark_pending();
             }
-            Err(err) => self.message = err.to_string(),
+            Err(err) => {
+                self.draft_chat = text;
+                self.message = err.to_string();
+            }
         }
     }
 
@@ -1370,7 +2265,7 @@ impl App {
             Some(chat) => match ambient_cli::send_chat_in(&self.dir, &chat, &text) {
                 Ok(()) => {
                     self.remember_unsaved();
-                    self.show_chat = true;
+                    self.screen = Screen::Chat;
                     self.say("Note copied into the chat. It syncs while the relay is on.");
                     self.reload_chat();
                     self.mark_pending();
@@ -1505,6 +2400,7 @@ struct SyncOutcome {
     detail: String,
     pending: bool,
     failed: bool,
+    transport: bool,
     writes: u64,
 }
 
@@ -1515,19 +2411,36 @@ fn io_lock() -> std::sync::MutexGuard<'static, ()> {
 
 fn run_sync(dir: &Path) -> SyncOutcome {
     let _guard = io_lock();
-    match ambient_cli::sync_folder(dir, ambient_cli::LOOPBACK_URL) {
+    match ambient_cli::sync_notebook(dir) {
         Ok(detail) => SyncOutcome {
             pending: ambient_cli::has_unsent(dir).unwrap_or(true),
             detail,
             failed: false,
+            transport: false,
             writes: 0,
         },
-        Err(err) => SyncOutcome {
-            detail: err.to_string(),
-            pending: true,
-            failed: true,
-            writes: 0,
-        },
+        Err(err) => {
+            let detail = err.to_string();
+            let transport = matches!(
+                detail.as_str(),
+                "no relay answered"
+                    | "relay unreachable"
+                    | "relay write failed"
+                    | "relay read failed"
+                    | "relay reply missing"
+                    | "relay reply rejected"
+                    | "unavailable"
+                    | "too_large"
+                    | "bad_request"
+            );
+            SyncOutcome {
+                detail,
+                pending: true,
+                failed: true,
+                transport,
+                writes: 0,
+            }
+        }
     }
 }
 
@@ -1542,6 +2455,7 @@ fn sync_task(dir: PathBuf, writes: u64) -> Task<Message> {
                 detail: "Sync stopped before it finished.".to_owned(),
                 pending: true,
                 failed: true,
+                transport: false,
                 writes: 0,
             });
             outcome.writes = writes;
@@ -1562,6 +2476,25 @@ fn action_style(theme: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: Some(iced::Background::Color(background)),
         text_color: ink.on_accent,
+        border: iced::Border {
+            radius: 8.0.into(),
+            width: 0.0,
+            color: Color::TRANSPARENT,
+        },
+        ..Default::default()
+    }
+}
+
+fn quiet_style(theme: &Theme, status: button::Status) -> button::Style {
+    let ink = ink_of(theme);
+    let background = match status {
+        button::Status::Hovered => Some(iced::Background::Color(ink.surface)),
+        button::Status::Pressed => Some(iced::Background::Color(mix(ink.accent, ink.bg, 0.85))),
+        _ => None,
+    };
+    button::Style {
+        background,
+        text_color: ink.text,
         border: iced::Border {
             radius: 8.0.into(),
             width: 0.0,
@@ -1775,33 +2708,27 @@ struct ChatBubble {
     mine: bool,
 }
 
-fn chat_bubble(line: &ChatBubble, ink: Ink) -> Element<'_, Message> {
-    let wide = line.text.chars().count() > 42 || line.text.contains('\n');
-    let mut words = text(&line.text).size(15);
-    if wide {
-        words = words.width(420);
-    }
-    let mut body = column![words].spacing(4);
-    if !line.time.is_empty() {
-        let time_color = if line.mine {
-            Color {
-                a: 0.72,
-                ..ink.on_accent
-            }
-        } else {
-            ink.muted
-        };
-        body = body.push(text(&line.time).size(11).color(time_color));
-    }
-    let bubble = container(body)
-        .padding([8, 12])
-        .max_width(460)
-        .style(if line.mine { mine_style } else { theirs_style });
-    if line.mine {
-        row![space().width(Fill), bubble].width(Fill).into()
+fn file_chip(name: &str, path: Option<PathBuf>, video: bool) -> Element<'static, Message> {
+    let label = if video {
+        format!("Video · {name}")
     } else {
-        row![bubble, space().width(Fill)].width(Fill).into()
+        name.to_owned()
+    };
+    if let Some(path) = path {
+        ghost_label_owned(format!("Open {label}"), Message::OpenPath(path))
+    } else {
+        text(format!("{label} · not on this computer"))
+            .size(13)
+            .into()
     }
+}
+
+fn format_button(label: &'static str, kind: FormatKind) -> Element<'static, Message> {
+    button(text(label).size(13))
+        .padding([6.0, 10.0])
+        .on_press(Message::Format(kind))
+        .style(ghost_style)
+        .into()
 }
 
 fn hairline() -> Element<'static, Message> {

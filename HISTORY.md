@@ -4,6 +4,36 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-10 — the window fits a small frame, and a chat file stays local
+
+The note editor covers the marks people actually type: headings, emphasis, strike, highlight, code, quotes, lists, tasks, tables, links, images, and wikilinks. The marks still stay in the text. A heading is still not a larger font. The editor cannot change the size of one span.
+
+A format row sits under the top bar when the window is wide, and at the bottom when the window is narrower than 720. Notes, Tasks, and Chat move to that bottom bar too. A wide window keeps the list beside the page. A narrow or square window shows the list, then the page.
+
+A file, picture, or video added to a chat is copied into the notebook folder. The message cites it. The citation can sync. The bytes do not. That is not a new record. Encrypted attachment bytes stay later work. The bubble says when the file is not on this computer. A video opens with the system. It is not played inside the window.
+
+## 2026-11-10 — a folder can hold a relay
+
+The window is no longer hard-wired to `127.0.0.1`. The folder file `relays` is this computer, the introduction list, or a pin and a backup. The list is empty until a real relay exists, so the default stays this computer. `ws://` is refused off this machine. `wss` uses rustls. The relay process terminates TLS from a PEM the operator supplies. Pushes and cursors are per relay, so a dead relay is not treated as delivered. A checkmark means the note is saved on this computer. The globe stays gray, red, or green. The address is behind Advanced. The replacement test, with a second computer, is not done.
+
+## 2026-11-09 — the relay keeps its mail
+
+The loopback relay writes a `mailboxes` file and loads it on the next start. Cursors are not reused. A file that does not parse is refused and left alone. The window's file is under `~/.local/share/ambient/relay`. This is still cleartext on this computer. It is not a public relay. See [docs/network/README.md](docs/network/README.md).
+
+## 2026-11-09 — connection is its own track
+
+The relay on this computer is not the network. The protocol already is: identity, Spaces, sealed logs, mailbox ids. The missing piece is a connection a second computer can use without an address.
+
+That work is [docs/network/README.md](docs/network/README.md), inside this repo, not a second project and not a second protocol. Spec 04 still wins on bytes. The owner started it before the v0.1 exit. It does not pull groups, Tor, payments, or a directory forward. v0.5 remains the later self-host and export.
+
+An introduction list run by the owner is a convenience, not an authority. The claim worth making is that the relay can be swapped and cannot read, and that the notebook stays on the device.
+
+## 2026-11-09 — tasks are a view, and the marks have to read
+
+The Tasks screen lists `- [ ]` lines from notes. Checking a box writes that line back into the note. It is not a new record. A note with two versions is left alone until someone saves one.
+
+In the editor, a heading is the serif face, code is a warm monospace, strike is a different color, and a finished task line goes quiet. The marks stay. The editor cannot change the size of one span, so a heading is not a larger font.
+
 ## 2026-11-08 — a feature is a room, a record, or a view
 
 Before adding a kind of thing, read "Adding a feature" in [ARCHITECTURE.md](ARCHITECTURE.md). A room is a Space (who can have the log). A record is one signed event (how two edits merge). A view is a local picture of records and is not synced. Most new screens are views over documents. A new record is only for a different merge rule. A new room is only for a different guest list. Not an object graph.

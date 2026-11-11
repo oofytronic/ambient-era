@@ -10,6 +10,12 @@ publish.workspace = true
 [dependencies]
 ambient-transport = { workspace = true }
 tungstenite = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+[dev-dependencies]
+# A certificate for the TLS test only. Not linked into the relay.
+rcgen = "=0.13.2"
 
 [lints]
 workspace = true

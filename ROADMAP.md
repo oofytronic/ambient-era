@@ -8,6 +8,10 @@ No dates. A stage starts when the previous one is actually in use, not when the 
 
 Specs 01 through 04 are written. `ambient-events` reproduces the event vectors. `ambient-identity` derives the root, signs genesis, and projects device add, inbox rotation, and revoke-by-ancestor. `ambient-spaces` projects a Notes space, including a conflict between two devices, and a conversation. The Linux window creates, edits, and searches notes, pairs a second folder, and exchanges one 1:1 through the loopback relay. The window is Iced, not a webview. The notes file is sealed with ChaCha20-Poly1305. The native client also keeps a SQLCipher FTS5 index beside that file. The key file can be wrapped by a local passphrase. That passphrase is not a platform passkey and not the OS keystore. HPKE seals events to other devices. The recovery seal is implemented: the root device seals the notes log to the identity seal key and the window can restore from the BIP39 phrase. A restored folder enrolls its new device. Contact invites are a link or a QR in the window. A note can be copied into a chat as text. The relay binds `127.0.0.1` and speaks cleartext, so it is not a public deployment. The window turns that relay on when the folder opens, syncs on its own, and shows status on a globe instead of a Sync button. Spec 05 is intentionally unwritten.
 
+## Connection
+
+Started beside the notebook, before the v0.1 exit is met. This is how a second computer syncs without anyone typing an address. The steps and the exit test are [docs/network/README.md](docs/network/README.md). It does not start groups, Tor, payments, or a directory. v0.5 is still the later one-command self-host and full export, not this MVP.
+
 ## v0.1 — notes and a private 1:1
 
 Desktop only. One person, then a few conversations. No agent, no groups, no phone push, no public feed.

@@ -19,17 +19,22 @@ use ambient_store::{read_log, write_log};
 use ambient_transport::{Request, Response, decode_response, encode_request};
 use tungstenite::Message;
 
+use sha2::{Digest, Sha256};
+
 use crate::keys::{self, Local};
 use crate::notes::CliError;
 use crate::session::Notebook;
 
 pub(crate) fn start_loopback() -> Result<(), CliError> {
+    let dir = loopback_store();
+    ambient_relay::Relay::open(&dir)
+        .map_err(|_| CliError::message("could not open the relay store"))?;
     let listener = std::net::TcpListener::bind("127.0.0.1:8787")
         .map_err(|_| CliError::message("relay already running on 127.0.0.1:8787"))?;
     let generation = RELAY_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     RELAY_OURS.store(true, std::sync::atomic::Ordering::SeqCst);
     std::thread::spawn(move || {
-        let _ = ambient_relay::serve_until(&listener, &RELAY_GEN, generation);
+        let _ = ambient_relay::serve_until(&listener, &RELAY_GEN, generation, &dir);
         if RELAY_GEN.load(std::sync::atomic::Ordering::SeqCst) == generation {
             RELAY_OURS.store(false, std::sync::atomic::Ordering::SeqCst);
         }
@@ -50,13 +55,298 @@ pub(crate) fn relay_is_ours() -> bool {
     RELAY_OURS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Mail for the relay this window starts. Not a notebook, and not a public relay.
+fn loopback_store() -> PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME")
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg).join("ambient").join("relay");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("ambient")
+            .join("relay");
+    }
+    PathBuf::from("relay-data")
+}
+
+/// Relays shipped with the app, tried in order. Empty until a real one exists.
+/// Do not put a placeholder address here.
+pub const INTRODUCTION: &[&str] = &[];
+
+/// How this folder reaches another device. Stored in the folder. Not a log event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetMode {
+    /// The relay on this computer. Cleartext. Not a public server.
+    ThisComputer,
+    /// [`INTRODUCTION`], remembering the one that answered.
+    List,
+    /// One pinned relay, then an optional backup.
+    Pin,
+}
+
+/// The folder's relay choice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetSetting {
+    /// Which list to try.
+    pub mode: NetMode,
+    /// Used when [`NetMode::Pin`]. Empty otherwise.
+    pub pin: String,
+    /// Tried after `pin` when that one does not answer. Empty if unset.
+    pub backup: String,
+    /// The list relay that answered last time. Not shown as an address to type.
+    pub choice: String,
+}
+
+impl NetSetting {
+    fn this_computer() -> Self {
+        Self {
+            mode: NetMode::ThisComputer,
+            pin: String::new(),
+            backup: String::new(),
+            choice: String::new(),
+        }
+    }
+}
+
+pub(crate) fn read_setting(dir: &Path) -> Result<NetSetting, CliError> {
+    let path = dir.join("relays");
+    if !path.is_file() {
+        return Ok(NetSetting::this_computer());
+    }
+    let text =
+        fs::read_to_string(path).map_err(|_| CliError::message("could not read relay setting"))?;
+    Ok(parse_setting(&text))
+}
+
+fn parse_setting(text: &str) -> NetSetting {
+    let mut setting = NetSetting::this_computer();
+    for line in text.lines() {
+        let mut parts = line.splitn(2, ' ');
+        let key = parts.next().unwrap_or("");
+        let value = parts.next().unwrap_or("").trim();
+        match key {
+            "mode" => {
+                setting.mode = match value {
+                    "list" => NetMode::List,
+                    "pin" => NetMode::Pin,
+                    _ => NetMode::ThisComputer,
+                }
+            }
+            "choice" => value.clone_into(&mut setting.choice),
+            "pin" => value.clone_into(&mut setting.pin),
+            "backup" => value.clone_into(&mut setting.backup),
+            _ => {}
+        }
+    }
+    setting
+}
+
+pub(crate) fn write_setting(dir: &Path, setting: &NetSetting) -> Result<(), CliError> {
+    let mut next = read_setting(dir)?;
+    next.mode = setting.mode;
+    setting.pin.trim().clone_into(&mut next.pin);
+    setting.backup.trim().clone_into(&mut next.backup);
+    setting.choice.trim().clone_into(&mut next.choice);
+    if !next.choice.is_empty() && check_relay_url(&next.choice).is_err() {
+        next.choice.clear();
+    }
+    if next.mode == NetMode::Pin {
+        if next.pin.is_empty() {
+            return Err(CliError::message("a pinned relay needs an address"));
+        }
+        check_relay_url(&next.pin)?;
+        if !next.backup.is_empty() {
+            check_relay_url(&next.backup)?;
+        }
+    }
+    let mut body = String::new();
+    let mode = match next.mode {
+        NetMode::ThisComputer => "this",
+        NetMode::List => "list",
+        NetMode::Pin => "pin",
+    };
+    body.push_str("mode ");
+    body.push_str(mode);
+    body.push('\n');
+    body.push_str("choice ");
+    body.push_str(next.choice.trim());
+    body.push('\n');
+    body.push_str("pin ");
+    body.push_str(&next.pin);
+    body.push('\n');
+    body.push_str("backup ");
+    body.push_str(&next.backup);
+    body.push('\n');
+    fs::write(dir.join("relays"), body)
+        .map_err(|_| CliError::message("could not write relay setting"))
+}
+
+/// A `ws://` address is only allowed for this computer. Anything else is `wss://`.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when the address is not a relay URL this client will dial.
+pub fn check_relay_url(url: &str) -> Result<(), CliError> {
+    let url = url.trim();
+    let (secure, rest) = if let Some(rest) = url.strip_prefix("wss://") {
+        (true, rest)
+    } else if let Some(rest) = url.strip_prefix("ws://") {
+        (false, rest)
+    } else {
+        return Err(CliError::message(
+            "a relay address has to start with ws:// or wss://",
+        ));
+    };
+    if rest.is_empty() || rest.contains(' ') || rest.contains('@') {
+        return Err(CliError::message("relay address is not usable"));
+    }
+    if !secure && !loopback_host(host_of(rest)) {
+        return Err(CliError::message("a relay off this computer has to be wss"));
+    }
+    Ok(())
+}
+
+fn host_of(rest: &str) -> &str {
+    let authority = rest.split('/').next().unwrap_or("");
+    if let Some(host) = authority.strip_prefix('[') {
+        return host.split(']').next().unwrap_or("");
+    }
+    authority.split(':').next().unwrap_or("")
+}
+
+fn loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+fn candidates(setting: &NetSetting) -> Vec<String> {
+    match setting.mode {
+        NetMode::ThisComputer => vec![crate::LOOPBACK_URL.to_owned()],
+        NetMode::Pin => {
+            let mut urls = Vec::new();
+            push_url(&mut urls, &setting.pin);
+            push_url(&mut urls, &setting.backup);
+            urls
+        }
+        NetMode::List => {
+            let mut urls = Vec::new();
+            push_url(&mut urls, &setting.choice);
+            for url in INTRODUCTION {
+                push_url(&mut urls, url);
+            }
+            urls
+        }
+    }
+}
+
+fn push_url(urls: &mut Vec<String>, url: &str) {
+    let url = url.trim();
+    if url.is_empty() || urls.iter().any(|have| have == url) {
+        return;
+    }
+    urls.push(url.to_owned());
+}
+
+pub(crate) fn sync_auto(dir: &Path) -> Result<String, CliError> {
+    let setting = read_setting(dir)?;
+    let urls = candidates(&setting);
+    if urls.is_empty() {
+        return Err(CliError::message("no relay answered"));
+    }
+    let mut last = CliError::message("no relay answered");
+    for url in &urls {
+        match sync(dir, url) {
+            Ok(text) => {
+                if setting.mode == NetMode::List {
+                    let mut remembered = read_setting(dir)?;
+                    remembered.choice.clone_from(url);
+                    let path = dir.join("relays");
+                    if path.is_file() {
+                        write_setting(dir, &remembered)?;
+                    }
+                }
+                return Ok(text);
+            }
+            Err(err) if transport_failure(&err) => last = err,
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last)
+}
+
+fn transport_failure(err: &CliError) -> bool {
+    matches!(
+        err.to_string().as_str(),
+        "no relay answered"
+            | "relay unreachable"
+            | "relay write failed"
+            | "relay read failed"
+            | "relay reply missing"
+            | "relay reply rejected"
+            | "unavailable"
+            | "too_large"
+            | "bad_request"
+    )
+}
+
+fn state_dir(dir: &Path, url: &str) -> PathBuf {
+    use std::fmt::Write as _;
+    let digest = Sha256::digest(url.as_bytes());
+    let mut name = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(name, "{byte:02x}");
+    }
+    dir.join("relay-state").join(name)
+}
+
+fn read_pushed_for(dir: &Path, url: &str) -> Result<PushSet, CliError> {
+    let fresh = state_dir(dir, url).join("pushed");
+    if fresh.is_file() {
+        return read_pushed(&fresh);
+    }
+    if url == crate::LOOPBACK_URL {
+        return read_pushed(&dir.join("pushed"));
+    }
+    Ok(BTreeSet::new())
+}
+
+fn write_pushed_for(dir: &Path, url: &str, pushed: &PushSet) -> Result<(), CliError> {
+    let state = state_dir(dir, url);
+    fs::create_dir_all(&state).map_err(|_| CliError::message("could not write push list"))?;
+    write_pushed(&state.join("pushed"), pushed)
+}
+
+fn read_cursor_for(dir: &Path, url: &str, name: &str, legacy: &Path) -> Result<u64, CliError> {
+    let path = state_dir(dir, url).join(name);
+    if path.is_file() {
+        return read_cursor(&path);
+    }
+    if url == crate::LOOPBACK_URL && legacy.is_file() {
+        return read_cursor(legacy);
+    }
+    Ok(0)
+}
+
 pub(crate) fn has_unsent(dir: &Path) -> Result<bool, CliError> {
+    let pushed = match target_url(dir)? {
+        Some(url) => read_pushed_for(dir, &url)?,
+        None => BTreeSet::new(),
+    };
+    unsent_against(dir, &pushed)
+}
+
+fn target_url(dir: &Path) -> Result<Option<String>, CliError> {
+    Ok(candidates(&read_setting(dir)?).into_iter().next())
+}
+
+fn unsent_against(dir: &Path, pushed: &PushSet) -> Result<bool, CliError> {
     let local = keys::open(dir)?;
     let notes = read_wires(&local.notes_path, &local.store_key)?;
-    let pushed = read_pushed(&dir.join("pushed"))?;
     if !notes.is_empty() {
         let recipients = Notebook::open(dir)?.recipients()?;
-        if missing_push(&local.device.mailbox, &notes, &recipients, &pushed)? {
+        if missing_push(&local.device.mailbox, &notes, &recipients, pushed)? {
             return Ok(true);
         }
     }
@@ -70,7 +360,7 @@ pub(crate) fn has_unsent(dir: &Path) -> Result<bool, CliError> {
     }
     for slot in load_slots(dir, &local.store_key)? {
         let members = chat_members(&slot.wires)?;
-        if missing_push(&slot.card.mailbox, &slot.wires, &members, &pushed)? {
+        if missing_push(&slot.card.mailbox, &slot.wires, &members, pushed)? {
             return Ok(true);
         }
     }
@@ -226,12 +516,19 @@ pub(crate) fn conversations(dir: &Path) -> Result<Vec<(String, String)>, CliErro
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn sync(dir: &Path, url: &str) -> Result<String, CliError> {
+    check_relay_url(url)?;
     let mut local = keys::open(dir)?;
     let notes_path = local.notes_path.clone();
     let mut notes = read_wires(&notes_path, &local.store_key)?;
     let mut slots = load_slots(dir, &local.store_key)?;
+    for slot in &mut slots {
+        let name = hex_id(&slot.card.mailbox);
+        let legacy = slot.cursor_path.clone();
+        slot.cursor = read_cursor_for(dir, url, &name, &legacy)?;
+        slot.cursor_path = state_dir(dir, url).join(name);
+    }
     let mut requests = Vec::new();
-    let mut pushed = read_pushed(&dir.join("pushed"))?;
+    let mut pushed = read_pushed_for(dir, url)?;
     let recipients = if notes.is_empty() {
         Vec::new()
     } else {
@@ -256,7 +553,7 @@ pub(crate) fn sync(dir: &Path, url: &str) -> Result<String, CliError> {
         )?;
     }
     let push_count = requests.len();
-    let device_since = read_cursor(&dir.join("cursor-device"))?;
+    let device_since = read_cursor_for(dir, url, "device", &dir.join("cursor-device"))?;
     requests.push(encode_request(&Request::Get {
         mailbox: local.device.mailbox,
         since: device_since,
@@ -323,6 +620,8 @@ pub(crate) fn sync(dir: &Path, url: &str) -> Result<String, CliError> {
         write_log(&notes_path, &local.store_key, &notes)
             .map_err(|_| CliError::message("could not write notes file"))?;
     }
+    let state = state_dir(dir, url);
+    fs::create_dir_all(&state).map_err(|_| CliError::message("could not write cursor"))?;
     for (slot, before) in slots.iter().zip(wire_counts) {
         if slot.wires.len() != before {
             if let Some(parent) = slot.log_path.parent() {
@@ -334,8 +633,8 @@ pub(crate) fn sync(dir: &Path, url: &str) -> Result<String, CliError> {
         }
         write_cursor(&slot.cursor_path, slot.cursor)?;
     }
-    write_cursor(&dir.join("cursor-device"), device_cursor)?;
-    write_pushed(&dir.join("pushed"), &pushed)?;
+    write_cursor(&state.join("device"), device_cursor)?;
+    write_pushed_for(dir, url, &pushed)?;
     let notes_in = notes.len().saturating_sub(notes_before);
     let chats_in: usize = slots
         .iter()
@@ -975,6 +1274,10 @@ fn exchange(url: &str, requests: &[String]) -> Result<Vec<String>, CliError> {
     if requests.is_empty() {
         return Ok(Vec::new());
     }
+    check_relay_url(url)?;
+    if url.trim().starts_with("wss://") {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
     let (mut socket, _) =
         tungstenite::connect(url).map_err(|_| CliError::message("relay unreachable"))?;
     let mut replies = Vec::new();
@@ -1012,18 +1315,15 @@ fn queue_recovery(
         if getrandom::getrandom(&mut ikm).is_err() {
             return Err(CliError::message("random source failed"));
         }
-        match seal_blob(&identity.seal_key, &identity.recovery_mailbox, wire, &ikm) {
-            Ok(blob) => {
-                ikm.fill(0);
-                requests.push(encode_request(&Request::Put {
-                    mailbox: identity.recovery_mailbox,
-                    blob,
-                }));
-            }
-            Err(_) => {
-                ikm.fill(0);
-                return Err(CliError::message("could not seal recovery"));
-            }
+        if let Ok(blob) = seal_blob(&identity.seal_key, &identity.recovery_mailbox, wire, &ikm) {
+            ikm.fill(0);
+            requests.push(encode_request(&Request::Put {
+                mailbox: identity.recovery_mailbox,
+                blob,
+            }));
+        } else {
+            ikm.fill(0);
+            return Err(CliError::message("could not seal recovery"));
         }
     }
     Ok(())

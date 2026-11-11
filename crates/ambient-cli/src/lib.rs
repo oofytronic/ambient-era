@@ -21,6 +21,8 @@ pub use draft::{Draft, Shortcut, shortcut};
 pub use notes::{CliError, run};
 pub use session::{DeviceLine, NoteSummary, Notebook, ShownHead, ShownNote};
 
+pub use sync::{INTRODUCTION, NetMode, NetSetting, check_relay_url};
+
 /// Loopback relay the window starts. Cleartext. Not a public deployment.
 pub const LOOPBACK_URL: &str = "ws://127.0.0.1:8787";
 
@@ -73,6 +75,37 @@ pub fn device_offer(dir: &Path, label: &str) -> Result<String, CliError> {
 /// Returns [`CliError`] when the relay cannot be reached or a log cannot be written.
 pub fn sync_folder(dir: &Path, url: &str) -> Result<String, CliError> {
     sync::sync(dir, url)
+}
+
+/// Push and pull through the relay this folder remembers.
+///
+/// This computer is the default. A pinned relay is tried before its backup.
+/// The introduction list is tried when that mode is selected. A failure to
+/// reach one relay tries the next. The note log is not touched by a failure.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when no relay answers, or a log cannot be written.
+pub fn sync_notebook(dir: &Path) -> Result<String, CliError> {
+    sync::sync_auto(dir)
+}
+
+/// The folder's relay choice. Missing file means this computer.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when the file cannot be read.
+pub fn net_setting(dir: &Path) -> Result<NetSetting, CliError> {
+    sync::read_setting(dir)
+}
+
+/// Remember how this folder reaches a relay. An address off this computer has to be `wss`.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when the address is refused or the file cannot be written.
+pub fn set_net_setting(dir: &Path, setting: &NetSetting) -> Result<(), CliError> {
+    sync::write_setting(dir, setting)
 }
 
 /// This folder's contact card. Not a device offer. Do not pass it to [`Notebook::pair_device`].
