@@ -548,7 +548,7 @@ fn paint_in(line: &str, carry: Carry, at_start: bool) -> (Vec<(Range<usize>, Mar
         && let Some(rest) = line.get(from..)
         && let Some(end) = callout_end(rest)
     {
-        let kind = callout_kind(rest.get(2..end.saturating_sub(2)).unwrap_or(""));
+        let kind = callout_kind(rest.get(2..end.saturating_sub(1)).unwrap_or(""));
         let abs = from.saturating_add(end);
         push_span(&mut spans, from, abs, callout_mark(kind));
         from = abs;
@@ -1527,6 +1527,134 @@ pub(super) fn format_change(text: &str, cursor: text_editor::Cursor, kind: Forma
     }
 }
 
+/// Enter in a list or task inserts the next marker, including on an empty item.
+/// Backspace on an empty item leaves the list. A fence, math block, or
+/// frontmatter is left alone.
+pub(super) fn continue_enter(text: &str, cursor: text_editor::Cursor) -> Option<Change> {
+    let (start, line, parts) = list_at_cursor(text, &cursor)?;
+    let column = cursor_column(line, cursor.position.column);
+    let at = start.saturating_add(column.max(parts.end));
+    let mut insert = String::from("\n");
+    insert.push_str(&next_prefix(line, &parts));
+    Some(rewrite(text, at, at, &insert, insert.len(), None))
+}
+
+/// Backspace on an empty list or task removes that marker.
+pub(super) fn exit_empty_item(text: &str, cursor: text_editor::Cursor) -> Option<Change> {
+    let (start, line, parts) = list_at_cursor(text, &cursor)?;
+    let end = line_end(text, cursor.position.line);
+    let body = line.get(parts.end..).unwrap_or("");
+    let column = cursor_column(line, cursor.position.column);
+    if !body.trim().is_empty() || column < parts.end {
+        return None;
+    }
+    Some(rewrite(text, start, end, "", 0, None))
+}
+
+fn list_at_cursor<'a>(
+    text: &'a str,
+    cursor: &text_editor::Cursor,
+) -> Option<(usize, &'a str, ListParts)> {
+    if cursor.selection.is_some() {
+        return None;
+    }
+    let line_no = cursor.position.line;
+    if skipped_block(text, line_no) {
+        return None;
+    }
+    let start = line_start(text, line_no);
+    let end = line_end(text, line_no);
+    let line = text.get(start..end).unwrap_or("");
+    if is_rule(line) {
+        return None;
+    }
+    let parts = list_parts(line)?;
+    Some((start, line, parts))
+}
+
+fn cursor_column(line: &str, column: usize) -> usize {
+    floor_boundary(line, column.min(line.len()))
+}
+
+fn next_prefix(line: &str, parts: &ListParts) -> String {
+    let spaces = leading_spaces(line);
+    let indent = line.get(..spaces).unwrap_or("");
+    let rest = line.get(spaces..).unwrap_or("");
+    let bullet = rest.chars().next().unwrap_or('-');
+    if bullet.is_ascii_digit() {
+        let number = following_number(rest);
+        let delim = list_delim(rest);
+        if parts.box_at.is_some() {
+            return format!("{indent}{number}{delim} [ ] ");
+        }
+        return format!("{indent}{number}{delim} ");
+    }
+    if parts.box_at.is_some() {
+        return format!("{indent}{bullet} [ ] ");
+    }
+    format!("{indent}{bullet} ")
+}
+
+fn list_delim(rest: &str) -> char {
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if rest.as_bytes().get(digits) == Some(&b')') {
+        ')'
+    } else {
+        '.'
+    }
+}
+
+fn following_number(rest: &str) -> u32 {
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    rest.get(..digits)
+        .and_then(|text| text.parse::<u32>().ok())
+        .unwrap_or(1)
+        .saturating_add(1)
+}
+
+fn skipped_block(text: &str, line_no: usize) -> bool {
+    let mut fence = false;
+    let mut tilde = false;
+    let mut math = false;
+    let mut front = false;
+    for (index, row) in text.split('\n').enumerate() {
+        if index == line_no {
+            return fence || math || front;
+        }
+        if front {
+            if row.trim() == "---" {
+                front = false;
+            }
+            continue;
+        }
+        if fence {
+            if fence_closer(row, tilde) {
+                fence = false;
+            }
+            continue;
+        }
+        if math {
+            if row.trim() == "$$" {
+                math = false;
+            }
+            continue;
+        }
+        if index == 0 && row.trim() == "---" {
+            front = true;
+            continue;
+        }
+        if let Some(is_tilde) = fence_open(row) {
+            fence = true;
+            tilde = is_tilde;
+            continue;
+        }
+        if math_block(row) == Some(false) {
+            math = true;
+        }
+    }
+    false
+}
+
 fn wrap(text: &str, cursor: &text_editor::Cursor, left: &str, right: &str) -> Change {
     let (mut from, mut to) = range_bytes(text, cursor);
     if from == to {
@@ -1948,7 +2076,7 @@ fn peel<'a>(inner: &'a str, left: &str, right: &str) -> Option<&'a str> {
 mod tests {
     use super::{
         Carry, EM, Face, HIGH, Mark, STRIKE, STRONG, check_mark, code_mark, em, heading_mark,
-        marker, paint, set_task_line, strike_mark, strong, task_lines,
+        marker, math_mark, paint, set_task_line, strike_mark, strong, task_lines,
     };
 
     #[test]
@@ -2278,5 +2406,306 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(!lines[0].done);
         assert_eq!(lines[0].text, "ask");
+    }
+
+    #[test]
+    fn enter_continues_a_list_or_task_and_backspace_leaves_an_empty_one() {
+        let (next, line, column) = entered("- milk", 0, 6).unwrap();
+        assert_eq!(next, "- milk\n- ");
+        assert_eq!((line, column), (1, 2));
+
+        let (split, _, _) = entered("- milk", 0, 3).unwrap();
+        assert_eq!(split, "- m\n- ilk");
+
+        let (numbered, _, _) = entered("1. one", 0, 6).unwrap();
+        assert_eq!(numbered, "1. one\n2. ");
+        let (paren, _, _) = entered("3) three", 0, 8).unwrap();
+        assert_eq!(paren, "3) three\n4) ");
+
+        let (task, line, column) = entered("- [ ] call", 0, 10).unwrap();
+        assert_eq!(task, "- [ ] call\n- [ ] ");
+        assert_eq!((line, column), (1, 6));
+        let (done, _, _) = entered("- [x] call", 0, 10).unwrap();
+        assert_eq!(done, "- [x] call\n- [ ] ");
+        let (star, _, _) = entered("* [ ] call", 0, 10).unwrap();
+        assert_eq!(star, "* [ ] call\n* [ ] ");
+        let (nested, _, _) = entered("  - child", 0, 9).unwrap();
+        assert_eq!(nested, "  - child\n  - ");
+
+        let (blank, _, _) = entered("- ", 0, 2).unwrap();
+        assert_eq!(blank, "- \n- ");
+        let (blank_task, _, _) = entered("- [ ] ", 0, 6).unwrap();
+        assert_eq!(blank_task, "- [ ] \n- [ ] ");
+
+        let mid = "- a\n- b\n- c";
+        let (kept, _, _) = entered(mid, 1, 3).unwrap();
+        assert_eq!(kept, "- a\n- b\n- \n- c");
+
+        assert!(entered("hello", 0, 5).is_none());
+        assert!(entered("```\n- not", 1, 5).is_none());
+        assert!(entered("---", 0, 3).is_none());
+
+        let left = exited("- milk\n- ", 1, 2).unwrap();
+        assert_eq!(left, "- milk\n");
+        let left_task = exited("- [ ] ", 0, 6).unwrap();
+        assert_eq!(left_task, "");
+        assert!(exited("- milk", 0, 6).is_none());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn each_preview_reads_the_mark_that_was_typed() {
+        let note = [
+            "# One",
+            "## Two",
+            "### Three",
+            "###### Six",
+            "see **bold** and *em* and _under_ and ***both***",
+            "~~gone~~ ==sun== `code`",
+            "- bullet",
+            "* star",
+            "+ plus",
+            "1. first",
+            "2) second",
+            "- [ ] open",
+            "- [x] shut",
+            "> said",
+            "> [!warning] Careful",
+            "| a | **b** |",
+            "| --- | --- |",
+            "---",
+            "```",
+            "**not bold**",
+            "```",
+            "$$",
+            "e=mc",
+            "$$",
+            "See [[Daily|today]] and ![[cat.png]]",
+            "go https://example.com/a. now",
+            "[docs](https://docs.example)",
+            "![cat](note-files/cat.png)",
+            "keep %%secret%% here",
+            "energy $e=mc^2$ today",
+            "see #clinic/today.",
+            "[^n]: the note",
+            "see [^n]",
+        ]
+        .join("\n");
+        let lines = paint_all(&note);
+        expect(&lines, "# One", "# ", marker());
+        expect(&lines, "# One", "One", heading_mark(1));
+        expect(&lines, "## Two", "Two", heading_mark(2));
+        expect(&lines, "### Three", "Three", heading_mark(3));
+        expect(&lines, "###### Six", "Six", heading_mark(6));
+        expect(
+            &lines,
+            "see **bold** and *em* and _under_ and ***both***",
+            "bold",
+            strong(),
+        );
+        expect(
+            &lines,
+            "see **bold** and *em* and _under_ and ***both***",
+            "em",
+            em(),
+        );
+        expect(
+            &lines,
+            "see **bold** and *em* and _under_ and ***both***",
+            "under",
+            em(),
+        );
+        expect(
+            &lines,
+            "see **bold** and *em* and _under_ and ***both***",
+            "both",
+            Mark {
+                face: Face::Text,
+                flags: STRONG | EM,
+            },
+        );
+        expect(&lines, "~~gone~~ ==sun== `code`", "gone", strike_mark());
+        expect(
+            &lines,
+            "~~gone~~ ==sun== `code`",
+            "sun",
+            Mark {
+                face: Face::Text,
+                flags: HIGH,
+            },
+        );
+        expect(&lines, "~~gone~~ ==sun== `code`", "code", code_mark());
+        expect(&lines, "- bullet", "- ", marker());
+        expect(&lines, "* star", "* ", marker());
+        expect(&lines, "+ plus", "+ ", marker());
+        expect(&lines, "1. first", "1. ", marker());
+        expect(&lines, "2) second", "2) ", marker());
+        expect(&lines, "- [ ] open", "[ ]", check_mark(false));
+        expect(&lines, "- [x] shut", "[x]", check_mark(true));
+        expect(&lines, "- [x] shut", "shut", strike_mark());
+        expect(
+            &lines,
+            "> said",
+            "> ",
+            Mark {
+                face: Face::Quote,
+                flags: 0,
+            },
+        );
+        expect(
+            &lines,
+            "> [!warning] Careful",
+            "[!warning]",
+            Mark {
+                face: Face::Callout(3),
+                flags: 0,
+            },
+        );
+        expect(&lines, "| a | **b** |", "b", strong());
+        expect(&lines, "| --- | --- |", "| --- | --- |", marker());
+        expect(&lines, "---", "---", marker());
+        expect(&lines, "**not bold**", "**not bold**", code_mark());
+        expect(&lines, "e=mc", "e=mc", math_mark());
+        expect(
+            &lines,
+            "See [[Daily|today]] and ![[cat.png]]",
+            "today",
+            Mark {
+                face: Face::Wiki,
+                flags: 0,
+            },
+        );
+        expect(
+            &lines,
+            "See [[Daily|today]] and ![[cat.png]]",
+            "cat.png",
+            Mark {
+                face: Face::Image,
+                flags: 0,
+            },
+        );
+        expect(
+            &lines,
+            "go https://example.com/a. now",
+            "https://example.com/a",
+            Mark {
+                face: Face::Link,
+                flags: 0,
+            },
+        );
+        expect(
+            &lines,
+            "[docs](https://docs.example)",
+            "docs",
+            Mark {
+                face: Face::Link,
+                flags: 0,
+            },
+        );
+        expect(
+            &lines,
+            "![cat](note-files/cat.png)",
+            "cat",
+            Mark {
+                face: Face::Image,
+                flags: 0,
+            },
+        );
+        expect(
+            &lines,
+            "keep %%secret%% here",
+            "secret",
+            Mark {
+                face: Face::Meta,
+                flags: 0,
+            },
+        );
+        expect(
+            &lines,
+            "energy $e=mc^2$ today",
+            "e=mc^2",
+            Mark {
+                face: Face::Math,
+                flags: 0,
+            },
+        );
+        expect(
+            &lines,
+            "see #clinic/today.",
+            "#clinic/today",
+            Mark {
+                face: Face::Tag,
+                flags: 0,
+            },
+        );
+        expect(
+            &lines,
+            "[^n]: the note",
+            "[^n]:",
+            Mark {
+                face: Face::Link,
+                flags: 0,
+            },
+        );
+        expect(
+            &lines,
+            "see [^n]",
+            "[^n]",
+            Mark {
+                face: Face::Link,
+                flags: 0,
+            },
+        );
+    }
+
+    fn entered(text: &str, line: usize, column: usize) -> Option<(String, usize, usize)> {
+        let change = super::continue_enter(text, caret(line, column))?;
+        let (out, pos) = apply_change(text, &change);
+        Some((out, pos.line, pos.column))
+    }
+
+    fn exited(text: &str, line: usize, column: usize) -> Option<String> {
+        let change = super::exit_empty_item(text, caret(line, column))?;
+        Some(apply_change(text, &change).0)
+    }
+
+    fn apply_change(text: &str, change: &super::Change) -> (String, super::text_editor::Position) {
+        let from = super::pos_byte(text, change.anchor);
+        let to = super::pos_byte(text, change.end);
+        let mut out = String::new();
+        out.push_str(text.get(..from).unwrap_or(""));
+        out.push_str(&change.insert);
+        out.push_str(text.get(to..).unwrap_or(""));
+        (out, change.after.position)
+    }
+
+    struct Painted {
+        text: String,
+        spans: Vec<(std::ops::Range<usize>, Mark)>,
+    }
+
+    fn paint_all(text: &str) -> Vec<Painted> {
+        let mut carry = Carry::default();
+        let mut lines = Vec::new();
+        for (index, line) in text.split('\n').enumerate() {
+            let (spans, next) = super::paint_in(line, carry, index == 0);
+            lines.push(Painted {
+                text: line.to_owned(),
+                spans,
+            });
+            carry = next;
+        }
+        lines
+    }
+
+    fn expect(lines: &[Painted], line: &str, text: &str, mark: Mark) {
+        let spans = lines
+            .iter()
+            .find(|row| row.text == line)
+            .map_or(&[][..], |row| row.spans.as_slice());
+        assert!(
+            hit(spans, line, text, mark),
+            "expected {text:?} as {mark:?} in {line:?}, spans were {spans:?}"
+        );
     }
 }

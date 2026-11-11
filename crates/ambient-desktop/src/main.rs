@@ -367,6 +367,19 @@ impl App {
                 Task::none()
             }
             Message::BodyEdited(action) => {
+                let structured = match &action {
+                    text_editor::Action::Edit(text_editor::Edit::Enter) => {
+                        markdown::continue_enter(&self.body.text(), self.body.cursor())
+                    }
+                    text_editor::Action::Edit(text_editor::Edit::Backspace) => {
+                        markdown::exit_empty_item(&self.body.text(), self.body.cursor())
+                    }
+                    _ => None,
+                };
+                if let Some(change) = structured {
+                    self.apply_change(change);
+                    return Task::none();
+                }
                 if self.body.edit(&action) {
                     self.edited_at = Some(Instant::now());
                 }
@@ -2062,6 +2075,10 @@ impl App {
 
     fn insert_mark(&mut self, kind: FormatKind) {
         let change = markdown::format_change(&self.body.text(), self.body.cursor(), kind);
+        self.apply_change(change);
+    }
+
+    fn apply_change(&mut self, change: markdown::Change) {
         if change.anchor == change.end {
             self.body.place(text_editor::Cursor {
                 position: change.anchor,

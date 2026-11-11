@@ -4,6 +4,12 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-11 — enter continues a list, and a heading stays one size
+
+Enter on a list or a task inserts the next marker, and splits the line if the caret is in the middle. A new task is unchecked. Backspace on an empty item removes the marker. This is still the same checkbox line, not a new record.
+
+A heading is not a larger size. The editor's highlight format is only a color and a font. The text engine under it can size one span, but iced 0.14 does not pass a size through, and this window does not fork iced. `#` and `##` use the serif. Smaller headings are bold. A strike is still a color, not a line through the letters.
+
 ## 2026-11-11 — the note owns its toolbar, and a loose task is still a line
 
 The format row sits in the note column, above the editor, not above the list. On a narrow window it stays at the bottom. The buttons are labeled Word, Line, and Insert. A word button wraps the word or the selection and toggles off. A line button toggles the prefix. An insert drops a link, table, rule, callout, or code block. The preview also reads comments, math, tags, embeds, callouts, and footnote definitions. The editor still cannot change the size of one span, and a strike is still a color, not a line through the letters.
