@@ -30,11 +30,18 @@ enum Open {
     Strike,
     Highlight,
     Code,
+    Comment,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 struct Carry {
     fence: bool,
+    tilde: bool,
+    math: bool,
+    indent_code: bool,
+    blank: bool,
+    frontmatter: bool,
     opens: [Open; OPEN_CAP],
     len: u8,
 }
@@ -43,6 +50,11 @@ impl Default for Carry {
     fn default() -> Self {
         Self {
             fence: false,
+            tilde: false,
+            math: false,
+            indent_code: false,
+            blank: false,
+            frontmatter: false,
             opens: [Open::Code; OPEN_CAP],
             len: 0,
         }
@@ -61,6 +73,10 @@ enum Face {
     Check,
     Checked,
     Wiki,
+    Tag,
+    Math,
+    Meta,
+    Callout(u8),
 }
 
 const STRONG: u8 = 1;
@@ -180,7 +196,16 @@ impl Highlighter for Live {
             self.carry.push(Carry::default());
         }
         let incoming = self.carry.get(self.at).copied().unwrap_or_default();
-        let (spans, outgoing) = paint(line, incoming);
+        let at_start = self.at == 0;
+        let incoming = if at_start {
+            Carry {
+                blank: true,
+                ..incoming
+            }
+        } else {
+            incoming
+        };
+        let (spans, outgoing) = paint_in(line, incoming, at_start);
         let next = self.at.saturating_add(1);
         if self.carry.len() == next {
             self.carry.push(outgoing);
@@ -231,12 +256,16 @@ impl NoteBody {
         previous != self.editor.text()
     }
 
-    pub(super) fn selection(&self) -> Option<String> {
-        self.editor.selection()
-    }
-
     pub(super) fn perform(&mut self, action: &Action) {
         self.editor.perform(action.clone());
+    }
+
+    pub(super) fn cursor(&self) -> text_editor::Cursor {
+        self.editor.cursor()
+    }
+
+    pub(super) fn place(&mut self, cursor: text_editor::Cursor) {
+        self.editor.move_to(cursor);
     }
 }
 
@@ -294,21 +323,27 @@ fn mark_format(mark: &Mark, theme: &Theme) -> highlighter::Format<Font> {
     } else {
         Color::from_rgb8(0x8A, 0x62, 0x10)
     };
-    if mark.face == Face::Code {
+    if mark.face == Face::Code || mark.face == Face::Math {
         return highlighter::Format {
-            color: Some(code),
+            color: Some(if mark.face == Face::Math {
+                accent
+            } else {
+                code
+            }),
             font: Some(Font::MONOSPACE),
         };
     }
     let mut color = match mark.face {
         Face::Text => None,
-        Face::Marker => Some(marker),
-        Face::Link | Face::Wiki | Face::Image | Face::Check | Face::Quote | Face::Heading(2) => {
+        Face::Marker | Face::Meta => Some(marker),
+        Face::Tag | Face::Link | Face::Wiki | Face::Image | Face::Check | Face::Quote => {
             Some(accent)
         }
+        Face::Heading(2) => Some(accent),
         Face::Heading(_) => Some(heading),
         Face::Checked => Some(done),
-        Face::Code => Some(code),
+        Face::Callout(kind) => Some(callout_color(kind, dark)),
+        Face::Code | Face::Math => Some(code),
     };
     if mark.flags & HIGH != 0 {
         color = Some(gold);
@@ -336,6 +371,18 @@ fn mark_format(mark: &Mark, theme: &Theme) -> highlighter::Format<Font> {
         };
     }
     highlighter::Format { color, font }
+}
+
+fn callout_color(kind: u8, dark: bool) -> Color {
+    let (dark_rgb, light_rgb): ([u8; 3], [u8; 3]) = match kind {
+        1 | 2 => ([0x7D, 0xC9, 0xA4], [0x1F, 0x7A, 0x4D]),
+        3 => ([0xE6, 0xC2, 0x5A], [0x8A, 0x62, 0x10]),
+        4 => ([0xE0, 0x8A, 0x86], [0x8F, 0x45, 0x42]),
+        5 => ([0xC4, 0xA6, 0xE0], [0x5C, 0x3D, 0x7A]),
+        _ => ([0x66, 0xA5, 0xE1], [0x16, 0x44, 0x6F]),
+    };
+    let rgb = if dark { dark_rgb } else { light_rgb };
+    Color::from_rgb8(rgb[0], rgb[1], rgb[2])
 }
 
 fn sans_bold() -> Font {
@@ -379,40 +426,107 @@ fn check_mark(done: bool) -> Mark {
     }
 }
 
+#[cfg(test)]
 fn paint(line: &str, carry: Carry) -> (Vec<(Range<usize>, Mark)>, Carry) {
-    if carry.fence {
+    paint_in(line, carry, false)
+}
+
+#[allow(clippy::too_many_lines)]
+fn paint_in(line: &str, carry: Carry, at_start: bool) -> (Vec<(Range<usize>, Mark)>, Carry) {
+    if carry.frontmatter {
         let mut spans = Vec::new();
-        push_span(&mut spans, 0, line.len(), code_mark());
-        if fence_closer(line) {
+        push_span(&mut spans, 0, line.len(), meta_mark());
+        if line.trim() == "---" {
             return (spans, Carry::default());
         }
         return (spans, carry);
     }
-    if fence_marker(line) {
+    if carry.fence {
+        let mut spans = Vec::new();
+        push_span(&mut spans, 0, line.len(), code_mark());
+        if fence_closer(line, carry.tilde) {
+            return (spans, Carry::default());
+        }
+        return (spans, carry);
+    }
+    if carry.math {
+        let mut spans = Vec::new();
+        push_span(&mut spans, 0, line.len(), math_mark());
+        if line.trim() == "$$" {
+            return (spans, Carry::default());
+        }
+        return (spans, carry);
+    }
+    if line.trim().is_empty() {
+        return (
+            Vec::new(),
+            Carry {
+                blank: true,
+                ..Carry::default()
+            },
+        );
+    }
+    if let Some(tilde) = fence_open(line) {
         let mut spans = Vec::new();
         push_span(&mut spans, 0, line.len(), code_mark());
         return (
             spans,
             Carry {
                 fence: true,
+                tilde,
                 ..Carry::default()
             },
         );
     }
-    if line.trim().is_empty() || is_rule(line) {
+    if let Some(closed) = math_block(line) {
         let mut spans = Vec::new();
-        if is_rule(line) {
-            push_span(&mut spans, 0, line.len(), marker());
+        push_span(&mut spans, 0, line.len(), math_mark());
+        if closed {
+            return (spans, Carry::default());
         }
+        return (
+            spans,
+            Carry {
+                math: true,
+                ..Carry::default()
+            },
+        );
+    }
+    if at_start && line.trim() == "---" {
+        let mut spans = Vec::new();
+        push_span(&mut spans, 0, line.len(), marker());
+        return (
+            spans,
+            Carry {
+                frontmatter: true,
+                ..Carry::default()
+            },
+        );
+    }
+    if is_rule(line) {
+        let mut spans = Vec::new();
+        push_span(&mut spans, 0, line.len(), marker());
         return (spans, Carry::default());
+    }
+    if indent_code_line(line, carry) {
+        let mut spans = Vec::new();
+        push_span(&mut spans, 0, line.len(), code_mark());
+        return (
+            spans,
+            Carry {
+                indent_code: true,
+                ..Carry::default()
+            },
+        );
     }
     if is_table_rule(line) {
         let mut spans = Vec::new();
         push_span(&mut spans, 0, line.len(), marker());
-        return (spans, carry);
+        return (spans, Carry::default());
     }
     if is_table_line(line) {
-        return paint_table(line, carry);
+        let (spans, next) = paint_table(line, carry);
+        return (spans, finish_line(next));
     }
 
     let lead = lead(line);
@@ -432,16 +546,25 @@ fn paint(line: &str, carry: Carry) -> (Vec<(Range<usize>, Mark)>, Carry) {
     let mut from = lead.skip;
     if lead.mark.face == Face::Quote
         && let Some(rest) = line.get(from..)
-        && rest.starts_with("[!")
-        && let Some(rel) = rest.find(']')
+        && let Some(end) = callout_end(rest)
     {
-        let end = from.saturating_add(rel).saturating_add(1);
-        push_span(&mut spans, from, end, marker());
-        from = end;
+        let kind = callout_kind(rest.get(2..end.saturating_sub(2)).unwrap_or(""));
+        let abs = from.saturating_add(end);
+        push_span(&mut spans, from, abs, callout_mark(kind));
+        from = abs;
     }
-    let (inner, carry) = paint_inline(line, from, line.len(), carry, lead.base);
+    let (inner, next) = paint_inline(line, from, line.len(), carry, lead.base);
     spans.extend(inner);
-    (spans, carry)
+    (spans, finish_line(next))
+}
+
+fn finish_line(mut carry: Carry) -> Carry {
+    if top(carry) == Some(Open::Code) {
+        pop(&mut carry);
+    }
+    carry.blank = false;
+    carry.indent_code = false;
+    carry
 }
 
 fn paint_table(line: &str, mut carry: Carry) -> (Vec<(Range<usize>, Mark)>, Carry) {
@@ -467,6 +590,7 @@ fn paint_table(line: &str, mut carry: Carry) -> (Vec<(Range<usize>, Mark)>, Carr
     (spans, carry)
 }
 
+#[allow(clippy::too_many_lines)]
 fn paint_inline(
     line: &str,
     mut index: usize,
@@ -491,7 +615,7 @@ fn paint_inline(
             }
             continue;
         }
-        if !in_code(carry) {
+        if !in_literal(carry) {
             if let Some(end) = link_end(line, index, limit) {
                 paint_link(&mut spans, line, index, end, face(carry, base));
                 index = end;
@@ -524,6 +648,31 @@ fn paint_inline(
                 index = end;
                 continue;
             }
+            if let Some(end) = math_end(line, index, limit) {
+                push_span(&mut spans, index, index.saturating_add(1), marker());
+                push_span(
+                    &mut spans,
+                    index.saturating_add(1),
+                    end.saturating_sub(1),
+                    math_mark(),
+                );
+                push_span(&mut spans, end.saturating_sub(1), end, marker());
+                index = end;
+                continue;
+            }
+            if let Some(end) = tag_end(line, index, limit) {
+                push_span(
+                    &mut spans,
+                    index,
+                    end,
+                    Mark {
+                        face: Face::Tag,
+                        flags: 0,
+                    },
+                );
+                index = end;
+                continue;
+            }
         }
         if let Some((len, close)) = token(line, index, limit, carry) {
             let end = index.saturating_add(len);
@@ -542,11 +691,13 @@ fn paint_inline(
         index = index.saturating_add(char_len_at(line, index, limit).max(1));
         while index < limit
             && line.as_bytes().get(index) != Some(&b'\\')
-            && (in_code(carry) || link_end(line, index, limit).is_none())
+            && (in_literal(carry) || link_end(line, index, limit).is_none())
             && wiki_end(line, index, limit).is_none()
             && auto_end(line, index, limit).is_none()
             && bare_url(line, index, limit).is_none()
             && footnote_end(line, index, limit).is_none()
+            && math_end(line, index, limit).is_none()
+            && tag_end(line, index, limit).is_none()
             && token(line, index, limit, carry).is_none()
         {
             index = index.saturating_add(char_len_at(line, index, limit).max(1));
@@ -586,17 +737,21 @@ fn paint_link(
 }
 
 fn paint_wiki(spans: &mut Vec<(Range<usize>, Mark)>, line: &str, start: usize, end: usize) {
-    let Some(inner) = line.get(start.saturating_add(2)..end.saturating_sub(2)) else {
+    let bang = usize::from(
+        line.get(start..end)
+            .is_some_and(|rest| rest.starts_with('!')),
+    );
+    let open = start.saturating_add(bang);
+    let Some(inner) = line.get(open.saturating_add(2)..end.saturating_sub(2)) else {
         return;
     };
     let label = inner.split_once('|').map_or(inner, |(_, label)| label);
     let label_at = if let Some((target, _)) = inner.split_once('|') {
-        start
-            .saturating_add(2)
+        open.saturating_add(2)
             .saturating_add(target.len())
             .saturating_add(1)
     } else {
-        start.saturating_add(2)
+        open.saturating_add(2)
     };
     push_span(spans, start, label_at, marker());
     push_span(
@@ -604,7 +759,7 @@ fn paint_wiki(spans: &mut Vec<(Range<usize>, Mark)>, line: &str, start: usize, e
         label_at,
         label_at.saturating_add(label.len()),
         Mark {
-            face: Face::Wiki,
+            face: if bang == 1 { Face::Image } else { Face::Wiki },
             flags: 0,
         },
     );
@@ -643,14 +798,23 @@ fn link_end(line: &str, index: usize, limit: usize) -> Option<usize> {
 
 fn wiki_end(line: &str, index: usize, limit: usize) -> Option<usize> {
     let rest = line.get(index..limit)?;
-    if !rest.starts_with("[[") {
+    let (body, extra) = if rest.starts_with("![[") {
+        (rest.get(1..)?, 1)
+    } else if rest.starts_with("[[") {
+        (rest, 0)
+    } else {
         return None;
-    }
-    let close = rest.find("]]")?;
+    };
+    let close = body.find("]]")?;
     if close <= 2 {
         return None;
     }
-    Some(index.saturating_add(close).saturating_add(2))
+    Some(
+        index
+            .saturating_add(extra)
+            .saturating_add(close)
+            .saturating_add(2),
+    )
 }
 
 fn auto_end(line: &str, index: usize, limit: usize) -> Option<usize> {
@@ -703,6 +867,22 @@ fn bare_url(line: &str, index: usize, limit: usize) -> Option<usize> {
     (end > index.saturating_add(scheme)).then_some(end)
 }
 
+fn footnote_def(line: &str) -> Option<usize> {
+    let spaces = leading_spaces(line);
+    if spaces > 3 {
+        return None;
+    }
+    let rest = line.get(spaces..)?;
+    if !rest.starts_with("[^") {
+        return None;
+    }
+    let close = rest.find("]:")?;
+    if close <= 2 {
+        return None;
+    }
+    Some(spaces.saturating_add(close).saturating_add(2))
+}
+
 fn footnote_end(line: &str, index: usize, limit: usize) -> Option<usize> {
     let rest = line.get(index..limit)?;
     if !rest.starts_with("[^") {
@@ -721,62 +901,83 @@ fn token(line: &str, index: usize, limit: usize, carry: Carry) -> Option<(usize,
     if in_code(carry) {
         return rest.starts_with('`').then_some((1, true));
     }
-    if top(carry) == Some(Open::BothStar) && rest.starts_with("***") {
+    if in_comment(carry) {
+        return rest.starts_with("%%").then_some((2, true));
+    }
+    if top(carry) == Some(Open::BothStar)
+        && rest.starts_with("***")
+        && can_close(line, index, 3, limit)
+    {
         return Some((3, true));
     }
-    if top(carry) == Some(Open::BothUnder) && rest.starts_with("___") {
+    if top(carry) == Some(Open::BothUnder)
+        && rest.starts_with("___")
+        && can_close(line, index, 3, limit)
+    {
         return Some((3, true));
     }
-    if top(carry) == Some(Open::StrongStar) && rest.starts_with("**") {
+    if top(carry) == Some(Open::StrongStar)
+        && rest.starts_with("**")
+        && can_close(line, index, 2, limit)
+    {
         return Some((2, true));
     }
-    if top(carry) == Some(Open::StrongUnder) && rest.starts_with("__") {
+    if top(carry) == Some(Open::StrongUnder)
+        && rest.starts_with("__")
+        && can_close(line, index, 2, limit)
+    {
         return Some((2, true));
     }
-    if top(carry) == Some(Open::Strike) && rest.starts_with("~~") {
+    if top(carry) == Some(Open::Strike)
+        && rest.starts_with("~~")
+        && can_close(line, index, 2, limit)
+    {
         return Some((2, true));
     }
-    if top(carry) == Some(Open::Highlight) && rest.starts_with("==") {
+    if top(carry) == Some(Open::Highlight)
+        && rest.starts_with("==")
+        && can_close(line, index, 2, limit)
+    {
         return Some((2, true));
     }
-    if top(carry) == Some(Open::EmStar) && rest.starts_with('*') && !rest.starts_with("**") {
+    if top(carry) == Some(Open::EmStar)
+        && rest.starts_with('*')
+        && !rest.starts_with("**")
+        && can_close(line, index, 1, limit)
+    {
         return Some((1, true));
     }
     if top(carry) == Some(Open::EmUnder)
         && rest.starts_with('_')
         && !rest.starts_with("__")
-        && edge_after_limited(line, index.saturating_add(1), limit)
+        && can_close(line, index, 1, limit)
     {
         return Some((1, true));
     }
-    if rest.starts_with("***") || rest.starts_with("___") {
+    if rest.starts_with("%%") {
+        return Some((2, false));
+    }
+    if !edge_before(line, index) {
+        return None;
+    }
+    if (rest.starts_with("***") || rest.starts_with("___")) && after_mark(line, index, 3, limit) {
         return Some((3, false));
     }
-    if rest.starts_with("**")
+    if (rest.starts_with("**")
         || rest.starts_with("__")
         || rest.starts_with("~~")
-        || rest.starts_with("==")
+        || rest.starts_with("=="))
+        && after_mark(line, index, 2, limit)
     {
         return Some((2, false));
     }
-    if rest.starts_with('`') {
+    if rest.starts_with('`') && after_mark(line, index, 1, limit) {
         return Some((1, false));
     }
-    if rest.starts_with('*')
-        && rest
-            .chars()
-            .nth(1)
-            .is_some_and(|char| !char.is_whitespace())
-    {
+    if rest.starts_with('*') && after_mark(line, index, 1, limit) {
         return Some((1, false));
     }
-    if rest.starts_with('_')
-        && edge_before(line, index)
-        && rest
-            .chars()
-            .nth(1)
-            .is_some_and(|char| !char.is_whitespace())
-    {
+    if rest.starts_with('_') && after_mark(line, index, 1, limit) {
         return Some((1, false));
     }
     None
@@ -796,6 +997,8 @@ fn opened(line: &str, index: usize, limit: usize) -> Open {
         Open::Strike
     } else if rest.starts_with("==") {
         Open::Highlight
+    } else if rest.starts_with("%%") {
+        Open::Comment
     } else if rest.starts_with('`') {
         Open::Code
     } else if rest.starts_with('*') {
@@ -809,6 +1012,9 @@ fn face(carry: Carry, base: Mark) -> Mark {
     if in_code(carry) {
         return code_mark();
     }
+    if in_comment(carry) {
+        return meta_mark();
+    }
     let mut flags = base.flags;
     for index in 0..usize::from(carry.len) {
         match carry.opens.get(index).copied() {
@@ -817,20 +1023,21 @@ fn face(carry: Carry, base: Mark) -> Mark {
             Some(Open::BothStar | Open::BothUnder) => flags |= STRONG | EM,
             Some(Open::Strike) => flags |= STRIKE,
             Some(Open::Highlight) => flags |= HIGH,
-            Some(Open::Code) | None => {}
+            Some(Open::Code | Open::Comment) | None => {}
         }
     }
-    if flags == base.flags {
-        return base;
-    }
     Mark {
-        face: if matches!(base.face, Face::Heading(_)) {
-            Face::Text
-        } else {
-            base.face
-        },
+        face: base.face,
         flags,
     }
+}
+
+fn in_literal(carry: Carry) -> bool {
+    in_code(carry) || in_comment(carry)
+}
+
+fn in_comment(carry: Carry) -> bool {
+    top(carry) == Some(Open::Comment)
 }
 
 fn in_code(carry: Carry) -> bool {
@@ -869,6 +1076,17 @@ fn push_span(spans: &mut Vec<(Range<usize>, Mark)>, start: usize, end: usize, ma
 }
 
 fn lead(line: &str) -> Lead {
+    if let Some(end) = footnote_def(line) {
+        return Lead {
+            skip: end,
+            mark: Mark {
+                face: Face::Link,
+                flags: 0,
+            },
+            base: text_mark(),
+            box_at: None,
+        };
+    }
     if let Some((end, level)) = heading_end(line) {
         return Lead {
             skip: end,
@@ -997,10 +1215,12 @@ fn list_parts(line: &str) -> Option<ListParts> {
     };
     let mut end = spaces.saturating_add(marker);
     let body = line.get(end..).unwrap_or("");
-    let (box_at, done) = if body.starts_with("[ ]") {
-        (Some(end), false)
-    } else if body.starts_with("[x]") || body.starts_with("[X]") {
-        (Some(end), true)
+    let (box_at, done) = if body.len() >= 3
+        && body.as_bytes().first() == Some(&b'[')
+        && body.as_bytes().get(2) == Some(&b']')
+    {
+        let mark = body.as_bytes().get(1).copied().unwrap_or(b' ');
+        (Some(end), mark == b'x' || mark == b'X')
     } else {
         (None, false)
     };
@@ -1035,13 +1255,158 @@ fn is_rule(text: &str) -> bool {
             .all(|char| char == first || char.is_whitespace())
 }
 
-fn fence_marker(text: &str) -> bool {
-    leading_spaces(text) <= 3 && text.trim_start().starts_with("```")
+fn fence_open(text: &str) -> Option<bool> {
+    if leading_spaces(text) > 3 {
+        return None;
+    }
+    let trimmed = text.trim_start();
+    if trimmed.starts_with("```") {
+        Some(false)
+    } else if trimmed.starts_with("~~~") {
+        Some(true)
+    } else {
+        None
+    }
 }
 
-fn fence_closer(text: &str) -> bool {
+fn fence_closer(text: &str, tilde: bool) -> bool {
+    if leading_spaces(text) > 3 {
+        return false;
+    }
     let trimmed = text.trim();
-    trimmed.len() >= 3 && trimmed.chars().all(|char| char == '`')
+    let want = if tilde { '~' } else { '`' };
+    trimmed.len() >= 3 && trimmed.chars().all(|char| char == want)
+}
+
+fn math_block(line: &str) -> Option<bool> {
+    let trimmed = line.trim();
+    if trimmed == "$$" {
+        return Some(false);
+    }
+    if trimmed.starts_with("$$") && trimmed.ends_with("$$") && trimmed.len() > 4 {
+        return Some(true);
+    }
+    if trimmed.starts_with("$$") {
+        return Some(false);
+    }
+    None
+}
+
+fn indent_code_line(line: &str, carry: Carry) -> bool {
+    let spaces = leading_spaces(line);
+    if spaces < 4 || line.trim().is_empty() {
+        return false;
+    }
+    if carry.indent_code {
+        return true;
+    }
+    carry.blank && list_parts(line).is_none() && heading_end(line).is_none()
+}
+
+fn meta_mark() -> Mark {
+    Mark {
+        face: Face::Meta,
+        flags: 0,
+    }
+}
+
+fn math_mark() -> Mark {
+    Mark {
+        face: Face::Math,
+        flags: 0,
+    }
+}
+
+fn callout_mark(kind: u8) -> Mark {
+    Mark {
+        face: Face::Callout(kind),
+        flags: 0,
+    }
+}
+
+fn can_close(line: &str, index: usize, len: usize, limit: usize) -> bool {
+    let before = index == 0
+        || line
+            .get(..index)
+            .and_then(|prefix| prefix.chars().next_back())
+            .is_some_and(|char| !char.is_whitespace());
+    before && edge_after_limited(line, index.saturating_add(len), limit)
+}
+
+fn after_mark(line: &str, index: usize, len: usize, limit: usize) -> bool {
+    line.get(index.saturating_add(len)..limit)
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|char| !char.is_whitespace())
+}
+
+fn math_end(line: &str, index: usize, limit: usize) -> Option<usize> {
+    let rest = line.get(index..limit)?;
+    if !rest.starts_with('$') || rest.starts_with("$$") || !edge_before(line, index) {
+        return None;
+    }
+    let next = rest.chars().nth(1)?;
+    if next.is_whitespace() {
+        return None;
+    }
+    let close = rest.get(1..)?.find('$')?;
+    if close == 0 {
+        return None;
+    }
+    let body = rest.get(1..close.saturating_add(1))?;
+    if body.ends_with(|char: char| char.is_whitespace()) {
+        return None;
+    }
+    Some(index.saturating_add(close).saturating_add(2))
+}
+
+fn tag_end(line: &str, index: usize, limit: usize) -> Option<usize> {
+    if !edge_before(line, index) {
+        return None;
+    }
+    let rest = line.get(index..limit)?;
+    if !rest.starts_with('#') || rest.starts_with("##") {
+        return None;
+    }
+    let mut end = index.saturating_add(1);
+    let mut saw = false;
+    while end < limit {
+        let char = line.get(end..limit)?.chars().next()?;
+        if char.is_ascii_alphanumeric() || matches!(char, '_' | '-' | '/') {
+            saw = true;
+            end = end.saturating_add(char.len_utf8());
+        } else {
+            break;
+        }
+    }
+    while end > index.saturating_add(1) && line.as_bytes().get(end.saturating_sub(1)) == Some(&b'/')
+    {
+        end = end.saturating_sub(1);
+    }
+    (saw && end > index.saturating_add(1)).then_some(end)
+}
+
+fn callout_end(rest: &str) -> Option<usize> {
+    if !rest.starts_with("[!") {
+        return None;
+    }
+    let close = rest.find(']')?;
+    (close > 2).then_some(close.saturating_add(1))
+}
+
+fn callout_kind(body: &str) -> u8 {
+    let name = body
+        .trim()
+        .trim_end_matches(['+', '-'])
+        .trim()
+        .to_ascii_lowercase();
+    match name.as_str() {
+        "tip" | "hint" | "important" | "success" | "check" | "done" => 1,
+        "warning" | "caution" | "attention" => 3,
+        "danger" | "error" | "failure" | "fail" | "missing" | "bug" => 4,
+        "question" | "help" | "faq" => 5,
+        "quote" | "cite" => 6,
+        _ => 0,
+    }
 }
 
 fn leading_spaces(text: &str) -> usize {
@@ -1112,6 +1477,473 @@ pub(super) fn set_task_line(body: &str, line_index: usize, done: bool) -> Option
     None
 }
 
+/// A toolbar action. A word mark wraps the selection or the word under the caret.
+/// A line mark toggles the lines the caret touches. An insert drops a block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FormatKind {
+    Bold,
+    Italic,
+    Strike,
+    Highlight,
+    Code,
+    Heading,
+    List,
+    Task,
+    Quote,
+    Link,
+    Wiki,
+    Image,
+    Table,
+    Rule,
+    Callout,
+    CodeBlock,
+}
+
+pub(super) struct Change {
+    pub anchor: text_editor::Position,
+    pub end: text_editor::Position,
+    pub insert: String,
+    pub after: text_editor::Cursor,
+}
+
+pub(super) fn format_change(text: &str, cursor: text_editor::Cursor, kind: FormatKind) -> Change {
+    match kind {
+        FormatKind::Bold => wrap(text, &cursor, "**", "**"),
+        FormatKind::Italic => wrap(text, &cursor, "*", "*"),
+        FormatKind::Strike => wrap(text, &cursor, "~~", "~~"),
+        FormatKind::Highlight => wrap(text, &cursor, "==", "=="),
+        FormatKind::Code => wrap(text, &cursor, "`", "`"),
+        FormatKind::Heading => map_lines(text, &cursor, cycle_heading),
+        FormatKind::List => map_lines(text, &cursor, toggle_list),
+        FormatKind::Task => map_lines(text, &cursor, toggle_task),
+        FormatKind::Quote => map_lines(text, &cursor, toggle_quote),
+        FormatKind::Link => link_insert(text, &cursor),
+        FormatKind::Wiki => wiki_insert(text, &cursor),
+        FormatKind::Image => image_insert(text, &cursor),
+        FormatKind::Table => block_at_line(text, &cursor, "|  |  |\n| --- | --- |\n|  |  |\n", 2),
+        FormatKind::Rule => rule_insert(text, &cursor),
+        FormatKind::Callout => callout_insert(text, &cursor),
+        FormatKind::CodeBlock => code_block(text, &cursor),
+    }
+}
+
+fn wrap(text: &str, cursor: &text_editor::Cursor, left: &str, right: &str) -> Change {
+    let (mut from, mut to) = range_bytes(text, cursor);
+    if from == to {
+        let (word_from, word_to) = word_bounds(text, from);
+        if word_from != word_to {
+            from = word_from;
+            to = word_to;
+        }
+    }
+    let inner = text.get(from..to).unwrap_or("");
+    if let Some(stripped) = peel(inner, left, right) {
+        return rewrite(text, from, to, stripped, stripped.len(), None);
+    }
+    if surrounded(text, from, to, left, right) {
+        let start = from.saturating_sub(left.len());
+        let end = to.saturating_add(right.len());
+        return rewrite(text, start, end, inner, inner.len(), None);
+    }
+    let mut insert = String::with_capacity(left.len() + inner.len() + right.len());
+    insert.push_str(left);
+    insert.push_str(inner);
+    insert.push_str(right);
+    let cursor_at = if inner.is_empty() {
+        left.len()
+    } else {
+        insert.len()
+    };
+    rewrite(text, from, to, &insert, cursor_at, None)
+}
+
+fn link_insert(text: &str, cursor: &text_editor::Cursor) -> Change {
+    let (from, to, inner) = label_range(text, cursor);
+    let insert = format!("[{inner}](https://)");
+    let url_off = 1 + inner.len() + 2;
+    let url_end = url_off + "https://".len();
+    if inner.is_empty() {
+        rewrite(text, from, to, &insert, 1, None)
+    } else {
+        rewrite(text, from, to, &insert, url_end, Some((url_off, url_end)))
+    }
+}
+
+fn wiki_insert(text: &str, cursor: &text_editor::Cursor) -> Change {
+    let (from, to, inner) = label_range(text, cursor);
+    let insert = format!("[[{inner}]]");
+    let at = if inner.is_empty() { 2 } else { insert.len() };
+    rewrite(text, from, to, &insert, at, None)
+}
+
+fn image_insert(text: &str, cursor: &text_editor::Cursor) -> Change {
+    let (from, to, inner) = label_range(text, cursor);
+    let insert = format!("![{inner}]()");
+    let at = if inner.is_empty() {
+        2
+    } else {
+        insert.len() - 1
+    };
+    rewrite(text, from, to, &insert, at, None)
+}
+
+fn rule_insert(text: &str, cursor: &text_editor::Cursor) -> Change {
+    let at = pos_byte(text, cursor.position);
+    let fresh = at == 0 || text.as_bytes().get(at.saturating_sub(1)) == Some(&b'\n');
+    let insert = if fresh { "---\n" } else { "\n---\n" };
+    rewrite(text, at, at, insert, insert.len(), None)
+}
+
+fn code_block(text: &str, cursor: &text_editor::Cursor) -> Change {
+    let (from, to) = range_bytes(text, cursor);
+    let inner = text.get(from..to).unwrap_or("");
+    if inner.is_empty() {
+        let (insert, at) = own_line(text, from, "```\n\n```\n", "```\n".len());
+        return rewrite(text, from, to, &insert, at, None);
+    }
+    let body = format!("```\n{inner}\n```\n");
+    let (insert, at) = own_line(text, from, &body, "```\n".len() + inner.len());
+    rewrite(text, from, to, &insert, at, None)
+}
+
+fn callout_insert(text: &str, cursor: &text_editor::Cursor) -> Change {
+    let (from, to) = range_bytes(text, cursor);
+    let inner = text.get(from..to).unwrap_or("");
+    let body = if inner.is_empty() {
+        "> [!note] Title\n> \n".to_owned()
+    } else {
+        format!("> [!note] Title\n> {inner}\n")
+    };
+    let title_at = "> [!note] ".len();
+    let (insert, lead) = own_line(text, from, &body, title_at);
+    let title_end = lead + "Title".len();
+    rewrite(text, from, to, &insert, title_end, Some((lead, title_end)))
+}
+
+fn block_at_line(
+    text: &str,
+    cursor: &text_editor::Cursor,
+    body: &str,
+    cursor_off: usize,
+) -> Change {
+    let at = line_end(text, cursor.position.line);
+    let (insert, lead) = own_line(text, at, body, cursor_off);
+    rewrite(text, at, at, &insert, lead, None)
+}
+
+fn map_lines(text: &str, cursor: &text_editor::Cursor, map: fn(&str) -> String) -> Change {
+    let (start, end) = ordered(cursor);
+    let lines = split_lines(text);
+    let last_index = lines.len().saturating_sub(1);
+    let first = start.line.min(last_index);
+    let last = end.line.min(last_index);
+    let from = line_start(text, first);
+    let to = line_end(text, last);
+    let mapped: Vec<String> = lines
+        .iter()
+        .take(last + 1)
+        .skip(first)
+        .map(|line| map(line))
+        .collect();
+    let caret_line = cursor.position.line.min(last).max(first);
+    let old = lines.get(caret_line).copied().unwrap_or("");
+    let new = mapped.get(caret_line - first).map_or("", String::as_str);
+    let column = floor_boundary(
+        new,
+        cursor
+            .position
+            .column
+            .saturating_add(new.len())
+            .saturating_sub(old.len()),
+    );
+    let mut cursor_off: usize = 0;
+    for (index, line) in mapped.iter().enumerate() {
+        if first + index == caret_line {
+            break;
+        }
+        cursor_off = cursor_off.saturating_add(line.len()).saturating_add(1);
+    }
+    cursor_off = cursor_off.saturating_add(column.min(new.len()));
+    rewrite(text, from, to, &mapped.join("\n"), cursor_off, None)
+}
+
+fn cycle_heading(line: &str) -> String {
+    let spaces = leading_spaces(line);
+    let indent = line.get(..spaces).unwrap_or("");
+    if let Some((end, level)) = heading_end(line) {
+        let body = line.get(end..).unwrap_or("");
+        if level >= 3 {
+            return format!("{indent}{body}");
+        }
+        let marks = "#".repeat(usize::from(level.saturating_add(1)));
+        return format!("{indent}{marks} {body}");
+    }
+    let rest = line.get(spaces..).unwrap_or("");
+    format!("{indent}# {rest}")
+}
+
+fn toggle_list(line: &str) -> String {
+    let spaces = leading_spaces(line);
+    let indent = line.get(..spaces).unwrap_or("");
+    if let Some(list) = list_parts(line) {
+        let body = line.get(list.end..).unwrap_or("");
+        return format!("{indent}{body}");
+    }
+    let rest = line.get(spaces..).unwrap_or("");
+    format!("{indent}- {rest}")
+}
+
+fn toggle_task(line: &str) -> String {
+    let spaces = leading_spaces(line);
+    let indent = line.get(..spaces).unwrap_or("");
+    if let Some(list) = list_parts(line) {
+        if list.box_at.is_some() {
+            let body = line.get(list.end..).unwrap_or("").trim_start();
+            return format!("{indent}{body}");
+        }
+        let prefix = line.get(..list.end).unwrap_or("");
+        let body = line.get(list.end..).unwrap_or("");
+        return format!("{prefix}[ ] {body}");
+    }
+    let rest = line.get(spaces..).unwrap_or("");
+    format!("{indent}- [ ] {rest}")
+}
+
+fn toggle_quote(line: &str) -> String {
+    let spaces = leading_spaces(line);
+    let indent = line.get(..spaces).unwrap_or("");
+    let rest = line.get(spaces..).unwrap_or("");
+    if spaces <= 3 && rest.starts_with('>') {
+        let skip = if rest.as_bytes().get(1) == Some(&b' ') {
+            2
+        } else {
+            1
+        };
+        return format!("{indent}{}", rest.get(skip..).unwrap_or(""));
+    }
+    format!("{indent}> {rest}")
+}
+
+fn label_range<'a>(text: &'a str, cursor: &text_editor::Cursor) -> (usize, usize, &'a str) {
+    let (mut from, mut to) = range_bytes(text, cursor);
+    if from == to {
+        let (word_from, word_to) = word_bounds(text, from);
+        if word_from != word_to {
+            from = word_from;
+            to = word_to;
+        }
+    }
+    (from, to, text.get(from..to).unwrap_or(""))
+}
+
+fn own_line(text: &str, at: usize, body: &str, cursor_off: usize) -> (String, usize) {
+    let mut insert = String::new();
+    let mut shift: usize = 0;
+    if at > 0 && text.as_bytes().get(at.saturating_sub(1)) != Some(&b'\n') {
+        insert.push('\n');
+        shift = 1;
+    }
+    insert.push_str(body);
+    if !insert.ends_with('\n') {
+        insert.push('\n');
+    }
+    (insert, shift.saturating_add(cursor_off))
+}
+
+fn rewrite(
+    text: &str,
+    from: usize,
+    to: usize,
+    insert: &str,
+    cursor_off: usize,
+    select: Option<(usize, usize)>,
+) -> Change {
+    let anchor = byte_pos(text, from);
+    let end = byte_pos(text, to);
+    let caret_off = cursor_off.min(insert.len());
+    let selection = select.map(|(start, _)| byte_pos_new(text, from, to, insert, start));
+    let after_off = select.map_or(caret_off, |(_, off)| off).min(insert.len());
+    let after = byte_pos_new(text, from, to, insert, after_off);
+    Change {
+        anchor,
+        end,
+        insert: insert.to_owned(),
+        after: text_editor::Cursor {
+            position: after,
+            selection,
+        },
+    }
+}
+
+fn byte_pos_new(
+    text: &str,
+    from: usize,
+    to: usize,
+    insert: &str,
+    off: usize,
+) -> text_editor::Position {
+    let mut next = String::new();
+    next.push_str(text.get(..from).unwrap_or(""));
+    next.push_str(insert);
+    next.push_str(text.get(to..).unwrap_or(""));
+    byte_pos(&next, from.saturating_add(off.min(insert.len())))
+}
+
+fn ordered(cursor: &text_editor::Cursor) -> (text_editor::Position, text_editor::Position) {
+    let anchor = cursor.selection.unwrap_or(cursor.position);
+    if (anchor.line, anchor.column) <= (cursor.position.line, cursor.position.column) {
+        (anchor, cursor.position)
+    } else {
+        (cursor.position, anchor)
+    }
+}
+
+fn range_bytes(text: &str, cursor: &text_editor::Cursor) -> (usize, usize) {
+    let (start, end) = ordered(cursor);
+    let from = pos_byte(text, start);
+    let to = pos_byte(text, end);
+    (from.min(to), from.max(to))
+}
+
+fn split_lines(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        vec![""]
+    } else {
+        text.split('\n').collect()
+    }
+}
+
+fn line_start(text: &str, line: usize) -> usize {
+    let mut start = 0;
+    for (index, part) in text.split('\n').enumerate() {
+        if index == line {
+            return start;
+        }
+        start = start.saturating_add(part.len()).saturating_add(1);
+    }
+    text.len()
+}
+
+fn line_end(text: &str, line: usize) -> usize {
+    let start = line_start(text, line);
+    let part = text.get(start..).unwrap_or("");
+    start.saturating_add(part.find('\n').unwrap_or(part.len()))
+}
+
+fn pos_byte(text: &str, pos: text_editor::Position) -> usize {
+    let start = line_start(text, pos.line);
+    let line = text.get(start..).unwrap_or("");
+    let line = line
+        .get(..line.find('\n').unwrap_or(line.len()))
+        .unwrap_or("");
+    start.saturating_add(floor_boundary(line, pos.column.min(line.len())))
+}
+
+fn byte_pos(text: &str, byte: usize) -> text_editor::Position {
+    let byte = byte.min(text.len());
+    let mut seen: usize = 0;
+    for (line, part) in text.split('\n').enumerate() {
+        let end = seen.saturating_add(part.len());
+        if byte <= end {
+            return text_editor::Position {
+                line,
+                column: byte.saturating_sub(seen),
+            };
+        }
+        seen = end.saturating_add(1);
+    }
+    text_editor::Position { line: 0, column: 0 }
+}
+
+fn floor_boundary(line: &str, column: usize) -> usize {
+    let mut column = column.min(line.len());
+    while column > 0 && !line.is_char_boundary(column) {
+        column -= 1;
+    }
+    column
+}
+
+fn word_bounds(text: &str, at: usize) -> (usize, usize) {
+    let at = at.min(text.len());
+    let mut start = at;
+    while start > 0 {
+        let Some(char) = text
+            .get(..start)
+            .and_then(|prefix| prefix.chars().next_back())
+        else {
+            break;
+        };
+        if !is_word(char) {
+            break;
+        }
+        start = start.saturating_sub(char.len_utf8());
+    }
+    let mut end = at;
+    while end < text.len() {
+        let Some(char) = text.get(end..).and_then(|rest| rest.chars().next()) else {
+            break;
+        };
+        if !is_word(char) {
+            break;
+        }
+        end = end.saturating_add(char.len_utf8());
+    }
+    (start, end)
+}
+
+fn is_word(char: char) -> bool {
+    char.is_alphanumeric() || char == '_' || char == '\''
+}
+
+fn surrounded(text: &str, from: usize, to: usize, left: &str, right: &str) -> bool {
+    if from < left.len()
+        || !text
+            .get(..from)
+            .is_some_and(|prefix| prefix.ends_with(left))
+    {
+        return false;
+    }
+    if !text
+        .get(to..)
+        .is_some_and(|suffix| suffix.starts_with(right))
+    {
+        return false;
+    }
+    let Some(mark) = left.chars().next() else {
+        return false;
+    };
+    if !left.chars().all(|item| item == mark) {
+        return true;
+    }
+    let before = from.saturating_sub(left.len());
+    if before > 0
+        && text
+            .get(..before)
+            .and_then(|prefix| prefix.chars().next_back())
+            == Some(mark)
+    {
+        return false;
+    }
+    let after = to.saturating_add(right.len());
+    text.get(after..).and_then(|suffix| suffix.chars().next()) != Some(mark)
+}
+
+fn peel<'a>(inner: &'a str, left: &str, right: &str) -> Option<&'a str> {
+    if inner.len() < left.len() + right.len() || !inner.starts_with(left) || !inner.ends_with(right)
+    {
+        return None;
+    }
+    let mark = left.chars().next()?;
+    if left.chars().all(|char| char == mark) && inner[left.len()..].starts_with(mark) {
+        return None;
+    }
+    let before_right = &inner[..inner.len() - right.len()];
+    if right.chars().all(|char| char == mark) && before_right.ends_with(mark) {
+        return None;
+    }
+    Some(&inner[left.len()..inner.len() - right.len()])
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1166,7 +1998,15 @@ mod tests {
         let (spans, carry) = paint(heading, Carry::default());
         assert!(hit(&spans, heading, "## ", marker()));
         assert!(hit(&spans, heading, "Title ", heading_mark(2)));
-        assert!(hit(&spans, heading, "now", strong()));
+        assert!(hit(
+            &spans,
+            heading,
+            "now",
+            Mark {
+                face: Face::Heading(2),
+                flags: STRONG,
+            }
+        ));
         assert_eq!(carry.len, 0);
     }
 
@@ -1297,7 +2137,15 @@ mod tests {
 
         let note = "> [!note] Hello";
         let (spans, _) = paint(note, Carry::default());
-        assert!(hit(&spans, note, "[!note]", marker()));
+        assert!(hit(
+            &spans,
+            note,
+            "[!note]",
+            Mark {
+                face: Face::Callout(0),
+                flags: 0,
+            }
+        ));
 
         let foot = "see [^1]";
         let (spans, _) = paint(foot, Carry::default());
@@ -1332,5 +2180,103 @@ mod tests {
         spans
             .iter()
             .any(|(range, kind)| *kind == mark && line.get(range.start..range.end) == Some(text))
+    }
+
+    fn caret(line: usize, column: usize) -> super::text_editor::Cursor {
+        super::text_editor::Cursor {
+            position: super::text_editor::Position { line, column },
+            selection: None,
+        }
+    }
+
+    fn applied(text: &str, cursor: super::text_editor::Cursor, kind: super::FormatKind) -> String {
+        let change = super::format_change(text, cursor, kind);
+        let from = super::pos_byte(text, change.anchor);
+        let to = super::pos_byte(text, change.end);
+        let mut out = String::new();
+        out.push_str(text.get(..from).unwrap_or(""));
+        out.push_str(&change.insert);
+        out.push_str(text.get(to..).unwrap_or(""));
+        out
+    }
+
+    #[test]
+    fn word_marks_wrap_the_word_and_toggle_off() {
+        let text = "see bold now";
+        let once = applied(text, caret(0, 6), super::FormatKind::Bold);
+        assert_eq!(once, "see **bold** now");
+        let twice = applied(&once, caret(0, 8), super::FormatKind::Bold);
+        assert_eq!(twice, "see bold now");
+    }
+
+    #[test]
+    fn line_marks_toggle_and_inserts_drop_a_block() {
+        assert_eq!(
+            applied("milk", caret(0, 1), super::FormatKind::Task),
+            "- [ ] milk"
+        );
+        assert_eq!(
+            applied("- [ ] milk", caret(0, 4), super::FormatKind::Task),
+            "milk"
+        );
+        assert_eq!(
+            applied("title", caret(0, 0), super::FormatKind::Heading),
+            "# title"
+        );
+        assert_eq!(
+            applied("# title", caret(0, 3), super::FormatKind::Heading),
+            "## title"
+        );
+        assert_eq!(
+            applied("docs", caret(0, 2), super::FormatKind::Link),
+            "[docs](https://)"
+        );
+        assert_eq!(
+            applied("above", caret(0, 5), super::FormatKind::Rule),
+            "above\n---\n"
+        );
+    }
+
+    #[test]
+    fn comments_math_tags_and_callouts_read_as_typed() {
+        let comment = "keep %%secret%% here";
+        let (spans, carry) = paint(comment, Carry::default());
+        assert!(hit(
+            &spans,
+            comment,
+            "secret",
+            Mark {
+                face: Face::Meta,
+                flags: 0
+            }
+        ));
+        assert_eq!(carry.len, 0);
+        let math = "energy $e=mc^2$ today";
+        let (spans, _) = paint(math, Carry::default());
+        assert!(hit(
+            &spans,
+            math,
+            "e=mc^2",
+            Mark {
+                face: Face::Math,
+                flags: 0
+            }
+        ));
+        let tag = "see #clinic/today.";
+        let (spans, _) = paint(tag, Carry::default());
+        assert!(hit(
+            &spans,
+            tag,
+            "#clinic/today",
+            Mark {
+                face: Face::Tag,
+                flags: 0
+            }
+        ));
+        let custom = "- [?] ask";
+        let lines = task_lines(custom);
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].done);
+        assert_eq!(lines[0].text, "ask");
     }
 }

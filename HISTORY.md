@@ -4,6 +4,12 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-11 — the note owns its toolbar, and a loose task is still a line
+
+The format row sits in the note column, above the editor, not above the list. On a narrow window it stays at the bottom. The buttons are labeled Word, Line, and Insert. A word button wraps the word or the selection and toggles off. A line button toggles the prefix. An insert drops a link, table, rule, callout, or code block. The preview also reads comments, math, tags, embeds, callouts, and footnote definitions. The editor still cannot change the size of one span, and a strike is still a color, not a line through the letters.
+
+A task added on the Tasks screen is a `- [ ]` line in a note titled Tasks. That note is created the first time. It is not a new record. Checking a box still writes the line back. Send to chat asks which conversation, then waits for Send. Chat bubbles stay inside the pane as the window gets narrower, and the words wrap. Opening the window draws two lines longer than the frame, drifting across it like a breeze, for a moment.
+
 ## 2026-11-10 — the window fits a small frame, and a chat file stays local
 
 The note editor covers the marks people actually type: headings, emphasis, strike, highlight, code, quotes, lists, tasks, tables, links, images, and wikilinks. The marks still stay in the text. A heading is still not a larger font. The editor cannot change the size of one span.
