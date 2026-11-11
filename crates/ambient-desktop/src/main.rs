@@ -5,6 +5,7 @@
 //! Sync, pairing, and chat call `ambient-cli`. This file does not seal events.
 //! The relay it can start is cleartext on `127.0.0.1` only.
 
+use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -124,6 +125,9 @@ struct App {
     detail: bool,
     pending_files: Vec<PathBuf>,
     task_draft: String,
+    note_task_draft: String,
+    task_labels: BTreeMap<usize, String>,
+    confirm_delete: bool,
     send_open: bool,
     send_choice: Option<String>,
     boot_at: Instant,
@@ -190,6 +194,21 @@ enum Message {
     Format(FormatKind),
     TaskDraft(String),
     AddTask,
+    NoteTaskDraft(String),
+    AddNoteTask,
+    TaskLabel {
+        line: usize,
+        text: String,
+    },
+    RenameTask(usize),
+    RemoveTask(usize),
+    SetOpenTask {
+        line: usize,
+        done: bool,
+    },
+    AskDelete,
+    CancelDelete,
+    DeleteNote,
     ChooseSend(String),
     ConfirmSend,
     CancelSend,
@@ -273,6 +292,9 @@ impl App {
             detail: false,
             pending_files: Vec::new(),
             task_draft: String::new(),
+            note_task_draft: String::new(),
+            task_labels: BTreeMap::new(),
+            confirm_delete: false,
             send_open: false,
             send_choice: None,
             boot_at: Instant::now(),
@@ -621,6 +643,44 @@ impl App {
             }
             Message::AddTask => {
                 self.add_loose_task();
+                Task::none()
+            }
+            Message::NoteTaskDraft(text) => {
+                self.note_task_draft = text;
+                Task::none()
+            }
+            Message::AddNoteTask => {
+                self.add_note_task();
+                Task::none()
+            }
+            Message::TaskLabel { line, text } => {
+                self.task_labels.insert(line, text);
+                Task::none()
+            }
+            Message::RenameTask(line) => {
+                self.rename_note_task(line);
+                Task::none()
+            }
+            Message::RemoveTask(line) => {
+                self.remove_note_task(line);
+                Task::none()
+            }
+            Message::SetOpenTask { line, done } => {
+                self.set_open_task(line, done);
+                Task::none()
+            }
+            Message::AskDelete => {
+                if self.selected.is_some() || self.editor_dirty() {
+                    self.confirm_delete = true;
+                }
+                Task::none()
+            }
+            Message::CancelDelete => {
+                self.confirm_delete = false;
+                Task::none()
+            }
+            Message::DeleteNote => {
+                self.delete_open_note();
                 Task::none()
             }
             Message::ChooseSend(id) => {
@@ -1191,6 +1251,10 @@ impl App {
         }
         body = body.push(markdown::view(&self.body));
         body = body.push(self.note_media());
+        if !self.send_open {
+            body = body.push(hairline());
+            body = body.push(self.note_tasks());
+        }
         if self.send_open {
             body = body.push(text("Which chat?").size(13).color(ink.muted));
             let mut choices = column![].spacing(4).width(Fill);
@@ -1218,17 +1282,116 @@ impl App {
                 ]
                 .spacing(8),
             );
+        } else if self.confirm_delete {
+            body = body.push(self.delete_confirm());
         } else {
-            let mut actions = row![action_label("Save", Message::Save)].spacing(8);
-            if self.selected.is_some()
-                || !self.body.text().is_empty()
-                || !self.title_text.is_empty()
-            {
-                actions = actions.push(ghost_label("Send to chat", Message::SendNoteToChat));
-            }
-            body = body.push(actions);
+            body = body.push(self.note_actions());
         }
         body.into()
+    }
+
+    fn note_actions(&self) -> Element<'_, Message> {
+        let mut actions = row![
+            ghost_label("New", Message::NewNote),
+            action_label("Save", Message::Save),
+        ]
+        .spacing(8);
+        if self.selected.is_some() || self.editor_dirty() {
+            let label = if self.selected.is_some() {
+                "Delete"
+            } else {
+                "Discard"
+            };
+            actions = actions.push(ghost_label(label, Message::AskDelete));
+        }
+        if self.selected.is_some() || !self.body.text().is_empty() || !self.title_text.is_empty() {
+            actions = actions.push(ghost_label("Send to chat", Message::SendNoteToChat));
+        }
+        actions.into()
+    }
+
+    fn delete_confirm(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let saved = self.selected.is_some();
+        let prompt = if saved {
+            "Delete this note? It leaves the list. Unsaved edits are dropped. The older copy stays in the log."
+        } else {
+            "Discard this unsaved note?"
+        };
+        let verb = if saved { "Delete note" } else { "Discard" };
+        column![
+            text(prompt).size(14).color(ink.muted),
+            row![
+                action_label(verb, Message::DeleteNote),
+                ghost_label("Cancel", Message::CancelDelete),
+            ]
+            .spacing(8),
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    fn note_tasks(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let tasks = markdown::task_lines(&self.body.text());
+        let block = column![
+            text("Tasks in this note").font(serif()).size(18),
+            row![
+                text_input("Add a task", &self.note_task_draft)
+                    .on_input(Message::NoteTaskDraft)
+                    .on_submit(Message::AddNoteTask)
+                    .padding(10)
+                    .width(Fill)
+                    .style(field_style),
+                action_label("Add", Message::AddNoteTask),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .width(Fill),
+            text("A checkbox line in this note. Enter saves a renamed line.")
+                .size(13)
+                .color(ink.muted),
+        ]
+        .spacing(8)
+        .width(Fill);
+        if tasks.is_empty() {
+            return block.into();
+        }
+        let mut rows = column![].spacing(6).width(Fill);
+        for task in &tasks {
+            rows = rows.push(self.note_task_row(task));
+        }
+        let mut height = 0.0_f32;
+        for _ in &tasks {
+            height = (height + 40.0).min(168.0);
+        }
+        block
+            .push(scrollable(rows).height(height).width(Fill))
+            .into()
+    }
+
+    fn note_task_row(&self, task: &markdown::TaskLine) -> Element<'_, Message> {
+        let line = task.line;
+        let shown = self
+            .task_labels
+            .get(&line)
+            .cloned()
+            .unwrap_or_else(|| task.text.clone());
+        row![
+            checkbox(task.done).on_toggle(move |done| Message::SetOpenTask { line, done }),
+            text_input("", &shown)
+                .on_input(move |text| Message::TaskLabel { line, text })
+                .on_submit(Message::RenameTask(line))
+                .padding([6, 8])
+                .size(15)
+                .width(Fill)
+                .style(field_style),
+            ghost_label("Remove", Message::RemoveTask(line)),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .width(Fill)
+        .into()
     }
 
     fn chat_pane(&self) -> Element<'_, Message> {
@@ -1505,6 +1668,9 @@ impl App {
 
     fn show_note(&mut self, id: &str) {
         self.send_open = false;
+        self.confirm_delete = false;
+        self.task_labels.clear();
+        self.note_task_draft.clear();
         if self.selected.as_deref() == Some(id) && self.editor_dirty() {
             self.screen = Screen::Notes;
             self.sheet = Sheet::None;
@@ -1553,6 +1719,9 @@ impl App {
 
     fn clear_editor(&mut self) {
         self.send_open = false;
+        self.confirm_delete = false;
+        self.task_labels.clear();
+        self.note_task_draft.clear();
         self.remember_unsaved();
         let stash = self
             .unsaved
@@ -1623,6 +1792,7 @@ impl App {
                 self.disk_body = body;
                 self.edited_at = None;
                 self.conflicts.clear();
+                self.confirm_delete = false;
                 self.message.clear();
                 self.reload();
                 self.writes = self.writes.saturating_add(1);
@@ -2519,6 +2689,133 @@ impl App {
             self.task_draft.clear();
             self.say("Added to Tasks.");
         }
+    }
+
+    fn add_note_task(&mut self) {
+        let label = self.note_task_draft.trim().replace(['\n', '\r'], " ");
+        if label.is_empty() {
+            self.say("Write the task first.");
+            return;
+        }
+        if self.notebook.is_none() {
+            self.say("Folder is not open.");
+            return;
+        }
+        if !self.conflicts.is_empty() {
+            self.say("Two versions. Write the one you want to keep, then save.");
+            return;
+        }
+        let mut next = self.body.text();
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str("- [ ] ");
+        next.push_str(&label);
+        next.push('\n');
+        self.write_open_body(&next);
+        self.note_task_draft.clear();
+        if self.message.is_empty() {
+            self.say("Added to this note.");
+        }
+    }
+
+    fn rename_note_task(&mut self, line: usize) {
+        let Some(label) = self.task_labels.get(&line).cloned() else {
+            return;
+        };
+        if !self.conflicts.is_empty() {
+            self.say("Two versions. Write the one you want to keep, then save.");
+            return;
+        }
+        let Some(next) = markdown::rename_task_line(&self.body.text(), line, &label) else {
+            self.task_labels.remove(&line);
+            return;
+        };
+        self.write_open_body(&next);
+    }
+
+    fn remove_note_task(&mut self, line: usize) {
+        if !self.conflicts.is_empty() {
+            self.say("Two versions. Write the one you want to keep, then save.");
+            return;
+        }
+        let Some(next) = markdown::remove_task_line(&self.body.text(), line) else {
+            return;
+        };
+        self.write_open_body(&next);
+        if self.message.is_empty() {
+            self.say("Removed.");
+        }
+    }
+
+    fn set_open_task(&mut self, line: usize, done: bool) {
+        if !self.conflicts.is_empty() {
+            self.say("Two versions. Write the one you want to keep, then save.");
+            return;
+        }
+        let Some(next) = markdown::set_task_line(&self.body.text(), line, done) else {
+            return;
+        };
+        self.write_open_body(&next);
+    }
+
+    fn write_open_body(&mut self, next: &str) {
+        self.task_labels.clear();
+        self.body.load(next);
+        self.edited_at = Some(Instant::now());
+        if self.notebook.is_some() {
+            self.save_keeping_editor();
+        }
+    }
+
+    fn delete_open_note(&mut self) {
+        self.confirm_delete = false;
+        let Some(id) = self.selected.clone() else {
+            self.discard_draft();
+            self.say("Discarded.");
+            return;
+        };
+        let saved = {
+            let _guard = io_lock();
+            let Some(book) = self.notebook.as_ref() else {
+                self.say("Folder is not open.");
+                return;
+            };
+            book.edit(&id, "", ambient_cli::DELETED_BODY)
+        };
+        match saved {
+            Ok(()) => {
+                self.unsaved
+                    .retain(|(key, _, _)| key.as_deref() != Some(id.as_str()));
+                self.selected = None;
+                self.title_text.clear();
+                self.body.load("");
+                self.disk_title.clear();
+                self.disk_body.clear();
+                self.conflicts.clear();
+                self.note_writer.clear();
+                self.edited_at = None;
+                self.task_labels.clear();
+                self.note_task_draft.clear();
+                self.writes = self.writes.saturating_add(1);
+                self.pending = true;
+                self.reload();
+                self.say("Deleted. It has left the list.");
+            }
+            Err(err) => self.message = err.to_string(),
+        }
+    }
+
+    fn discard_draft(&mut self) {
+        self.unsaved.retain(|(key, _, _)| key.is_some());
+        self.title_text.clear();
+        self.body.load("");
+        self.disk_title.clear();
+        self.disk_body.clear();
+        self.edited_at = None;
+        self.task_labels.clear();
+        self.note_task_draft.clear();
+        self.confirm_delete = false;
     }
 
     fn write_note(&mut self, id: &str, title: &str, body: &str) {

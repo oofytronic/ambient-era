@@ -19,7 +19,9 @@ mod sync;
 
 pub use draft::{Draft, Shortcut, shortcut};
 pub use notes::{CliError, run};
-pub use session::{DeviceLine, NoteSummary, Notebook, ShownHead, ShownNote};
+pub use session::{
+    DELETED_BODY, DeviceLine, NoteSummary, Notebook, ShownHead, ShownNote, note_is_deleted,
+};
 
 pub use sync::{INTRODUCTION, NetMode, NetSetting, check_relay_url};
 

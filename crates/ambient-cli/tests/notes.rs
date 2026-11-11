@@ -39,6 +39,30 @@ fn create_edit_and_search_offline() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn a_deleted_snapshot_leaves_the_list() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("ambient-cli-del-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.to_string_lossy().to_string();
+    run_ok(&["init", &path], "")?;
+    let id = run_ok(&["add", &path, "Market"], "buy milk")?;
+    let keep = run_ok(&["add", &path, "Keep"], "still here")?;
+    run_ok(&["edit", &path, id.trim(), ""], ambient_cli::DELETED_BODY)?;
+    let listed = run_ok(&["list", &path], "")?;
+    if listed.contains(id.trim()) || listed.contains("Market") {
+        return Err(format!("deleted note still listed: {listed}"));
+    }
+    if !listed.contains(keep.trim()) || !listed.contains("Keep") {
+        return Err(format!("the other note left the list: {listed}"));
+    }
+    let found = run_ok(&["search", &path, "ambient"], "")?;
+    if found.contains(id.trim()) {
+        return Err(format!("search still returned the deleted note: {found}"));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
 fn run_ok(args: &[&str], stdin: &str) -> Result<String, String> {
     let mut input = Cursor::new(stdin.as_bytes());
     let mut output = Vec::new();

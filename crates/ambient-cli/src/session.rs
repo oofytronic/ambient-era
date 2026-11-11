@@ -17,6 +17,18 @@ use ambient_store::{read_log, write_log};
 use crate::keys::{self, Local};
 use crate::notes::CliError;
 
+/// Body of a snapshot that means the note was deleted.
+///
+/// The event is still `note.put`. The list hides the note when every current
+/// head is only this marker. The earlier text stays in the log.
+pub const DELETED_BODY: &str = "%%ambient-deleted%%";
+
+/// True when a snapshot body is the delete marker and nothing else.
+#[must_use]
+pub fn note_is_deleted(body: &str) -> bool {
+    body.trim() == DELETED_BODY
+}
+
 /// One note in a list.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NoteSummary {
@@ -162,6 +174,7 @@ impl Notebook {
         Ok(view
             .notes
             .iter()
+            .filter(|(_, heads)| !heads_are_deleted(heads))
             .map(|(id, heads)| summary(id, heads, &item.projected.names))
             .collect())
     }
@@ -211,7 +224,7 @@ impl Notebook {
                 Ok(view
                     .notes
                     .iter()
-                    .filter(|(id, _)| wanted.contains(&hex(*id)))
+                    .filter(|(id, heads)| wanted.contains(&hex(*id)) && !heads_are_deleted(heads))
                     .map(|(id, heads)| summary(id, heads, &names))
                     .collect())
             }
@@ -575,6 +588,9 @@ fn search_scan(
 ) -> Vec<NoteSummary> {
     let mut found = Vec::new();
     for (id, heads) in &view.notes {
+        if heads_are_deleted(heads) {
+            continue;
+        }
         if heads
             .iter()
             .any(|head| head.title.contains(query) || head.body.contains(query))
@@ -583,6 +599,10 @@ fn search_scan(
         }
     }
     found
+}
+
+fn heads_are_deleted(heads: &[ambient_spaces::NoteHead]) -> bool {
+    !heads.is_empty() && heads.iter().all(|head| note_is_deleted(&head.body))
 }
 
 fn summary(

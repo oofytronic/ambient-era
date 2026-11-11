@@ -1447,6 +1447,73 @@ pub(super) fn task_lines(body: &str) -> Vec<TaskLine> {
     lines
 }
 
+/// Removes one checkbox line. `None` when that line is not a task.
+pub(super) fn remove_task_line(body: &str, line_index: usize) -> Option<String> {
+    let (start, end) = line_span(body, line_index)?;
+    let line = body.get(start..end)?;
+    let parts = list_parts(line)?;
+    parts.box_at?;
+    let drop_end = if body.as_bytes().get(end) == Some(&b'\n') {
+        end.saturating_add(1)
+    } else {
+        end
+    };
+    let mut out = String::with_capacity(body.len());
+    out.push_str(body.get(..start).unwrap_or(""));
+    out.push_str(body.get(drop_end..).unwrap_or(""));
+    Some(out)
+}
+
+/// Replaces the words of one checkbox line. The box and its done mark stay.
+/// `None` when that line is not a task, the label is empty, or it already matches.
+pub(super) fn rename_task_line(body: &str, line_index: usize, label: &str) -> Option<String> {
+    let label = label.trim().replace(['\n', '\r'], " ");
+    if label.is_empty() {
+        return None;
+    }
+    let (start, end) = line_span(body, line_index)?;
+    let line = body.get(start..end)?;
+    let parts = list_parts(line)?;
+    parts.box_at?;
+    let prefix = task_prefix(line, parts.end);
+    let new_line = format!("{prefix}{label}");
+    if new_line == line {
+        return None;
+    }
+    let mut out = String::with_capacity(body.len());
+    out.push_str(body.get(..start).unwrap_or(""));
+    out.push_str(&new_line);
+    out.push_str(body.get(end..).unwrap_or(""));
+    Some(out)
+}
+
+fn task_prefix(line: &str, end: usize) -> String {
+    let prefix = line.get(..end).unwrap_or("");
+    if prefix.ends_with(' ') {
+        prefix.to_owned()
+    } else {
+        format!("{prefix} ")
+    }
+}
+
+fn line_span(body: &str, line_index: usize) -> Option<(usize, usize)> {
+    let mut start = 0;
+    for index in 0..=line_index {
+        let rest = body.get(start..)?;
+        let end = rest
+            .find('\n')
+            .map_or(body.len(), |at| start.saturating_add(at));
+        if index == line_index {
+            return Some((start, end));
+        }
+        if end == body.len() {
+            return None;
+        }
+        start = end.saturating_add(1);
+    }
+    None
+}
+
 /// Writes `[x]` or `[ ]` on one line. `None` when that line is not a task, or it already matches.
 pub(super) fn set_task_line(body: &str, line_index: usize, done: bool) -> Option<String> {
     let mut start = 0;
@@ -2174,6 +2241,23 @@ mod tests {
         assert_eq!(next, "keep\n- milk\n- [x] call\n- [x] done\n");
         assert!(set_task_line(&next, 2, true).is_none());
         assert!(set_task_line(body, 1, true).is_none());
+    }
+
+    #[test]
+    fn a_task_line_can_be_renamed_or_removed() {
+        let body = "keep\n- [ ] one\n- [x] two\n";
+        assert_eq!(
+            super::remove_task_line(body, 1).as_deref(),
+            Some("keep\n- [x] two\n")
+        );
+        assert!(super::remove_task_line(body, 0).is_none());
+        assert_eq!(
+            super::rename_task_line(body, 2, "bread").as_deref(),
+            Some("keep\n- [ ] one\n- [x] bread\n")
+        );
+        assert!(super::rename_task_line(body, 2, "two").is_none());
+        assert!(super::rename_task_line(body, 2, "  ").is_none());
+        assert!(super::rename_task_line(body, 0, "nope").is_none());
     }
 
     #[test]

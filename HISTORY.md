@@ -4,6 +4,12 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-11 — a note is deleted by a later snapshot
+
+The notes tab creates, opens, edits, and deletes a note. Delete asks first. The write is still `note.put`: the body is only `%%ambient-deleted%%`, and the list hides the note when every head is that snapshot. The older text stays in the log. It is not a new event type.
+
+Tasks in the open note are the checkbox lines already there. Add, rename, check, and remove write that line. Enter saves a renamed line. Backspace is not involved. The Tasks screen is still the same view across notes.
+
 ## 2026-11-11 — enter continues a list, and a heading stays one size
 
 Enter on a list or a task inserts the next marker, and splits the line if the caret is in the middle. A new task is unchecked. Backspace on an empty item removes the marker. This is still the same checkbox line, not a new record.
