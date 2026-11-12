@@ -1,6 +1,6 @@
 # Agents
 
-Recorded 2026-11-12. This is not a v0.1 feature. Do not scaffold a runtime, a supervisor, or a new record until a spec says the merge rule changed. The v0.1 fence in [ARCHITECTURE.md](../ARCHITECTURE.md) still holds: no running agent.
+Recorded 2026-11-12. The owner's note, kept as written, is [agent-layer.md](agent-layer.md). This file is how that note is read against the app that exists. It is not a v0.1 feature. Do not scaffold a runtime, a supervisor, or a new record until a spec says the merge rule changed. The v0.1 fence in [ARCHITECTURE.md](../ARCHITECTURE.md) still holds: no running agent.
 
 An agent is a short-lived grant around a model. It is not a teammate, a bot with a memory, or a second user.
 

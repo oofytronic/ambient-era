@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-12 — the agent note is kept in full
+
+The owner's note is [docs/agent-layer.md](docs/agent-layer.md), as written. [docs/agents.md](docs/agents.md) is how that note is read against the app. The decision is unchanged: an agent is a short-lived grant, not a teammate, and it is not v0.1. This supersedes the line that said the shape lived only in docs/agents.md.
+
 ## 2026-11-12 — an agent is a short-lived grant
 
 Recorded in [docs/agents.md](docs/agents.md). Not built. An agent spawns with nothing, receives a scoped key that expires, proposes actions, and dies. It keeps no memory. A supervisor matches triggers and does not reason. What lasts is in the notes, the tasks, the messages, and a signed local log. A shared room still requires every member's agreement before an agent reads it. This does not change v0.1.

@@ -187,6 +187,8 @@ Notable shifts: groups ride on v0.1's primitive instead of arriving as a rebuild
 
 ## 11. Local AI agent
 
+> Later note: [docs/agent-layer.md](docs/agent-layer.md) is the agreed shape. Where this section disagrees with it, that note wins, except a shared Space still needs every member's consent, and none of this is v0.1. A remote model may run for a harder job. Only the granted slice leaves the machine, and the threat model has to say that before an adapter exists.
+
 The original frames the tension correctly: E2EE vs. agents. My resolution:
 
 - **Local inference by default.** On-device models for summarize/search/draft over your own data; the plaintext never leaves the device.

@@ -67,7 +67,7 @@ Do not add an object graph of typed things with relations. That is a second mode
 | Weave | A citation from a chat to a creation, already just a copied message in v0.1 | The sidebar is a projection, not a new protocol |
 | Public identity and feed | Signed, unsealed logs. A second persona. | Must not be built by relaxing the private-Space rules |
 | Phone clients | SwiftUI and Compose over the same core. Content-free push. | Desktop first |
-| Agent | A short-lived scoped grant. See [docs/agents.md](docs/agents.md). Every member must agree before it reads a shared Space | No agent runtime in the core. Not v0.1 |
+| Agent | A short-lived scoped grant. The note is [docs/agent-layer.md](docs/agent-layer.md). How to read it is [docs/agents.md](docs/agents.md). Every member must agree before it reads a shared Space | No agent runtime in the core. Not v0.1 |
 
 These are the structural problems that decide whether a later version is still user-owned. They are not v0.1 work. Do not scaffold them. Each one has to be a Space, a grant on a Space, or a copy. None of them is a second authority beside the owner.
 

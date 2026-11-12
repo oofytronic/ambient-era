@@ -13,6 +13,7 @@ Guidance for AI coding agents and human contributors. Each crate under `crates/`
 7. [docs/STACK.md](docs/STACK.md): the stack and why.
 8. [HISTORY.md](HISTORY.md): why the direction changed. Add an entry when a turn changes a locked choice.
 9. [VISION.md](VISION.md): background. Where it disagrees with an ADR, the spec, or STACK, those win.
+10. [docs/agent-layer.md](docs/agent-layer.md): the agent note, kept as written. Not v0.1. [docs/agents.md](docs/agents.md) is how to read it.
 
 ## Commands
 
