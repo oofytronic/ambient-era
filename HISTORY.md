@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-12 — a plain word stays on the line
+
+The painter only recorded marks. A plain word left the caret and was not drawn, so the next word started at the left edge. The page now draws the unmarked text as well. The saved text is unchanged.
+
 ## 2026-11-12 — a settled word leaves the marks
 
 The page draws a word as soon as its format is closed, one word at a time, and the caret stays in the gap after it. A click in a settled word puts the caret in that word and leaves the marks hidden. A heading is a real size, including on the word being typed. A strike is a line through the letters once that word has settled. The saved text is still the markdown, marks included. This supersedes the lines that said a heading is not a larger size and that the editor cannot change the size of one span.

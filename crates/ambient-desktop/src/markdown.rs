@@ -2732,22 +2732,39 @@ fn pieces_between(
             },
         });
     }
+    let plain = look_of(lead.base, dark);
+    let limit = show.end.min(line.len());
+    let mut cursor = show.start.min(limit);
     for (range, mark) in spans {
+        if range.end <= cursor || range.start >= limit {
+            continue;
+        }
+        let from = range.start.max(cursor);
+        if from > cursor {
+            push_slice(&mut out, line, cursor, from, base, plain);
+            cursor = from;
+        }
         if range.end <= lead.skip {
+            cursor = range.end.min(limit);
             continue;
         }
-        let start = range.start.max(lead.skip).max(show.start);
-        let end = range.end.min(show.end);
-        if start >= end {
+        let draw_to = range.end.min(limit);
+        let draw_from = cursor.max(lead.skip);
+        if draw_from > cursor {
+            cursor = draw_from;
+        }
+        if cursor >= draw_to {
             continue;
         }
-        if mark.face == Face::Marker && hide_marker(line, start..end, &unclosed) {
+        if mark.face == Face::Marker && hide_marker(line, cursor..draw_to, &unclosed) {
+            cursor = draw_to;
             continue;
         }
-        let Some(slice) = line.get(start..end) else {
-            continue;
-        };
-        push_words(&mut out, slice, start, base, look_of(mark, dark));
+        push_slice(&mut out, line, cursor, draw_to, base, look_of(mark, dark));
+        cursor = draw_to;
+    }
+    if cursor < limit {
+        push_slice(&mut out, line, cursor, limit, base, plain);
     }
     out
 }
@@ -2772,6 +2789,16 @@ fn list_label(line: &str) -> String {
     line.get(..list_parts(line).map_or(0, |parts| parts.end))
         .unwrap_or("• ")
         .to_owned()
+}
+
+fn push_slice(out: &mut Vec<Piece>, line: &str, start: usize, end: usize, base: usize, look: Look) {
+    if start >= end {
+        return;
+    }
+    let Some(slice) = line.get(start..end) else {
+        return;
+    };
+    push_words(out, slice, start, base, look);
 }
 
 fn push_words(out: &mut Vec<Piece>, text: &str, source_at: usize, base: usize, look: Look) {
@@ -3813,5 +3840,23 @@ mod tests {
         let mixed = "**bold** next";
         assert_eq!(super::edit_window(mixed, 8, Carry::default()), 8..8);
         assert_eq!(super::edit_window(mixed, 13, Carry::default()), 9..13);
+    }
+
+    #[test]
+    fn a_plain_word_stays_on_the_line_after_the_space() {
+        let hello = "Hello ";
+        assert_eq!(drawn(hello, 0..hello.len()), "Hello ");
+        assert_eq!(drawn(hello, 0..6), "Hello ");
+        let mixed = "hello **bold** there";
+        assert_eq!(drawn(mixed, 0..mixed.len()), "hello bold there");
+        assert_eq!(drawn("- buy milk", 0..10), "• buy milk");
+        assert_eq!(drawn("# Title", 0..7), "Title");
+    }
+
+    fn drawn(line: &str, range: std::ops::Range<usize>) -> String {
+        super::pieces_between(line, 0, range, Carry::default(), true, true)
+            .iter()
+            .map(|piece| piece.text.as_str())
+            .collect()
     }
 }
