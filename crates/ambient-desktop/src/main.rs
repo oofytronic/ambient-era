@@ -155,6 +155,13 @@ enum Message {
     NewNote,
     TitleChanged(String),
     BodyEdited(text_editor::Action),
+    Place(usize),
+    SetOpenTask {
+        line: usize,
+        done: bool,
+    },
+    CopyNote,
+    CutNote,
     Save,
     ShowNotes,
     ShowTasks,
@@ -421,12 +428,54 @@ impl App {
                 };
                 if let Some(change) = structured {
                     self.apply_change(change);
-                    return Task::none();
+                    return self.note_follow(true);
                 }
                 if self.body.edit(&action) {
                     self.edited_at = Some(Instant::now());
                 }
-                Task::none()
+                self.note_follow(true)
+            }
+            Message::Place(byte) => {
+                self.body.place_byte(byte);
+                self.note_follow(false)
+            }
+            Message::SetOpenTask { line, done } => {
+                if let Some(id) = self.selected.clone() {
+                    let follow = self.set_task(&id, line, done);
+                    let back = self.note_follow(false);
+                    if self.editor_dirty() {
+                        return Task::batch([follow, back, self.start_save(true)]);
+                    }
+                    return Task::batch([follow, back]);
+                }
+                let text = self.body.text();
+                if let Some(next) = markdown::set_task_line(&text, line, done) {
+                    let cursor = self.body.cursor();
+                    self.body.load(&next);
+                    self.body.place(cursor);
+                    self.edited_at = Some(Instant::now());
+                }
+                self.note_follow(false)
+            }
+            Message::CopyNote => {
+                if let Some(text) = self.body.selection() {
+                    clipboard::write(text)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::CutNote => {
+                if let Some(text) = self.body.selection() {
+                    let changed = self
+                        .body
+                        .edit(&text_editor::Action::Edit(text_editor::Edit::Delete));
+                    if changed {
+                        self.edited_at = Some(Instant::now());
+                    }
+                    Task::batch([clipboard::write(text), self.note_follow(true)])
+                } else {
+                    Task::none()
+                }
             }
             Message::Save => self.start_save(true),
             Message::ShowNotes => {
@@ -658,7 +707,7 @@ impl App {
             }
             Message::Format(kind) => {
                 self.insert_mark(kind);
-                Task::none()
+                self.note_follow(true)
             }
             Message::TaskDraft(text) => {
                 self.task_draft = text;
@@ -1240,7 +1289,9 @@ impl App {
             return Task::none();
         };
         if self.selected.as_deref() == Some(id) {
+            let cursor = self.body.cursor();
             self.body.load(&next);
+            self.body.place(cursor);
             self.edited_at = Some(Instant::now());
             return Task::none();
         }
@@ -1334,7 +1385,11 @@ impl App {
         if !self.compact() {
             body = body.push(Self::format_bar());
         }
-        body = body.push(markdown::view(&self.body));
+        body = body.push(
+            vscroll(markdown::view(&self.body, self.is_dark()))
+                .id(iced::widget::Id::new("note-scroll"))
+                .height(Fill),
+        );
         body = body.push(self.note_media());
         if self.send_open {
             body = body.push(text("Which chat?").size(13).color(ink.muted));
@@ -2358,6 +2413,22 @@ impl App {
             )));
         self.body.place(change.after);
         self.edited_at = Some(Instant::now());
+    }
+
+    fn note_follow(&mut self, scroll: bool) -> Task<Message> {
+        let jump = if scroll { self.body.follow() } else { None };
+        let focus = iced::widget::operation::focus(iced::widget::Id::new("note-body"));
+        if let Some(top) = jump {
+            let y = (top - 72.0).max(0.0);
+            return Task::batch([
+                focus,
+                iced::widget::operation::scroll_to(
+                    iced::widget::Id::new("note-scroll"),
+                    iced::widget::operation::AbsoluteOffset { x: 0.0, y },
+                ),
+            ]);
+        }
+        focus
     }
 
     fn say(&mut self, text: &str) {
@@ -4519,6 +4590,8 @@ fn binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>
     match (character.as_deref(), command) {
         (Some("s"), true) => Some(text_editor::Binding::Custom(Message::Save)),
         (Some("n"), true) => Some(text_editor::Binding::Custom(Message::NewNote)),
+        (Some("c"), true) => Some(text_editor::Binding::Custom(Message::CopyNote)),
+        (Some("x"), true) => Some(text_editor::Binding::Custom(Message::CutNote)),
         _ => text_editor::Binding::from_key_press(press),
     }
 }

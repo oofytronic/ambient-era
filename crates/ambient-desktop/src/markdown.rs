@@ -1,20 +1,29 @@
-//! One editor for a note. Markdown is styled as it is typed.
+//! One editor for a note. A settled word is drawn, and the caret stays on the word
+//! being typed.
 //!
-//! Opening `**` bolds the following text. The closing `**` ends it. An unclosed
-//! mark continues onto the next line and stops at a blank line. The marks stay
-//! in the text. That text is what is saved. This is not a second pane, and it
-//! does not wait until you leave the paragraph.
+//! Opening `**` bolds the following text. The closing `**` ends it, and that word
+//! leaves the marks immediately. An unclosed mark stays visible and continues onto
+//! the next line until a blank line. The marks stay in the saved text. This is not
+//! a second pane.
 
 use std::ops::Range;
 
+use iced::advanced::text::Paragraph as _;
 use iced::advanced::text::highlighter::{self, Highlighter};
 use iced::widget::text_editor::{self, Action};
-use iced::{Color, Element, Font, Length, Padding, Theme};
+use iced::widget::{checkbox, column, container, mouse_area, row, rule, space, text};
+use iced::{Background, Color, Element, Font, Length, Padding, Size, Theme};
 
 use super::{Message, binding, editor_style, sans, serif};
 
 pub(super) struct NoteBody {
     editor: text_editor::Content,
+    /// The slice under the caret. The page editor shows only this.
+    live: text_editor::Content,
+    /// Absolute byte range of `live` inside the document.
+    live_at: Option<(usize, usize)>,
+    /// Last line we scrolled to. Arrowing to a new line reveals it.
+    shown_line: usize,
 }
 
 const OPEN_CAP: usize = 8;
@@ -233,61 +242,180 @@ impl Highlighter for Live {
 
 impl NoteBody {
     pub(super) fn new() -> Self {
-        Self {
+        let mut body = Self {
             editor: text_editor::Content::new(),
-        }
+            live: text_editor::Content::new(),
+            live_at: None,
+            shown_line: 0,
+        };
+        body.sync_live();
+        body
     }
 
     pub(super) fn text(&self) -> String {
         self.editor.text()
     }
 
+    /// Selected document text, if the caret is holding a range.
+    pub(super) fn selection(&self) -> Option<String> {
+        self.editor.selection()
+    }
+
     /// Replaces the text. The same text keeps the cursor where it is.
     pub(super) fn load(&mut self, source: &str) {
         if self.editor.text() == source {
+            self.sync_live();
             return;
         }
         self.editor = text_editor::Content::with_text(source);
+        self.shown_line = 0;
+        self.sync_live();
     }
 
-    pub(super) fn edit(&mut self, action: &Action) -> bool {
-        let previous = self.editor.text();
-        self.editor.perform(action.clone());
-        previous != self.editor.text()
+    /// Puts the caret back after `load` replaced the document.
+    pub(super) fn place(&mut self, cursor: text_editor::Cursor) {
+        self.shown_line = cursor.position.line;
+        self.editor.move_to(cursor);
+        self.sync_live();
     }
 
     pub(super) fn perform(&mut self, action: &Action) {
         self.editor.perform(action.clone());
+        self.sync_live();
     }
 
     pub(super) fn cursor(&self) -> text_editor::Cursor {
         self.editor.cursor()
     }
 
-    pub(super) fn place(&mut self, cursor: text_editor::Cursor) {
-        self.editor.move_to(cursor);
+    /// Moves the caret to a byte in the document and opens that word.
+    pub(super) fn place_byte(&mut self, byte: usize) {
+        let text = self.editor.text();
+        let position = byte_pos(&text, byte.min(text.len()));
+        self.editor.move_to(text_editor::Cursor {
+            position,
+            selection: None,
+        });
+        self.shown_line = position.line;
+        self.sync_live();
+    }
+
+    /// `Some(y)` when the caret moved to another line and the page should scroll there.
+    pub(super) fn follow(&mut self) -> Option<f32> {
+        let line = self.caret_line();
+        if line == self.shown_line {
+            return None;
+        }
+        self.shown_line = line;
+        Some(self.caret_top())
+    }
+
+    pub(super) fn edit(&mut self, action: &Action) -> bool {
+        match action {
+            Action::Click(_) | Action::Drag(_) => {
+                self.live.perform(action.clone());
+                self.mirror_live_cursor();
+                false
+            }
+            Action::Scroll { .. } => false,
+            Action::Edit(_) => {
+                let previous = self.editor.text();
+                self.editor.perform(action.clone());
+                self.sync_live();
+                previous != self.editor.text()
+            }
+            Action::Move(_)
+            | Action::Select(_)
+            | Action::SelectWord
+            | Action::SelectLine
+            | Action::SelectAll => {
+                self.editor.perform(action.clone());
+                self.sync_live();
+                false
+            }
+        }
+    }
+
+    fn caret_line(&self) -> usize {
+        self.editor.cursor().position.line
+    }
+
+    fn caret_top(&self) -> f32 {
+        let text = self.editor.text();
+        let line = self.caret_line();
+        let mut y = 0.0;
+        for (index, row) in text.split('\n').enumerate() {
+            if index == line {
+                break;
+            }
+            y += line_px(row) + 2.0;
+        }
+        y
+    }
+
+    fn sync_live(&mut self) {
+        let text = self.editor.text();
+        let cursor = self.editor.cursor();
+        let (start, end) = window_bytes(&text, &cursor);
+        let slice = text.get(start..end).unwrap_or("");
+        let local = local_cursor(&text, &cursor, start, end);
+        let same = self.live_at == Some((start, end)) && self.live.text() == slice;
+        if !same {
+            self.live = text_editor::Content::with_text(slice);
+        }
+        self.live.move_to(local);
+        self.live_at = Some((start, end));
+    }
+
+    fn mirror_live_cursor(&mut self) {
+        let Some((start, _)) = self.live_at else {
+            return;
+        };
+        let local = self.live.cursor();
+        let text = self.editor.text();
+        let position = abs_pos(&text, start, local.position);
+        let selection = local.selection.map(|sel| abs_pos(&text, start, sel));
+        self.editor.move_to(text_editor::Cursor {
+            position,
+            selection,
+        });
     }
 }
 
-pub(super) fn view(body: &NoteBody) -> Element<'_, Message> {
-    text_editor::TextEditor::new(&body.editor)
-        .id(iced::widget::Id::new("note-body"))
-        .height(Length::Fill)
-        .padding(Padding {
-            top: 6.0,
-            right: 0.0,
-            bottom: 48.0,
-            left: 0.0,
-        })
-        .size(17)
-        .line_height(1.45)
-        .font(sans())
-        .placeholder("Write. **bold** starts when you type the marks.")
-        .on_action(Message::BodyEdited)
-        .key_binding(binding)
-        .style(editor_style)
-        .highlight_with::<Live>((), mark_format)
-        .into()
+pub(super) fn view(body: &NoteBody, dark: bool) -> Element<'_, Message> {
+    let text = body.text();
+    let (win_start, win_end) = body.live_at.unwrap_or((0, 0));
+    let active = byte_pos(&text, win_start.min(text.len())).line;
+    let carries = line_carries(&text);
+    let placeholder = text.is_empty();
+    let mut page = column![].spacing(2).width(Length::Fill);
+    for (index, line) in split_lines(&text).into_iter().enumerate() {
+        let incoming = carries.get(index).copied().unwrap_or_default();
+        let at_start = index == 0;
+        let base = line_start(&text, index);
+        if index == active {
+            let ls = base;
+            let le = line_end(&text, index);
+            let start = win_start.max(ls).saturating_sub(ls).min(line.len());
+            let end = win_end.min(le).saturating_sub(ls).min(line.len());
+            let end = end.max(start);
+            page = page.push(active_line(
+                body,
+                line,
+                index,
+                base,
+                start..end,
+                incoming,
+                at_start,
+                dark,
+                placeholder && line.is_empty(),
+            ));
+        } else {
+            page = page.push(settled_line(line, index, base, incoming, at_start, dark));
+        }
+    }
+    page = page.push(space().height(48));
+    page.into()
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -2148,6 +2276,873 @@ fn peel<'a>(inner: &'a str, left: &str, right: &str) -> Option<&'a str> {
     Some(&inner[left.len()..inner.len() - right.len()])
 }
 
+const BODY: f32 = 17.0;
+const LEADING: f32 = 1.45;
+
+fn line_px(line: &str) -> f32 {
+    let size = heading_end(line).map_or(BODY, |(_, level)| heading_px(level));
+    size * LEADING
+}
+
+fn heading_px(level: u8) -> f32 {
+    match level {
+        1 => 32.0,
+        2 => 26.0,
+        3 => 22.0,
+        4 => 19.0,
+        _ => BODY,
+    }
+}
+
+fn line_carries(text: &str) -> Vec<Carry> {
+    let mut incoming = Carry {
+        blank: true,
+        ..Carry::default()
+    };
+    let mut rows = Vec::new();
+    let mut first = true;
+    for line in split_lines(text) {
+        let stored = if first {
+            Carry {
+                blank: true,
+                ..incoming
+            }
+        } else {
+            incoming
+        };
+        rows.push(stored);
+        let (_, next) = paint_in(line, stored, first);
+        incoming = next;
+        first = false;
+    }
+    if rows.is_empty() {
+        rows.push(Carry {
+            blank: true,
+            ..Carry::default()
+        });
+    }
+    rows
+}
+
+fn window_bytes(text: &str, cursor: &text_editor::Cursor) -> (usize, usize) {
+    let caret = pos_byte(text, cursor.position);
+    let line_no = byte_pos(text, caret).line;
+    let ls = line_start(text, line_no);
+    let le = line_end(text, line_no);
+    let (sel_from, sel_to) = if cursor.selection.is_some() {
+        range_bytes(text, cursor)
+    } else {
+        (caret, caret)
+    };
+    if sel_from < ls || sel_to > le {
+        return (ls, le);
+    }
+    let line = text.get(ls..le).unwrap_or("");
+    let incoming = line_carries(text).get(line_no).copied().unwrap_or_default();
+    let at = floor_boundary(line, caret.saturating_sub(ls).min(line.len()));
+    let mut win = edit_window(line, at, incoming);
+    if sel_from != sel_to {
+        let a = floor_boundary(line, sel_from.saturating_sub(ls).min(line.len()));
+        let b = floor_boundary(line, sel_to.saturating_sub(ls).min(line.len()));
+        let start = win.start.min(a);
+        let end = win.end.max(b).min(line.len());
+        win = start..end.max(start);
+    }
+    let start = floor_boundary(line, win.start.min(line.len()));
+    let end = floor_boundary(line, win.end.max(start).min(line.len()));
+    (ls.saturating_add(start), ls.saturating_add(end))
+}
+
+fn edit_window(line: &str, at: usize, carry: Carry) -> Range<usize> {
+    let at = floor_boundary(line, at.min(line.len()));
+    if line.is_empty() {
+        return 0..0;
+    }
+    let (pairs, unclosed) = scan_pairs(line, carry);
+    if let Some(start) = unclosed.iter().copied().filter(|start| *start <= at).min() {
+        return start..line.len();
+    }
+    if let Some(pair) = smallest_pair(&pairs, at) {
+        let interior_start = pair.start.saturating_add(pair.open_len);
+        let interior_end = pair.end.saturating_sub(pair.close_len);
+        let on_mark = at < interior_start || at > interior_end;
+        if on_mark {
+            if pair.local_open {
+                return pair.start..pair.end;
+            }
+            let close_at = pair.end.saturating_sub(pair.close_len);
+            return close_at..pair.end;
+        }
+        return caret_word(line, at, interior_start, interior_end, &pairs);
+    }
+    caret_word(line, at, 0, line.len(), &pairs)
+}
+
+#[derive(Clone, Copy)]
+struct Pair {
+    start: usize,
+    end: usize,
+    open_len: usize,
+    close_len: usize,
+    local_open: bool,
+}
+
+fn smallest_pair(pairs: &[Pair], at: usize) -> Option<Pair> {
+    pairs
+        .iter()
+        .filter(|pair| pair.start <= at && at < pair.end)
+        .min_by_key(|pair| pair.end.saturating_sub(pair.start))
+        .copied()
+}
+
+fn caret_word(line: &str, at: usize, lo: usize, hi: usize, pairs: &[Pair]) -> Range<usize> {
+    let hi = hi.min(line.len());
+    let lo = lo.min(hi);
+    let at = at.clamp(lo, hi);
+    if pairs
+        .iter()
+        .any(|pair| pair.end == at && pair.start >= lo && pair.end <= hi && pair.end > pair.start)
+    {
+        return at..at;
+    }
+    let mut index = lo;
+    while index < hi {
+        if let Some(pair) = pairs
+            .iter()
+            .copied()
+            .filter(|pair| pair.start == index && pair.end <= hi && pair.end > pair.start)
+            .min_by_key(|pair| pair.end.saturating_sub(pair.start))
+        {
+            if at == pair.end {
+                return at..at;
+            }
+            if pair.start < at && at < pair.end {
+                let inner_lo = pair.start.saturating_add(pair.open_len);
+                let inner_hi = pair.end.saturating_sub(pair.close_len);
+                if at >= inner_lo && at <= inner_hi {
+                    return caret_word(line, at, inner_lo, inner_hi, pairs);
+                }
+                if pair.local_open {
+                    return pair.start..pair.end;
+                }
+                let close_at = pair.end.saturating_sub(pair.close_len);
+                return close_at..pair.end;
+            }
+            index = pair.end;
+            continue;
+        }
+        let Some(ch) = line.get(index..).and_then(|rest| rest.chars().next()) else {
+            break;
+        };
+        if ch.is_whitespace() {
+            index = index.saturating_add(ch.len_utf8());
+            continue;
+        }
+        let start = index;
+        while index < hi {
+            if pairs
+                .iter()
+                .any(|pair| pair.start == index && pair.end <= hi && pair.end > pair.start)
+            {
+                break;
+            }
+            let Some(next) = line.get(index..).and_then(|rest| rest.chars().next()) else {
+                break;
+            };
+            if next.is_whitespace() {
+                break;
+            }
+            index = index.saturating_add(next.len_utf8());
+        }
+        if start < at && at <= index {
+            return start..index;
+        }
+        if at == start {
+            return at..at;
+        }
+    }
+    at..at
+}
+
+fn scan_pairs(line: &str, mut carry: Carry) -> (Vec<Pair>, Vec<usize>) {
+    let mut pairs = Vec::new();
+    let mut local = Vec::new();
+    let mut index = 0;
+    let limit = line.len();
+    while index < limit {
+        if line.as_bytes().get(index) == Some(&b'\\') {
+            let escaped = char_len_at(line, index.saturating_add(1), limit);
+            index = index.saturating_add(1).saturating_add(escaped);
+            continue;
+        }
+        if !in_literal(carry)
+            && let Some(end) = skip_atom(line, index, limit, carry)
+        {
+            index = end;
+            continue;
+        }
+        if let Some((len, close)) = token(line, index, limit, carry) {
+            let end = index.saturating_add(len);
+            if close {
+                if let Some((at, open_len)) = local.pop() {
+                    pairs.push(Pair {
+                        start: at,
+                        end,
+                        open_len,
+                        close_len: len,
+                        local_open: true,
+                    });
+                } else {
+                    pairs.push(Pair {
+                        start: 0,
+                        end,
+                        open_len: 0,
+                        close_len: len,
+                        local_open: false,
+                    });
+                }
+                pop(&mut carry);
+            } else {
+                local.push((index, len));
+                push_open(&mut carry, opened(line, index, limit));
+            }
+            index = end;
+            continue;
+        }
+        let step = char_len_at(line, index, limit).max(1);
+        index = index.saturating_add(step);
+    }
+    let unclosed = local.into_iter().map(|(at, _)| at).collect();
+    (pairs, unclosed)
+}
+
+fn skip_atom(line: &str, index: usize, limit: usize, carry: Carry) -> Option<usize> {
+    if in_literal(carry) {
+        return None;
+    }
+    link_end(line, index, limit)
+        .or_else(|| wiki_end(line, index, limit))
+        .or_else(|| auto_end(line, index, limit))
+        .or_else(|| bare_url(line, index, limit))
+        .or_else(|| footnote_end(line, index, limit))
+        .or_else(|| math_end(line, index, limit))
+        .or_else(|| tag_end(line, index, limit))
+}
+
+fn local_cursor(
+    text: &str,
+    cursor: &text_editor::Cursor,
+    start: usize,
+    end: usize,
+) -> text_editor::Cursor {
+    let position = local_pos(text, cursor.position, start, end);
+    let selection = cursor
+        .selection
+        .map(|sel| local_pos(text, sel, start, end))
+        .filter(|sel| sel.line != position.line || sel.column != position.column);
+    text_editor::Cursor {
+        position,
+        selection,
+    }
+}
+
+fn local_pos(
+    text: &str,
+    pos: text_editor::Position,
+    start: usize,
+    end: usize,
+) -> text_editor::Position {
+    let byte = pos_byte(text, pos).clamp(start, end);
+    text_editor::Position {
+        line: 0,
+        column: byte.saturating_sub(start),
+    }
+}
+
+fn abs_pos(text: &str, start: usize, pos: text_editor::Position) -> text_editor::Position {
+    let byte = start.saturating_add(pos.column);
+    byte_pos(text, byte.min(text.len()))
+}
+
+#[derive(Clone, Copy)]
+struct Look {
+    size: f32,
+    font: Font,
+    color: Option<Color>,
+    strike: bool,
+    underline: bool,
+    background: Option<Color>,
+}
+
+fn look_of(mark: Mark, dark: bool) -> Look {
+    let accent = accent(dark);
+    let marker = if dark {
+        Color::from_rgb8(0x6F, 0x69, 0x64)
+    } else {
+        Color::from_rgb8(0xA8, 0xA2, 0x9A)
+    };
+    let struck = if dark {
+        Color::from_rgb8(0xC4, 0x8A, 0x86)
+    } else {
+        Color::from_rgb8(0x8F, 0x45, 0x42)
+    };
+    let code = if dark {
+        Color::from_rgb8(0xE0, 0xB3, 0x66)
+    } else {
+        Color::from_rgb8(0x8A, 0x5A, 0x12)
+    };
+    let heading = if dark {
+        Color::from_rgb8(0xF6, 0xF1, 0xE4)
+    } else {
+        Color::from_rgb8(0x2A, 0x16, 0x12)
+    };
+    let done = if dark {
+        Color::from_rgb8(0x7D, 0xC9, 0xA4)
+    } else {
+        Color::from_rgb8(0x1F, 0x7A, 0x4D)
+    };
+    let gold = if dark {
+        Color::from_rgb8(0xE6, 0xC2, 0x5A)
+    } else {
+        Color::from_rgb8(0x8A, 0x62, 0x10)
+    };
+    let mut look = Look {
+        size: BODY,
+        font: sans(),
+        color: None,
+        strike: mark.flags & STRIKE != 0,
+        underline: matches!(mark.face, Face::Link | Face::Wiki),
+        background: (mark.flags & HIGH != 0).then_some(Color { a: 0.28, ..gold }),
+    };
+    if mark.face == Face::Code || mark.face == Face::Math {
+        look.font = Font::MONOSPACE;
+        look.color = Some(if mark.face == Face::Math {
+            accent
+        } else {
+            code
+        });
+        return look;
+    }
+    look.color = match mark.face {
+        Face::Text => None,
+        Face::Marker | Face::Meta => Some(marker),
+        Face::Tag | Face::Link | Face::Wiki | Face::Image | Face::Check | Face::Quote => {
+            Some(accent)
+        }
+        Face::Heading(level) => {
+            look.size = heading_px(level);
+            if level == 2 {
+                Some(accent)
+            } else {
+                Some(heading)
+            }
+        }
+        Face::Checked => Some(done),
+        Face::Callout(kind) => Some(callout_color(kind, dark)),
+        Face::Code | Face::Math => Some(code),
+    };
+    if mark.flags & HIGH != 0 {
+        look.color = Some(gold);
+    }
+    if mark.flags & STRIKE != 0 {
+        look.color = Some(struck);
+        look.strike = true;
+    }
+    look.font = if mark.flags & STRONG != 0 && mark.flags & EM != 0 {
+        sans_bold_italic()
+    } else if mark.flags & STRONG != 0 {
+        sans_bold()
+    } else if mark.flags & EM != 0 {
+        sans_italic()
+    } else {
+        match mark.face {
+            Face::Heading(level) if level <= 2 => serif(),
+            Face::Heading(_) | Face::Check | Face::Checked | Face::Image => sans_bold(),
+            _ => sans(),
+        }
+    };
+    look
+}
+
+fn accent(dark: bool) -> Color {
+    if dark {
+        Color::from_rgb8(0x66, 0xA5, 0xE1)
+    } else {
+        Color::from_rgb8(0x16, 0x44, 0x6F)
+    }
+}
+
+fn look_at(line: &str, at: usize, carry: Carry, at_start: bool, dark: bool) -> Look {
+    let (spans, _) = paint_in(line, carry, at_start);
+    let mut chosen = text_mark();
+    for (range, mark) in spans {
+        let covers = (range.start < at && at <= range.end) || (range.start <= at && at < range.end);
+        if !covers {
+            continue;
+        }
+        if mark.face != Face::Marker || chosen.face == Face::Text && chosen.flags == 0 {
+            chosen = mark;
+        }
+    }
+    let mut look = look_of(chosen, dark);
+    if let Some((_, level)) = heading_end(line)
+        && chosen.face != Face::Code
+        && chosen.face != Face::Math
+    {
+        look.size = heading_px(level);
+        if chosen.face == Face::Marker || (chosen.face == Face::Text && chosen.flags == 0) {
+            look.font = if level <= 2 { serif() } else { sans_bold() };
+        }
+    }
+    look
+}
+
+struct Piece {
+    text: String,
+    hit: usize,
+    look: Look,
+}
+
+fn pieces_between(
+    line: &str,
+    base: usize,
+    show: Range<usize>,
+    carry: Carry,
+    at_start: bool,
+    dark: bool,
+) -> Vec<Piece> {
+    let lead = lead(line);
+    let (spans, _) = paint_in(line, carry, at_start);
+    let (_, unclosed) = scan_pairs(line, carry);
+    let mut out = Vec::new();
+    if show.start == 0
+        && lead.skip > 0
+        && lead.skip <= show.end
+        && lead.box_at.is_none()
+        && quote_end(line).is_none()
+        && heading_end(line).is_none()
+        && list_parts(line).is_some()
+    {
+        out.push(Piece {
+            text: list_label(line),
+            hit: base.saturating_add(lead.skip),
+            look: Look {
+                color: Some(accent(dark)),
+                ..look_of(text_mark(), dark)
+            },
+        });
+    }
+    for (range, mark) in spans {
+        if range.end <= lead.skip {
+            continue;
+        }
+        let start = range.start.max(lead.skip).max(show.start);
+        let end = range.end.min(show.end);
+        if start >= end {
+            continue;
+        }
+        if mark.face == Face::Marker && hide_marker(line, start..end, &unclosed) {
+            continue;
+        }
+        let Some(slice) = line.get(start..end) else {
+            continue;
+        };
+        push_words(&mut out, slice, start, base, look_of(mark, dark));
+    }
+    out
+}
+
+fn hide_marker(line: &str, range: Range<usize>, unclosed: &[usize]) -> bool {
+    let source = line.get(range.start..range.end).unwrap_or("");
+    if source.chars().any(|ch| ch == '|') {
+        return false;
+    }
+    !unclosed
+        .iter()
+        .any(|at| range.start <= *at && *at < range.end)
+}
+
+fn list_label(line: &str) -> String {
+    let spaces = leading_spaces(line);
+    let rest = line.get(spaces..).unwrap_or("");
+    let indent = " ".repeat(spaces);
+    if rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("+ ") {
+        return format!("{indent}• ");
+    }
+    line.get(..list_parts(line).map_or(0, |parts| parts.end))
+        .unwrap_or("• ")
+        .to_owned()
+}
+
+fn push_words(out: &mut Vec<Piece>, text: &str, source_at: usize, base: usize, look: Look) {
+    let mut index = 0;
+    while index < text.len() {
+        let Some(ch) = text.get(index..).and_then(|rest| rest.chars().next()) else {
+            break;
+        };
+        let mut end = index.saturating_add(ch.len_utf8());
+        let space = ch.is_whitespace();
+        while let Some(next) = text.get(end..).and_then(|rest| rest.chars().next()) {
+            if next.is_whitespace() != space {
+                break;
+            }
+            end = end.saturating_add(next.len_utf8());
+        }
+        let Some(slice) = text.get(index..end) else {
+            break;
+        };
+        out.push(Piece {
+            text: slice.to_owned(),
+            hit: base.saturating_add(source_at).saturating_add(end),
+            look,
+        });
+        index = end;
+    }
+}
+
+fn rich_of<'a>(pieces: &[Piece], fill: bool) -> Element<'a, Message> {
+    if pieces.is_empty() {
+        return text("").size(BODY).into();
+    }
+    let mut size = BODY;
+    let mut spans = Vec::new();
+    for piece in pieces {
+        size = size.max(piece.look.size);
+        let mut span = iced::widget::span(piece.text.clone())
+            .size(piece.look.size)
+            .font(piece.look.font)
+            .link(piece.hit);
+        if let Some(color) = piece.look.color {
+            span = span.color(color);
+        }
+        if piece.look.strike {
+            span = span.strikethrough(true);
+        }
+        if piece.look.underline {
+            span = span.underline(true);
+        }
+        if let Some(paint) = piece.look.background {
+            span = span.background(Background::Color(paint));
+        }
+        spans.push(span);
+    }
+    let mut rich = iced::widget::rich_text(spans)
+        .size(size)
+        .line_height(LEADING)
+        .font(sans())
+        .on_link_click(Message::Place);
+    if fill {
+        rich = rich.width(Length::Fill);
+    } else {
+        rich = rich.wrapping(iced::advanced::text::Wrapping::None);
+    }
+    rich.into()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn active_line<'a>(
+    body: &'a NoteBody,
+    line: &str,
+    index: usize,
+    base: usize,
+    win: Range<usize>,
+    carry: Carry,
+    at_start: bool,
+    dark: bool,
+    placeholder: bool,
+) -> Element<'a, Message> {
+    let prefix = pieces_between(line, base, 0..win.start, carry, at_start, dark);
+    let suffix = pieces_between(line, base, win.end..line.len(), carry, at_start, dark);
+    let sample = line.get(win.start..win.end).unwrap_or("").to_owned();
+    let probe = if win.start < win.end {
+        win.end.saturating_sub(1)
+    } else {
+        win.start.min(line.len())
+    };
+    let mut look = look_at(line, probe, carry, at_start, dark);
+    if win.start == win.end {
+        // The caret is in the gap after a settled word. Keep the line size, but
+        // do not pick up a marker, link, or strike color for an empty slot.
+        look.color = None;
+    }
+    let mut editor = text_editor::TextEditor::new(&body.live)
+        .id(iced::widget::Id::new("note-body"))
+        .padding(Padding::ZERO)
+        .size(look.size)
+        .line_height(LEADING)
+        .font(look.font)
+        .wrapping(iced::advanced::text::Wrapping::None)
+        .on_action(Message::BodyEdited)
+        .key_binding(binding)
+        .style(move |theme, status| {
+            let mut style = editor_style(theme, status);
+            if let Some(color) = look.color {
+                style.value = color;
+            }
+            style
+        })
+        .highlight_with::<Live>((), mark_format);
+    if placeholder {
+        editor = editor.placeholder("Write. **bold** starts when you type the marks.");
+    }
+    let edited: Element<'a, Message> = if placeholder {
+        editor.into()
+    } else {
+        Fitted {
+            sample,
+            font: look.font,
+            size: look.size,
+            child: editor.into(),
+        }
+        .into()
+    };
+    let end = base.saturating_add(line.len());
+    let gap = mouse_area(space().width(Length::Fill).height(look.size * LEADING))
+        .on_press(Message::Place(end));
+    let inner = row![
+        rich_of(&prefix, false),
+        edited,
+        rich_of(&suffix, false),
+        gap
+    ]
+    .spacing(0)
+    .align_y(iced::alignment::Vertical::Top)
+    .width(Length::Fill);
+    let lead = lead(line);
+    let quoted = quote_end(line).is_some() && win.start >= lead.skip;
+    let body_row = if quoted {
+        quote_row(inner.into(), look.size, dark)
+    } else {
+        inner.into()
+    };
+    let show_box = lead.box_at.is_some() && win.start >= lead.skip;
+    if show_box {
+        let done = lead.box_at.is_some_and(|(_, done)| done);
+        row![
+            checkbox(done).on_toggle(move |done| Message::SetOpenTask { line: index, done }),
+            body_row,
+        ]
+        .spacing(8)
+        .align_y(iced::alignment::Vertical::Center)
+        .width(Length::Fill)
+        .into()
+    } else {
+        body_row
+    }
+}
+
+fn settled_line(
+    line: &str,
+    index: usize,
+    base: usize,
+    carry: Carry,
+    at_start: bool,
+    dark: bool,
+) -> Element<'static, Message> {
+    if line.is_empty() {
+        return mouse_area(space().width(Length::Fill).height(line_px(line)))
+            .on_press(Message::Place(base))
+            .into();
+    }
+    if is_rule(line) {
+        return mouse_area(
+            container(rule::horizontal(1))
+                .width(Length::Fill)
+                .padding(Padding {
+                    top: 10.0,
+                    right: 0.0,
+                    bottom: 10.0,
+                    left: 0.0,
+                }),
+        )
+        .on_press(Message::Place(base.saturating_add(line.len())))
+        .into();
+    }
+    let shown = pieces_between(line, base, 0..line.len(), carry, at_start, dark);
+    let size = shown
+        .iter()
+        .fold(BODY, |size, piece| size.max(piece.look.size));
+    let text = rich_of(&shown, true);
+    let lead = lead(line);
+    let quoted = quote_end(line).is_some();
+    let body = if quoted {
+        quote_row(text, size, dark)
+    } else {
+        text
+    };
+    if let Some((_, done)) = lead.box_at {
+        row![
+            checkbox(done).on_toggle(move |done| Message::SetOpenTask { line: index, done }),
+            body,
+        ]
+        .spacing(8)
+        .align_y(iced::alignment::Vertical::Center)
+        .width(Length::Fill)
+        .into()
+    } else {
+        body
+    }
+}
+
+fn quote_row(inner: Element<'_, Message>, size: f32, dark: bool) -> Element<'_, Message> {
+    let paint = accent(dark);
+    row![
+        container(space().width(3).height(size * LEADING)).style(move |_theme| container::Style {
+            background: Some(Background::Color(paint)),
+            ..container::Style::default()
+        }),
+        inner,
+    ]
+    .spacing(8)
+    .align_y(iced::alignment::Vertical::Center)
+    .width(Length::Fill)
+    .into()
+}
+
+struct Fitted<'a> {
+    sample: String,
+    font: Font,
+    size: f32,
+    child: Element<'a, Message>,
+}
+
+impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for Fitted<'_> {
+    fn size(&self) -> Size<Length> {
+        Size {
+            width: Length::Shrink,
+            height: Length::Shrink,
+        }
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        vec![iced::advanced::widget::Tree::new(&self.child)]
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        tree.diff_children(&[self.child.as_widget()]);
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        let paragraph = <iced::Renderer as iced::advanced::text::Renderer>::Paragraph::with_text(
+            iced::advanced::text::Text {
+                content: self.sample.as_str(),
+                bounds: Size::new(10_000.0, 10_000.0),
+                size: self.size.into(),
+                line_height: iced::advanced::text::LineHeight::Relative(LEADING),
+                font: self.font,
+                align_x: iced::advanced::text::Alignment::Left,
+                align_y: iced::alignment::Vertical::Top,
+                shaping: iced::advanced::text::Shaping::Advanced,
+                wrapping: iced::advanced::text::Wrapping::None,
+            },
+        );
+        let measured = paragraph.min_width();
+        let width = if self.sample.is_empty() {
+            2.0
+        } else {
+            measured + 2.0
+        };
+        let limits = limits.width(Length::Fixed(width)).height(Length::Shrink);
+        let Some(child) = tree.children.first_mut() else {
+            return iced::advanced::layout::Node::new(Size::ZERO);
+        };
+        self.child.as_widget_mut().layout(child, renderer, &limits)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+        viewport: &iced::Rectangle,
+    ) {
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        self.child.as_widget_mut().update(
+            child, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        let Some(child) = tree.children.first() else {
+            return;
+        };
+        self.child
+            .as_widget()
+            .draw(child, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+        renderer: &iced::Renderer,
+    ) -> iced::advanced::mouse::Interaction {
+        let Some(child) = tree.children.first() else {
+            return iced::advanced::mouse::Interaction::None;
+        };
+        self.child
+            .as_widget()
+            .mouse_interaction(child, layout, cursor, viewport, renderer)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        self.child
+            .as_widget_mut()
+            .operate(child, layout, renderer, operation);
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'b>,
+        renderer: &iced::Renderer,
+        viewport: &iced::Rectangle,
+        translation: iced::Vector,
+    ) -> Option<iced::advanced::overlay::Element<'b, Message, Theme, iced::Renderer>> {
+        let child = tree.children.first_mut()?;
+        self.child
+            .as_widget_mut()
+            .overlay(child, layout, renderer, viewport, translation)
+    }
+}
+
+impl<'a> From<Fitted<'a>> for Element<'a, Message> {
+    fn from(fitted: Fitted<'a>) -> Self {
+        Element::new(fitted)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2800,5 +3795,23 @@ mod tests {
             hit(spans, line, text, mark),
             "expected {text:?} as {mark:?} in {line:?}, spans were {spans:?}"
         );
+    }
+
+    #[test]
+    fn a_settled_word_leaves_the_caret() {
+        let closed = "**bold**";
+        assert_eq!(
+            super::edit_window(closed, closed.len(), Carry::default()),
+            8..8
+        );
+        assert_eq!(super::edit_window(closed, 4, Carry::default()), 2..6);
+        assert_eq!(super::edit_window(closed, 6, Carry::default()), 2..6);
+        assert_eq!(super::edit_window(closed, 7, Carry::default()), 0..8);
+        assert_eq!(super::edit_window("**bold", 6, Carry::default()), 0..6);
+        assert_eq!(super::edit_window("Hello", 5, Carry::default()), 0..5);
+        assert_eq!(super::edit_window("Hello ", 6, Carry::default()), 6..6);
+        let mixed = "**bold** next";
+        assert_eq!(super::edit_window(mixed, 8, Carry::default()), 8..8);
+        assert_eq!(super::edit_window(mixed, 13, Carry::default()), 9..13);
     }
 }

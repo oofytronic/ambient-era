@@ -28,7 +28,7 @@ Do not add a per-share Space type, a second access list, or a "deleted everywher
 
 ## Adding a feature
 
-Read this before adding a screen, a type, or a table. The note editor is a view: it styles Markdown while you type, and the bytes that sync are still the `text-snapshot-v1` snapshot.
+Read this before adding a screen, a type, or a table. The note editor is a view: it styles Markdown while you type, a settled word is drawn without its marks, and the bytes that sync are still the `text-snapshot-v1` snapshot.
 
 A new feature is one of three pieces.
 
