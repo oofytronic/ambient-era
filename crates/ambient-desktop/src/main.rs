@@ -1378,7 +1378,7 @@ impl App {
             text_input("Title", &self.title_text)
                 .on_input(Message::TitleChanged)
                 .font(serif())
-                .size(if self.compact() { 26.0 } else { 32.0 })
+                .size(if self.compact() { 32.0 } else { 36.0 })
                 .padding([2.0, 0.0])
                 .style(title_style),
         );

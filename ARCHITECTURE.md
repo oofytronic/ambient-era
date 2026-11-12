@@ -67,7 +67,7 @@ Do not add an object graph of typed things with relations. That is a second mode
 | Weave | A citation from a chat to a creation, already just a copied message in v0.1 | The sidebar is a projection, not a new protocol |
 | Public identity and feed | Signed, unsealed logs. A second persona. | Must not be built by relaxing the private-Space rules |
 | Phone clients | SwiftUI and Compose over the same core. Content-free push. | Desktop first |
-| Agent | A delegated key plus a grant. Every member must agree before it reads a shared Space | No agent runtime in the core |
+| Agent | A short-lived scoped grant. See [docs/agents.md](docs/agents.md). Every member must agree before it reads a shared Space | No agent runtime in the core. Not v0.1 |
 
 These are the structural problems that decide whether a later version is still user-owned. They are not v0.1 work. Do not scaffold them. Each one has to be a Space, a grant on a Space, or a copy. None of them is a second authority beside the owner.
 
@@ -75,7 +75,7 @@ These are the structural problems that decide whether a later version is still u
 |:--|:--|:--|
 | Recovery for people who will lose a phrase | A threshold of guardians or devices can authorize a key rotation after a timelock. No single party can seize the root. The v0.1 phrase remains the backup until that exists. | A custodian. A passkey that is the root. |
 | Someone has to keep nodes on | People who need a relay, a host, or compute pay the operator who provides it. Reputation is uptime and quality. Most people stay clients. | A token that is the product. An obligation to run a home server. |
-| Agents that can publish or spend | An agent starts with nothing. It receives a short-lived scoped grant. The grant expires or is revoked. Enforcement is on a device or node the owner controls. Consequential actions are in a local log the owner can read. | Standing power. A model that is trusted because it said it would ask. |
+| Agents that can publish or spend | An agent starts with nothing, does one job, and dies. The shape is [docs/agents.md](docs/agents.md). It receives a short-lived scoped grant. The model proposes and the runtime disposes. The grant expires or is revoked. It keeps no memory of its own. Enforcement is on a device or node the owner controls. Consequential actions are in a local log the owner can read. | Standing power. A bot with a memory. A model that is trusted because it said it would ask. |
 | Sensing | Inference and temporary context stay on the owner's devices. Raw sensor data leaves only when chosen for one task. Sensing has a visible indicator. Agents ask for the narrowest context. | A permanent life log. A wearable that uploads by default. |
 | Nodes that sleep | Public content can be mirrored as signed snapshots the mirror cannot alter. Relays are several and interchangeable. An agent that acts while the owner is offline already holds a grant, or it escalates to a person or another device. Intermittent nodes are the normal case. | A home server that must stay up for a public page to exist. |
 | Finding anyone without a center | Signed announcements, local discovery, and an out-of-band introduction (the v0.1 link or QR). An operator may publish a bootstrap set. The protocol still works if that set is gone. | A directory that is the only way in. |

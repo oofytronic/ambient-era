@@ -354,6 +354,7 @@ impl NoteBody {
     }
 
     fn sync_live(&mut self) {
+        self.park_task_caret();
         let text = self.editor.text();
         let cursor = self.editor.cursor();
         let (start, end) = window_bytes(&text, &cursor);
@@ -365,6 +366,33 @@ impl NoteBody {
         }
         self.live.move_to(local);
         self.live_at = Some((start, end));
+    }
+
+    /// A task's marks are the checkbox, not text. Keep the caret in the words.
+    fn park_task_caret(&mut self) {
+        let text = self.editor.text();
+        let cursor = self.editor.cursor();
+        if cursor.selection.is_some() {
+            return;
+        }
+        let ls = line_start(&text, cursor.position.line);
+        let le = line_end(&text, cursor.position.line);
+        let line = text.get(ls..le).unwrap_or("");
+        let info = lead(line);
+        if info.box_at.is_none() {
+            return;
+        }
+        let skip = info.skip.min(line.len());
+        if cursor.position.column >= skip {
+            return;
+        }
+        self.editor.move_to(text_editor::Cursor {
+            position: text_editor::Position {
+                line: cursor.position.line,
+                column: skip,
+            },
+            selection: None,
+        });
     }
 
     fn mirror_live_cursor(&mut self) {
@@ -441,11 +469,6 @@ fn mark_format(mark: &Mark, theme: &Theme) -> highlighter::Format<Font> {
     } else {
         Color::from_rgb8(0x8A, 0x5A, 0x12)
     };
-    let heading = if dark {
-        Color::from_rgb8(0xF6, 0xF1, 0xE4)
-    } else {
-        Color::from_rgb8(0x2A, 0x16, 0x12)
-    };
     let done = if dark {
         Color::from_rgb8(0x7D, 0xC9, 0xA4)
     } else {
@@ -467,13 +490,11 @@ fn mark_format(mark: &Mark, theme: &Theme) -> highlighter::Format<Font> {
         };
     }
     let mut color = match mark.face {
-        Face::Text => None,
         Face::Marker | Face::Meta => Some(marker),
         Face::Tag | Face::Link | Face::Wiki | Face::Image | Face::Check | Face::Quote => {
             Some(accent)
         }
-        Face::Heading(2) => Some(accent),
-        Face::Heading(_) => Some(heading),
+        Face::Text | Face::Heading(_) => None,
         Face::Checked => Some(done),
         Face::Callout(kind) => Some(callout_color(kind, dark)),
         Face::Code | Face::Math => Some(code),
@@ -1229,6 +1250,21 @@ fn lead(line: &str) -> Lead {
         };
     }
     if let Some(end) = quote_end(line) {
+        if let Some(list) = list_after(line, end) {
+            return Lead {
+                skip: list.end,
+                mark: Mark {
+                    face: Face::Quote,
+                    flags: 0,
+                },
+                base: if list.done {
+                    strike_mark()
+                } else {
+                    text_mark()
+                },
+                box_at: list.box_at.map(|at| (at, list.done)),
+            };
+        }
         return Lead {
             skip: end,
             mark: Mark {
@@ -1239,7 +1275,7 @@ fn lead(line: &str) -> Lead {
             box_at: None,
         };
     }
-    if let Some(list) = list_parts(line) {
+    if let Some(list) = list_parts(line).or_else(|| bare_task(line)) {
         return Lead {
             skip: list.end,
             mark: marker(),
@@ -1327,7 +1363,7 @@ struct ListParts {
 }
 
 fn list_parts(line: &str) -> Option<ListParts> {
-    let spaces = leading_spaces(line);
+    let spaces = leading_indent(line);
     if spaces > 24 {
         return None;
     }
@@ -1364,6 +1400,50 @@ fn list_parts(line: &str) -> Option<ListParts> {
         }
     }
     Some(ListParts { end, box_at, done })
+}
+
+/// A checkbox with no list marker, such as `[ ] call`.
+fn bare_task(line: &str) -> Option<ListParts> {
+    let spaces = leading_indent(line);
+    if spaces > 24 {
+        return None;
+    }
+    let rest = line.get(spaces..)?;
+    let mark = rest.as_bytes().get(1).copied()?;
+    if rest.len() < 3
+        || rest.as_bytes().first() != Some(&b'[')
+        || rest.as_bytes().get(2) != Some(&b']')
+        || !matches!(mark, b' ' | b'x' | b'X')
+    {
+        return None;
+    }
+    let mut end = spaces.saturating_add(3);
+    if line.as_bytes().get(end) == Some(&b' ') {
+        end = end.saturating_add(1);
+    }
+    Some(ListParts {
+        end,
+        box_at: Some(spaces),
+        done: mark == b'x' || mark == b'X',
+    })
+}
+
+/// `list_parts` or a bare checkbox, with indexes shifted by `from`.
+fn list_after(line: &str, from: usize) -> Option<ListParts> {
+    let rest = line.get(from..)?;
+    let mut parts = list_parts(rest).or_else(|| bare_task(rest))?;
+    parts.end = parts.end.saturating_add(from);
+    if let Some(at) = parts.box_at.as_mut() {
+        *at = at.saturating_add(from);
+    }
+    Some(parts)
+}
+
+fn task_line_parts(line: &str) -> Option<ListParts> {
+    let from = quote_end(line).unwrap_or(0);
+    let parts = list_after(line, from)?;
+    parts.box_at?;
+    Some(parts)
 }
 
 fn is_rule(text: &str) -> bool {
@@ -1546,6 +1626,13 @@ fn leading_spaces(text: &str) -> usize {
     text.bytes().take_while(|byte| *byte == b' ').count()
 }
 
+fn leading_indent(text: &str) -> usize {
+    text.chars()
+        .take_while(|char| *char == ' ' || *char == '\t')
+        .map(char::len_utf8)
+        .sum()
+}
+
 fn edge_before(text: &str, index: usize) -> bool {
     text.get(..index)
         .and_then(|prefix| prefix.chars().next_back())
@@ -1563,7 +1650,7 @@ pub(super) struct TaskLine {
 pub(super) fn task_lines(body: &str) -> Vec<TaskLine> {
     let mut lines = Vec::new();
     for (line, text) in body.split('\n').enumerate() {
-        let Some(list) = list_parts(text) else {
+        let Some(list) = task_line_parts(text) else {
             continue;
         };
         let Some(at) = list.box_at else {
@@ -1661,7 +1748,7 @@ pub(super) fn set_task_line(body: &str, line_index: usize, done: bool) -> Option
             .map_or(body.len(), |at| start.saturating_add(at));
         if index == line_index {
             let line = body.get(start..end)?;
-            let list = list_parts(line)?;
+            let list = task_line_parts(line)?;
             let at = list.box_at?;
             if list.done == done {
                 return None;
@@ -2285,12 +2372,14 @@ fn line_px(line: &str) -> f32 {
 }
 
 fn heading_px(level: u8) -> f32 {
+    // The note title is the largest heading. These step down from it.
     match level {
-        1 => 32.0,
-        2 => 26.0,
-        3 => 22.0,
+        1 => 28.0,
+        2 => 24.0,
+        3 => 21.0,
         4 => 19.0,
-        _ => BODY,
+        5 => 17.0,
+        _ => 15.0,
     }
 }
 
@@ -2350,6 +2439,13 @@ fn window_bytes(text: &str, cursor: &text_editor::Cursor) -> (usize, usize) {
     }
     let start = floor_boundary(line, win.start.min(line.len()));
     let end = floor_boundary(line, win.end.max(start).min(line.len()));
+    let info = lead(line);
+    if info.box_at.is_some() {
+        let skip = info.skip.min(line.len());
+        let start = start.max(skip);
+        let end = end.max(start);
+        return (ls.saturating_add(start), ls.saturating_add(end));
+    }
     (ls.saturating_add(start), ls.saturating_add(end))
 }
 
@@ -2581,20 +2677,10 @@ fn look_of(mark: Mark, dark: bool) -> Look {
     } else {
         Color::from_rgb8(0xA8, 0xA2, 0x9A)
     };
-    let struck = if dark {
-        Color::from_rgb8(0xC4, 0x8A, 0x86)
-    } else {
-        Color::from_rgb8(0x8F, 0x45, 0x42)
-    };
     let code = if dark {
         Color::from_rgb8(0xE0, 0xB3, 0x66)
     } else {
         Color::from_rgb8(0x8A, 0x5A, 0x12)
-    };
-    let heading = if dark {
-        Color::from_rgb8(0xF6, 0xF1, 0xE4)
-    } else {
-        Color::from_rgb8(0x2A, 0x16, 0x12)
     };
     let done = if dark {
         Color::from_rgb8(0x7D, 0xC9, 0xA4)
@@ -2631,21 +2717,13 @@ fn look_of(mark: Mark, dark: bool) -> Look {
         }
         Face::Heading(level) => {
             look.size = heading_px(level);
-            if level == 2 {
-                Some(accent)
-            } else {
-                Some(heading)
-            }
+            None
         }
         Face::Checked => Some(done),
         Face::Callout(kind) => Some(callout_color(kind, dark)),
         Face::Code | Face::Math => Some(code),
     };
-    if mark.flags & HIGH != 0 {
-        look.color = Some(gold);
-    }
     if mark.flags & STRIKE != 0 {
-        look.color = Some(struck);
         look.strike = true;
     }
     look.font = if mark.flags & STRONG != 0 && mark.flags & EM != 0 {
@@ -2697,9 +2775,13 @@ fn look_at(line: &str, at: usize, carry: Carry, at_start: bool, dark: bool) -> L
     look
 }
 
+#[derive(Clone)]
 struct Piece {
     text: String,
-    hit: usize,
+    /// Document byte where this drawn text starts, when `literal`.
+    origin: usize,
+    /// The drawn letters are the source bytes. A bullet is not.
+    literal: bool,
     look: Look,
 }
 
@@ -2725,11 +2807,9 @@ fn pieces_between(
     {
         out.push(Piece {
             text: list_label(line),
-            hit: base.saturating_add(lead.skip),
-            look: Look {
-                color: Some(accent(dark)),
-                ..look_of(text_mark(), dark)
-            },
+            origin: base.saturating_add(lead.skip),
+            literal: false,
+            look: look_of(text_mark(), dark),
         });
     }
     let plain = look_of(lead.base, dark);
@@ -2780,9 +2860,9 @@ fn hide_marker(line: &str, range: Range<usize>, unclosed: &[usize]) -> bool {
 }
 
 fn list_label(line: &str) -> String {
-    let spaces = leading_spaces(line);
+    let spaces = leading_indent(line);
     let rest = line.get(spaces..).unwrap_or("");
-    let indent = " ".repeat(spaces);
+    let indent = line.get(..spaces).unwrap_or("");
     if rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("+ ") {
         return format!("{indent}• ");
     }
@@ -2820,25 +2900,47 @@ fn push_words(out: &mut Vec<Piece>, text: &str, source_at: usize, base: usize, l
         };
         out.push(Piece {
             text: slice.to_owned(),
-            hit: base.saturating_add(source_at).saturating_add(end),
+            origin: base.saturating_add(source_at).saturating_add(index),
+            literal: true,
             look,
         });
         index = end;
     }
 }
 
-fn rich_of<'a>(pieces: &[Piece], fill: bool) -> Element<'a, Message> {
-    if pieces.is_empty() {
-        return text("").size(BODY).into();
+fn place_of(pieces: &[Piece], shown: usize) -> usize {
+    let mut seen = 0_usize;
+    for (index, piece) in pieces.iter().enumerate() {
+        let next = seen.saturating_add(piece.text.len());
+        let last = index.saturating_add(1) == pieces.len();
+        if shown < next || (shown == next && !last) {
+            return piece_at(piece, shown.saturating_sub(seen));
+        }
+        if last {
+            let local = shown.saturating_sub(seen).min(piece.text.len());
+            return piece_at(piece, local);
+        }
+        seen = next;
     }
+    0
+}
+
+fn piece_at(piece: &Piece, local: usize) -> usize {
+    if !piece.literal {
+        return piece.origin;
+    }
+    let local = floor_boundary(&piece.text, local.min(piece.text.len()));
+    piece.origin.saturating_add(local)
+}
+
+fn paint_spans(pieces: &[Piece]) -> (Vec<iced::advanced::text::Span<'static, (), Font>>, f32) {
     let mut size = BODY;
     let mut spans = Vec::new();
     for piece in pieces {
         size = size.max(piece.look.size);
         let mut span = iced::widget::span(piece.text.clone())
             .size(piece.look.size)
-            .font(piece.look.font)
-            .link(piece.hit);
+            .font(piece.look.font);
         if let Some(color) = piece.look.color {
             span = span.color(color);
         }
@@ -2853,17 +2955,180 @@ fn rich_of<'a>(pieces: &[Piece], fill: bool) -> Element<'a, Message> {
         }
         spans.push(span);
     }
+    (spans, size)
+}
+
+fn rich_of<'a>(pieces: &[Piece], fill: bool) -> Element<'a, Message> {
+    if pieces.is_empty() {
+        return text("").size(BODY).into();
+    }
+    let (spans, size) = paint_spans(pieces);
     let mut rich = iced::widget::rich_text(spans)
         .size(size)
         .line_height(LEADING)
-        .font(sans())
-        .on_link_click(Message::Place);
+        .font(sans());
     if fill {
         rich = rich.width(Length::Fill);
     } else {
         rich = rich.wrapping(iced::advanced::text::Wrapping::None);
     }
-    rich.into()
+    PageText {
+        pieces: pieces.to_vec(),
+        fill,
+        child: rich.into(),
+    }
+    .into()
+}
+
+/// Drawn text that takes a click at the letter under the pointer.
+struct PageText<'a> {
+    pieces: Vec<Piece>,
+    fill: bool,
+    child: Element<'a, Message>,
+}
+
+impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for PageText<'_> {
+    fn size(&self) -> Size<Length> {
+        self.child.as_widget().size()
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        vec![iced::advanced::widget::Tree::new(&self.child)]
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        tree.diff_children(&[self.child.as_widget()]);
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        let Some(child) = tree.children.first_mut() else {
+            return iced::advanced::layout::Node::new(Size::ZERO);
+        };
+        self.child.as_widget_mut().layout(child, renderer, limits)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+        viewport: &iced::Rectangle,
+    ) {
+        if let iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) =
+            event
+            && let Some(point) = cursor.position_in(layout.bounds())
+        {
+            let byte = hit_byte(&self.pieces, self.fill, layout.bounds().size(), point);
+            shell.publish(Message::Place(byte));
+            shell.capture_event();
+            return;
+        }
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        self.child.as_widget_mut().update(
+            child, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        let Some(child) = tree.children.first() else {
+            return;
+        };
+        self.child
+            .as_widget()
+            .draw(child, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn mouse_interaction(
+        &self,
+        _tree: &iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        _viewport: &iced::Rectangle,
+        _renderer: &iced::Renderer,
+    ) -> iced::advanced::mouse::Interaction {
+        if cursor.is_over(layout.bounds()) {
+            iced::advanced::mouse::Interaction::Text
+        } else {
+            iced::advanced::mouse::Interaction::None
+        }
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        self.child
+            .as_widget_mut()
+            .operate(child, layout, renderer, operation);
+    }
+}
+
+impl<'a> From<PageText<'a>> for Element<'a, Message> {
+    fn from(text: PageText<'a>) -> Self {
+        Element::new(text)
+    }
+}
+
+fn hit_byte(pieces: &[Piece], fill: bool, bounds: Size, point: iced::Point) -> usize {
+    let (spans, size) = paint_spans(pieces);
+    let width = if fill {
+        bounds.width.max(1.0)
+    } else {
+        bounds.width.max(1.0) + 32.0
+    };
+    let paragraph = <iced::Renderer as iced::advanced::text::Renderer>::Paragraph::with_spans(
+        iced::advanced::text::Text {
+            content: spans.as_slice(),
+            bounds: Size::new(width, bounds.height.max(1.0)),
+            size: size.into(),
+            line_height: iced::advanced::text::LineHeight::Relative(LEADING),
+            font: sans(),
+            align_x: iced::advanced::text::Alignment::Left,
+            align_y: iced::alignment::Vertical::Top,
+            shaping: iced::advanced::text::Shaping::Advanced,
+            wrapping: if fill {
+                iced::advanced::text::Wrapping::Word
+            } else {
+                iced::advanced::text::Wrapping::None
+            },
+        },
+    );
+    let shown = paragraph.hit_test(point).map_or_else(
+        || {
+            pieces
+                .iter()
+                .map(|piece| piece.text.len())
+                .fold(0_usize, usize::saturating_add)
+        },
+        iced::advanced::text::Hit::cursor,
+    );
+    place_of(pieces, shown)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2942,7 +3207,7 @@ fn active_line<'a>(
     } else {
         inner.into()
     };
-    let show_box = lead.box_at.is_some() && win.start >= lead.skip;
+    let show_box = lead.box_at.is_some();
     if show_box {
         let done = lead.box_at.is_some_and(|(_, done)| done);
         row![
@@ -3858,5 +4123,35 @@ mod tests {
             .iter()
             .map(|piece| piece.text.as_str())
             .collect()
+    }
+
+    #[test]
+    fn a_click_lands_on_the_letter() {
+        let piece = super::Piece {
+            text: "Hello".to_owned(),
+            origin: 10,
+            literal: true,
+            look: super::look_of(super::text_mark(), true),
+        };
+        assert_eq!(super::place_of(std::slice::from_ref(&piece), 0), 10);
+        assert_eq!(super::place_of(std::slice::from_ref(&piece), 2), 12);
+        assert_eq!(super::place_of(std::slice::from_ref(&piece), 5), 15);
+    }
+
+    #[test]
+    fn a_task_keeps_its_box() {
+        assert!(super::lead("- [ ] call").box_at.is_some());
+        assert!(super::lead("> - [ ] call").box_at.is_some());
+        assert!(super::lead("> [ ] call").box_at.is_some());
+        assert!(super::lead("[ ] bare").box_at.is_some());
+        assert!(
+            super::lead("\t- [x] done")
+                .box_at
+                .is_some_and(|(_, done)| done)
+        );
+        assert!(super::lead("- milk").box_at.is_none());
+        assert!(super::heading_px(1) > super::heading_px(2));
+        assert!(super::heading_px(5) > super::heading_px(6));
+        assert!(super::heading_px(1) < 36.0);
     }
 }

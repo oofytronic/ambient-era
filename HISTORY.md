@@ -4,6 +4,14 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-12 — an agent is a short-lived grant
+
+Recorded in [docs/agents.md](docs/agents.md). Not built. An agent spawns with nothing, receives a scoped key that expires, proposes actions, and dies. It keeps no memory. A supervisor matches triggers and does not reason. What lasts is in the notes, the tasks, the messages, and a signed local log. A shared room still requires every member's agreement before an agent reads it. This does not change v0.1.
+
+## 2026-11-12 — the caret lands on the letter
+
+A click goes to the letter under the pointer, and hovering a word does not underline it. The note title is the largest heading. Each heading in the page is smaller than the one above it, in the same color as the text. A strike is a line through that color, and a highlight sits behind the letters. A task keeps its box, including a bare `[ ]`, a tabbed line, and a task under a quote. This supersedes the line that said a click puts the caret in the word.
+
 ## 2026-11-12 — a plain word stays on the line
 
 The painter only recorded marks. A plain word left the caret and was not drawn, so the next word started at the left edge. The page now draws the unmarked text as well. The saved text is unchanged.
