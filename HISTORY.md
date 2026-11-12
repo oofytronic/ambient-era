@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-12 — settings is a set of cards, and the gear is a real icon
+
+The welcome screen sits in the middle of the window. Settings is separate cards, not one tight list. The gear is Lucide's settings icon. The window title is only Aerodash. The small role next to the name is gone.
+
 ## 2026-11-11 — names stay on this computer
 
 The window opens on the word Aerodash, one letter at a time, over the two lines. That stays up for at least three seconds and until the folder has opened. A folder with no key asks for a device name, a personal name, and light, dark, or system. An existing key does not. The device name is the key-file label, set once, 1 to 32 bytes. The personal name and the color are a local `profile` file. Nicknames are a local `names` file. Neither is a record. The contact card is still four fields and still has no name, so a preferred username cannot be projected yet. What you call someone is only on this computer, and their key stays visible. Devices, recovery, and erasing the folder live in settings. Erase deletes the folder's children and starts the opening again. Saving a note runs off the typing thread. The editor is not reloaded when the seal finishes.

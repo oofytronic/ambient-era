@@ -378,13 +378,9 @@ impl App {
         iced::Subscription::batch(parts)
     }
 
+    #[allow(clippy::unused_self)]
     fn title(&self) -> String {
-        let role = match self.notebook.as_ref() {
-            Some(book) if book.holds_root() => "root",
-            Some(_) => "paired device",
-            None => "not open",
-        };
-        format!("Aerodash — {} ({role})", self.dir.display())
+        "Aerodash".to_owned()
     }
 
     #[allow(clippy::too_many_lines)]
@@ -783,11 +779,6 @@ impl App {
 
     fn toolbar(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        let role = match self.notebook.as_ref() {
-            Some(book) if book.holds_root() => "Holds the root",
-            Some(_) => "Paired device",
-            None => "Not open",
-        };
         let mut bar = row![
             text("Aerodash")
                 .font(serif())
@@ -796,9 +787,6 @@ impl App {
         .spacing(12)
         .align_y(iced::Alignment::Center)
         .padding([10.0, 16.0]);
-        if self.size.width >= 1100.0 {
-            bar = bar.push(text(role).size(12).color(ink.muted));
-        }
         if self.size.width >= 900.0 {
             bar = bar.push(
                 text(self.message.as_str())
@@ -1598,84 +1586,117 @@ impl App {
 
     fn devices_sheet(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        let mut sheet = column![
-            text("Devices").font(serif()).size(22),
+        let mut body =
+            column![
+            text("A passphrase locks the key file on this computer. It is not the recovery phrase.")
+                .size(14)
+                .color(ink.muted),
             text(self.dir.display().to_string())
                 .size(13)
-                .color(ink.muted),
-            text("Unlock").font(serif()).size(22),
-            text("Wraps the key file. Not the root, and not a platform passkey.")
-                .size(14)
                 .color(ink.muted),
             text_input("Passphrase", &self.unlock_input)
                 .on_input(Message::UnlockChanged)
                 .secure(true)
-                .padding(10)
+                .padding(12)
                 .style(field_style),
-            action_label("Wrap key file", Message::SubmitUnlock),
+            action_label("Lock the key file", Message::SubmitUnlock),
         ]
-        .spacing(12);
-        sheet = sheet.push(text("Devices").font(serif()).size(22));
+            .spacing(12);
+        body = body.push(text("Computers").size(13).color(ink.muted));
         if self.devices.is_empty() {
-            sheet = sheet.push(text("No devices yet.").size(13).color(ink.muted));
+            body = body.push(text("No other computers yet.").size(14).color(ink.muted));
         }
+        let can_revoke = self.notebook.as_ref().is_some_and(Notebook::holds_root);
         for device in &self.devices {
-            let state = if device.revoked {
-                "revoked"
-            } else if device.current {
-                "this device"
-            } else {
-                "active"
-            };
-            sheet = sheet.push(text(format!("{} · {state}", device.label)).size(15));
-            if self.notebook.as_ref().is_some_and(Notebook::holds_root)
-                && !device.current
-                && !device.revoked
-            {
-                let label = format!("Revoke {}", device.label);
-                sheet = sheet.push(ghost_label_owned(label, Message::Revoke(device.id.clone())));
-            }
+            body = body.push(Self::device_row(device, can_revoke));
         }
         if self.notebook.as_ref().is_some_and(Notebook::holds_root) {
-            sheet = sheet.push(text("A paired folder does not hold the root. Revoke stops future seals. It does not erase notes that device already opened.").size(14).color(ink.muted));
-            sheet = sheet.push(ghost_label("Open paired window", Message::OpenPaired));
-            sheet = sheet.push(ghost_label("Open the other person", Message::OpenPerson));
+            body = body.push(
+                text("Another window on this computer does not hold the main key. Revoke only stops new notes. Notes already written stay.")
+                    .size(14)
+                    .color(ink.muted),
+            );
+            body = body.push(
+                row![
+                    ghost_label("Open the other window", Message::OpenPaired),
+                    ghost_label("Open another person", Message::OpenPerson),
+                ]
+                .spacing(8),
+            );
         }
-        sheet.into()
+        settings_card("Devices", body.into())
+    }
+
+    fn device_row(device: &ambient_cli::DeviceLine, can_revoke: bool) -> Element<'static, Message> {
+        let state = if device.revoked {
+            "Revoked"
+        } else if device.current {
+            "This computer"
+        } else {
+            "Active"
+        };
+        let label = device.label.clone();
+        let mut line = row![
+            column![
+                text(label.clone()).size(16),
+                text(state).size(12).style(|theme: &Theme| {
+                    let ink = ink_of(theme);
+                    iced::widget::text::Style {
+                        color: Some(ink.muted),
+                    }
+                }),
+            ]
+            .spacing(2)
+            .width(Fill)
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center);
+        if can_revoke && !device.current && !device.revoked {
+            line = line.push(ghost_label_owned(
+                format!("Revoke {label}"),
+                Message::Revoke(device.id.clone()),
+            ));
+        }
+        line.into()
     }
 
     fn recovery_sheet(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        let mut sheet = column![
-            text("Recovery").font(serif()).size(22),
-            text("The phrase rebuilds the root on a new folder. It does not recreate the old device keys. The new folder adds itself so it can sync. Revoke the devices you no longer have. This is not social recovery.").size(14).color(ink.muted),
+        let mut body = column![
+            text("This phrase can rebuild the notebook on a new computer. It does not bring back old device keys. Keep it offline.")
+                .size(14)
+                .color(ink.muted),
             action_label("Show recovery phrase", Message::ShowPhrase),
         ]
-        .spacing(12);
+        .spacing(14);
         if !self.recovery_phrase.is_empty() {
-            sheet = sheet.push(text(&self.recovery_phrase).size(15));
-            sheet = sheet.push(ghost_label("Copy phrase", Message::CopyPhrase));
+            body = body.push(
+                container(text(&self.recovery_phrase).size(15))
+                    .padding(14)
+                    .width(Fill)
+                    .style(field_well),
+            );
+            body = body.push(ghost_label("Copy phrase", Message::CopyPhrase));
         }
-        sheet = sheet.push(
-            text_input("Paste phrase to restore", &self.restore_phrase)
+        body = body.push(
+            text_input("Paste a recovery phrase", &self.restore_phrase)
                 .on_input(Message::RestorePhraseChanged)
-                .padding(10)
+                .padding(12)
                 .style(field_style),
         );
-        sheet = sheet.push(action_label(
-            "Restore into new folder",
+        body = body.push(action_label(
+            "Restore on a new computer",
             Message::StartRestore,
         ));
-        sheet.into()
+        settings_card("Recovery", body.into())
     }
 
     fn sheet_title(title: &str) -> Element<'static, Message> {
         let title = title.to_owned();
         row![
-            text(title).font(serif()).size(32),
+            text(title).font(serif()).size(32).width(Fill),
             ghost_label("Back", Message::CloseSheet),
         ]
-        .spacing(12)
         .align_y(iced::Alignment::Center)
         .into()
     }
@@ -3212,101 +3233,120 @@ impl App {
 
     fn onboarding_screen(&self) -> Element<'_, Message> {
         let ink = self.ink();
+        let width = (self.size.width - 64.0).clamp(280.0, 440.0);
         container(
-            vscroll(
+            column![
+                text("Welcome").font(serif()).size(40),
+                text("Name this computer, then say what to call you.")
+                    .size(16)
+                    .color(ink.muted),
                 column![
-                    text("Welcome").font(serif()).size(36),
-                    text("Name this computer, and say what this notebook should call you. Then pick how it looks.")
-                        .size(15)
-                        .color(ink.muted),
-                    text("This computer").size(12).color(ink.muted),
+                    text("This computer").size(13).color(ink.muted),
                     text_input("A short name, like laptop", &self.device_draft)
                         .on_input(Message::DeviceDraft)
-                        .padding(10)
+                        .padding(12)
                         .style(field_style),
-                    text("Stored with the key. Another device of yours can see it. It is not a username.")
+                    text("Saved with this computer. It is not sent as your name.")
                         .size(13)
                         .color(ink.muted),
-                    text("Your name").size(12).color(ink.muted),
+                ]
+                .spacing(8),
+                column![
+                    text("Your name").size(13).color(ink.muted),
                     text_input("What should this notebook call you?", &self.name_draft)
                         .on_input(Message::NameDraft)
-                        .padding(10)
+                        .padding(12)
                         .style(field_style),
-                    text("A contact card cannot carry a name yet. This name stays on this computer. When you add someone, you can name them here, the way a phone does. Their key stays visible.")
+                    text("This stays on this computer. An invite still has no name on it.")
                         .size(13)
                         .color(ink.muted),
-                    text("Appearance").size(12).color(ink.muted),
-                    self.appearance_row(),
-                    action_label("Continue", Message::FinishOnboarding),
-                    text(self.message.as_str()).size(13).color(ink.muted),
                 ]
-                .spacing(12)
-                .max_width(520),
-            )
-            .height(Fill),
+                .spacing(8),
+                column![
+                    text("Look").size(13).color(ink.muted),
+                    self.appearance_row(),
+                ]
+                .spacing(8),
+                action_label("Continue", Message::FinishOnboarding),
+                text(self.message.as_str()).size(13).color(ink.muted),
+            ]
+            .spacing(22)
+            .width(width),
         )
-        .padding(48)
-        .width(Fill)
-        .height(Fill)
+        .center(Fill)
+        .padding(32)
         .into()
     }
 
     fn settings_sheet(&self) -> Element<'_, Message> {
-        vscroll(
-            column![
-                Self::sheet_title("Settings"),
-                self.you_section(),
-                self.appearance_section(),
-                self.devices_sheet(),
-                self.recovery_sheet(),
-                self.people_section(),
-                self.data_section(),
-            ]
-            .spacing(22)
-            .padding(iced::Padding {
-                top: 0.0,
-                right: 0.0,
-                bottom: 28.0,
-                left: 0.0,
-            }),
+        let width = (self.size.width - self.gutter_x() * 2.0 - 24.0).clamp(280.0, 640.0);
+        container(
+            vscroll(
+                container(
+                    column![
+                        Self::sheet_title("Settings"),
+                        self.you_section(),
+                        self.appearance_section(),
+                        self.devices_sheet(),
+                        self.recovery_sheet(),
+                        self.people_section(),
+                        self.data_section(),
+                    ]
+                    .spacing(16)
+                    .width(width)
+                    .padding(iced::Padding {
+                        top: 4.0,
+                        right: 0.0,
+                        bottom: 36.0,
+                        left: 0.0,
+                    }),
+                )
+                .width(Fill)
+                .align_x(iced::alignment::Horizontal::Center),
+            )
+            .height(Fill),
         )
+        .width(Fill)
         .height(Fill)
         .into()
     }
 
     fn you_section(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        column![
-            text("You").font(serif()).size(22),
-            text("Your name stays in this folder. It is not on the contact card, so another person does not see it.")
-                .size(14)
-                .color(ink.muted),
-            text_input("Your name", &self.name_draft)
-                .on_input(Message::NameDraft)
-                .padding(10)
-                .style(field_style),
-            text(format!(
-                "This computer is called {}. That was set when the folder was created.",
-                self.this_device_label()
-            ))
-            .size(14)
-            .color(ink.muted),
-        ]
-        .spacing(8)
-        .into()
+        settings_card(
+            "You",
+            column![
+                text("Your name stays on this computer. It is not sent to anyone.")
+                    .size(14)
+                    .color(ink.muted),
+                text_input("Your name", &self.name_draft)
+                    .on_input(Message::NameDraft)
+                    .padding(12)
+                    .style(field_style),
+                text("This computer").size(13).color(ink.muted),
+                text(self.this_device_label()).size(16),
+                text("Set when this folder was created.")
+                    .size(13)
+                    .color(ink.muted),
+            ]
+            .spacing(10)
+            .into(),
+        )
     }
 
     fn appearance_section(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        column![
-            text("Appearance").font(serif()).size(22),
-            text("Light, dark, or whatever this computer is using.")
-                .size(14)
-                .color(ink.muted),
-            self.appearance_row(),
-        ]
-        .spacing(8)
-        .into()
+        settings_card(
+            "Appearance",
+            column![
+                text("Light, dark, or the same as this computer.")
+                    .size(14)
+                    .color(ink.muted),
+                self.appearance_row(),
+            ]
+            .spacing(12)
+            .into(),
+        )
     }
 
     fn appearance_row(&self) -> Element<'_, Message> {
@@ -3328,22 +3368,17 @@ impl App {
             ),
         ]
         .spacing(8)
+        .width(Fill)
         .into()
     }
 
     fn people_section(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        let mut section = column![
-            text("People").font(serif()).size(22),
-            text("A contact card has no name yet. What you type here is only on this computer. The key stays so you can tell them apart.")
-                .size(14)
-                .color(ink.muted),
-        ]
-        .spacing(8);
+        let mut people = column![].spacing(16);
         if self.chats.is_empty() {
-            section = section.push(
+            people = people.push(
                 text("No one yet. Invite someone from Chat.")
-                    .size(13)
+                    .size(14)
                     .color(ink.muted),
             );
         }
@@ -3355,33 +3390,51 @@ impl App {
             };
             let draft = self.aliases.get(&chat.id).cloned().unwrap_or_default();
             let id = chat.id.clone();
-            section = section.push(text(tail).size(12).color(ink.muted));
-            section = section.push(
-                text_input("What do you call them?", &draft)
-                    .on_input(move |text| Message::AliasDraft(id.clone(), text))
-                    .padding(10)
-                    .style(field_style),
+            people = people.push(
+                column![
+                    text(tail).size(12).color(ink.muted),
+                    text_input("What do you call them?", &draft)
+                        .on_input(move |text| Message::AliasDraft(id.clone(), text))
+                        .padding(12)
+                        .style(field_style),
+                ]
+                .spacing(6),
             );
         }
-        section.into()
+        settings_card(
+            "People",
+            column![
+                text("Names you type here stay on this computer. The short key stays under the name, because an invite still cannot carry one.")
+                    .size(14)
+                    .color(ink.muted),
+                people,
+            ]
+            .spacing(14)
+            .into(),
+        )
     }
 
     fn data_section(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        column![
-            text("Data").font(serif()).size(22),
-            text("Export writes markdown into this folder. Erase removes the notes, the key, and the names on this computer. It does not reach another device.")
-                .size(14)
-                .color(ink.muted),
-            action_label("Export notes", Message::ExportNotes),
-            text_input("Type delete to erase", &self.wipe_draft)
-                .on_input(Message::WipeDraft)
-                .padding(10)
-                .style(field_style),
-            action_label("Erase this notebook", Message::ConfirmWipe),
-        ]
-        .spacing(8)
-        .into()
+        settings_card(
+            "Your notes",
+            column![
+                text("Save a copy of your notes into this folder, or erase this computer's copy. Erasing does not reach another computer.")
+                    .size(14)
+                    .color(ink.muted),
+                action_label("Export notes", Message::ExportNotes),
+                text("Type delete, then erase. This cannot be undone.")
+                    .size(13)
+                    .color(ink.muted),
+                text_input("delete", &self.wipe_draft)
+                    .on_input(Message::WipeDraft)
+                    .padding(12)
+                    .style(field_style),
+                danger_label("Erase this notebook", Message::ConfirmWipe),
+            ]
+            .spacing(12)
+            .into(),
+        )
     }
 
     fn chat_name(&self, chat: &ambient_cli::ConversationSummary) -> String {
@@ -3758,6 +3811,46 @@ fn card_style(theme: &Theme) -> container::Style {
     }
 }
 
+fn section_card(theme: &Theme) -> container::Style {
+    let ink = ink_of(theme);
+    container::Style {
+        background: Some(iced::Background::Color(ink.surface)),
+        text_color: Some(ink.text),
+        border: iced::Border {
+            radius: 14.0.into(),
+            width: 1.0,
+            color: ink.hairline,
+        },
+        ..Default::default()
+    }
+}
+
+fn field_well(theme: &Theme) -> container::Style {
+    let ink = ink_of(theme);
+    container::Style {
+        background: Some(iced::Background::Color(ink.field)),
+        text_color: Some(ink.text),
+        border: iced::Border {
+            radius: 10.0.into(),
+            width: 1.0,
+            color: ink.hairline,
+        },
+        ..Default::default()
+    }
+}
+
+fn settings_card<'a>(title: &'static str, body: Element<'a, Message>) -> Element<'a, Message> {
+    container(
+        column![text(title).font(serif()).size(22), body]
+            .spacing(14)
+            .width(Fill),
+    )
+    .padding(20)
+    .width(Fill)
+    .style(section_card)
+    .into()
+}
+
 fn bubble_style(theme: &Theme) -> container::Style {
     let ink = ink_of(theme);
     container::Style {
@@ -4070,10 +4163,39 @@ fn hairline_v() -> Element<'static, Message> {
 
 fn action_label(label: &str, message: Message) -> Element<'_, Message> {
     button(text(label).size(14))
-        .padding([8.0, 14.0])
+        .padding([10.0, 16.0])
         .on_press(message)
         .style(action_style)
         .into()
+}
+
+fn danger_label(label: &'static str, message: Message) -> Element<'static, Message> {
+    button(text(label).size(14))
+        .padding([10.0, 16.0])
+        .on_press(message)
+        .style(danger_style)
+        .into()
+}
+
+fn danger_style(theme: &Theme, status: button::Status) -> button::Style {
+    let ink = ink_of(theme);
+    let danger = Color::from_rgb8(184, 78, 62);
+    let background = match status {
+        button::Status::Hovered => mix(danger, Color::WHITE, 0.08),
+        button::Status::Pressed => mix(danger, Color::BLACK, 0.16),
+        button::Status::Disabled => mix(danger, ink.bg, 0.45),
+        button::Status::Active => danger,
+    };
+    button::Style {
+        background: Some(iced::Background::Color(background)),
+        text_color: Color::from_rgb8(0xED, 0xEA, 0xDE),
+        border: iced::Border {
+            radius: 8.0.into(),
+            width: 0.0,
+            color: Color::TRANSPARENT,
+        },
+        ..Default::default()
+    }
 }
 
 fn action_fill(label: &str, message: Message) -> Element<'_, Message> {
@@ -4146,34 +4268,27 @@ fn gear_handle(dark: bool) -> iced_image::Handle {
 }
 
 fn gear_png(color: [u8; 3]) -> Vec<u8> {
-    let size = 64_u32;
-    let mut pixels = vec![0_u8; (size * size * 4) as usize];
-    for y in 0..size {
-        for x in 0..size {
-            let dx = f64::from(x) - 31.5;
-            let dy = f64::from(y) - 31.5;
-            if !gear_ink(dx.hypot(dy), dy.atan2(dx)) {
-                continue;
-            }
-            let index = ((y * size + x) * 4) as usize;
-            if let Some(pixel) = pixels.get_mut(index..index.saturating_add(4)) {
-                pixel.copy_from_slice(&[color[0], color[1], color[2], 255]);
-            }
+    let Ok(icon) = image::load_from_memory(include_bytes!("../icons/settings.png")) else {
+        return Vec::new();
+    };
+    let icon = icon.to_rgba8();
+    let (width, height) = icon.dimensions();
+    let mut pixels = icon.into_raw();
+    for chunk in pixels.chunks_exact_mut(4) {
+        let Ok(pixel) = <&mut [u8; 4]>::try_from(chunk) else {
+            continue;
+        };
+        if pixel[3] == 0 {
+            continue;
         }
+        pixel[0] = color[0];
+        pixel[1] = color[1];
+        pixel[2] = color[2];
     }
-    encode_png(&pixels, size)
-}
-
-fn gear_ink(radius: f64, angle: f64) -> bool {
-    if !(6.5..14.5).contains(&radius) && !(16.0..23.5).contains(&radius) {
-        return false;
-    }
-    if radius < 16.0 {
-        return true;
-    }
-    let teeth = 8.0;
-    let turn = (angle * teeth / std::f64::consts::TAU).fract();
-    (0.12..0.88).contains(&turn)
+    let mut buf = Vec::new();
+    let encoder = ::image::codecs::png::PngEncoder::new(Cursor::new(&mut buf));
+    let _ = encoder.write_image(&pixels, width, height, ::image::ExtendedColorType::Rgba8);
+    buf
 }
 
 fn mode_handle(dark: bool) -> iced_image::Handle {
@@ -4382,11 +4497,17 @@ fn write_snapshot(
 }
 
 fn choice_button(label: &str, active: bool, message: Message) -> Element<'_, Message> {
-    button(text(label).size(14))
-        .padding([8.0, 14.0])
-        .on_press(message)
-        .style(segment_style(active))
-        .into()
+    button(
+        text(label)
+            .size(14)
+            .width(Fill)
+            .align_x(iced::alignment::Horizontal::Center),
+    )
+    .width(Fill)
+    .padding([10.0, 12.0])
+    .on_press(message)
+    .style(segment_style(active))
+    .into()
 }
 
 fn binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
