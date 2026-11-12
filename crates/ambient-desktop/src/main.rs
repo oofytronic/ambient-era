@@ -17,7 +17,8 @@ use iced::keyboard::Key;
 use iced::widget::canvas;
 use iced::widget::image as iced_image;
 use iced::widget::{
-    button, checkbox, column, container, row, scrollable, space, text, text_editor, text_input,
+    button, checkbox, column, container, row, scrollable, space, stack, text, text_editor,
+    text_input, tooltip,
 };
 use iced::{Color, Element, Fill, Font, Size, Task, Theme};
 use image::ImageEncoder;
@@ -80,9 +81,11 @@ struct App {
     dir: PathBuf,
     notebook: Option<Notebook>,
     open_error: String,
+    catalog: Vec<NoteSummary>,
     notes: Vec<NoteSummary>,
     tasks: Vec<TaskRow>,
     query: String,
+    tag: Option<String>,
     selected: Option<String>,
     title_text: String,
     body: markdown::NoteBody,
@@ -125,8 +128,6 @@ struct App {
     detail: bool,
     pending_files: Vec<PathBuf>,
     task_draft: String,
-    note_task_draft: String,
-    task_labels: BTreeMap<usize, String>,
     confirm_delete: bool,
     send_open: bool,
     send_choice: Option<String>,
@@ -137,6 +138,7 @@ struct App {
 #[derive(Clone, Debug)]
 enum Message {
     QueryChanged(String),
+    PickTag(Option<String>),
     Select(String),
     NewNote,
     TitleChanged(String),
@@ -194,18 +196,6 @@ enum Message {
     Format(FormatKind),
     TaskDraft(String),
     AddTask,
-    NoteTaskDraft(String),
-    AddNoteTask,
-    TaskLabel {
-        line: usize,
-        text: String,
-    },
-    RenameTask(usize),
-    RemoveTask(usize),
-    SetOpenTask {
-        line: usize,
-        done: bool,
-    },
     AskDelete,
     CancelDelete,
     DeleteNote,
@@ -213,6 +203,7 @@ enum Message {
     ConfirmSend,
     CancelSend,
     Breeze,
+    AutoSave,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -247,9 +238,11 @@ impl App {
             dir,
             notebook: None,
             open_error: String::new(),
+            catalog: Vec::new(),
             notes: Vec::new(),
             tasks: Vec::new(),
             query: String::new(),
+            tag: None,
             selected: None,
             title_text: String::new(),
             body: markdown::NoteBody::new(),
@@ -292,8 +285,6 @@ impl App {
             detail: false,
             pending_files: Vec::new(),
             task_draft: String::new(),
-            note_task_draft: String::new(),
-            task_labels: BTreeMap::new(),
             confirm_delete: false,
             send_open: false,
             send_choice: None,
@@ -349,6 +340,11 @@ impl App {
                 iced::time::every(std::time::Duration::from_millis(32)).map(|_| Message::Breeze),
             );
         }
+        if app.notebook.is_some() && app.editor_dirty() {
+            parts.push(
+                iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::AutoSave),
+            );
+        }
         let remote = app.net_mode != ambient_cli::NetMode::ThisComputer;
         if app.notebook.is_some() && (app.relay_ready || remote) {
             parts.push(
@@ -372,7 +368,12 @@ impl App {
         match message {
             Message::QueryChanged(query) => {
                 self.query = query;
-                self.reload();
+                self.refresh_shown();
+                Task::none()
+            }
+            Message::PickTag(tag) => {
+                self.tag = if self.tag == tag { None } else { tag };
+                self.refresh_shown();
                 Task::none()
             }
             Message::Select(id) => {
@@ -645,30 +646,6 @@ impl App {
                 self.add_loose_task();
                 Task::none()
             }
-            Message::NoteTaskDraft(text) => {
-                self.note_task_draft = text;
-                Task::none()
-            }
-            Message::AddNoteTask => {
-                self.add_note_task();
-                Task::none()
-            }
-            Message::TaskLabel { line, text } => {
-                self.task_labels.insert(line, text);
-                Task::none()
-            }
-            Message::RenameTask(line) => {
-                self.rename_note_task(line);
-                Task::none()
-            }
-            Message::RemoveTask(line) => {
-                self.remove_note_task(line);
-                Task::none()
-            }
-            Message::SetOpenTask { line, done } => {
-                self.set_open_task(line, done);
-                Task::none()
-            }
             Message::AskDelete => {
                 if self.selected.is_some() || self.editor_dirty() {
                     self.confirm_delete = true;
@@ -697,6 +674,10 @@ impl App {
             }
             Message::Breeze => {
                 self.breeze_frame = self.breeze_frame.wrapping_add(1);
+                Task::none()
+            }
+            Message::AutoSave => {
+                self.autosave();
                 Task::none()
             }
             Message::Synced(outcome) => self.finish_sync(outcome),
@@ -924,33 +905,79 @@ impl App {
                     .color(ink.muted),
             );
         } else {
-            side = side.push(
-                text_input("Search notes", &self.query)
-                    .on_input(Message::QueryChanged)
-                    .padding(10)
-                    .size(14)
-                    .style(field_style),
-            );
-            side = side.push(action_fill("New note", Message::NewNote));
-            if self.notes.is_empty() {
-                let empty = if self.query.is_empty() {
-                    "No notes yet."
-                } else {
-                    "No notes match."
-                };
-                side = side.push(text(empty).size(13).color(ink.muted));
-            }
-            let mut notes = column![].spacing(2);
-            for note in &self.notes {
-                notes = notes.push(self.note_row(note));
-            }
-            side = side.push(scrollable(notes).height(Fill));
+            side = side.push(self.note_index());
         }
         container(side)
             .width(self.side_width())
             .height(Fill)
             .style(surface_pane)
             .into()
+    }
+
+    fn note_index(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let mut block = column![
+            text_input("Search notes", &self.query)
+                .on_input(Message::QueryChanged)
+                .padding(10)
+                .size(14)
+                .style(field_style),
+        ]
+        .spacing(8)
+        .width(Fill)
+        .height(Fill);
+        if self.notes.is_empty() {
+            let empty = if self.catalog.is_empty() {
+                "No notes yet."
+            } else {
+                "No notes match."
+            };
+            block = block.push(text(empty).size(13).color(ink.muted));
+        }
+        let mut list = column![].spacing(2).width(Fill);
+        let tagged = self.catalog.iter().any(|note| !note.tags.is_empty());
+        if tagged {
+            list = list.push(self.tag_row(None, self.catalog.len()));
+            let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+            for note in &self.catalog {
+                for tag in &note.tags {
+                    *counts.entry(tag.as_str()).or_default() += 1;
+                }
+            }
+            for (tag, count) in counts {
+                list = list.push(self.tag_row(Some(tag), count));
+            }
+        } else if !self.catalog.is_empty() {
+            list = list.push(
+                text("A #tag in a note files it here.")
+                    .size(12)
+                    .color(ink.muted),
+            );
+        }
+        for note in &self.notes {
+            list = list.push(self.note_row(note));
+        }
+        block.push(vscroll(list).height(Fill).width(Fill)).into()
+    }
+
+    fn tag_row(&self, tag: Option<&str>, count: usize) -> Element<'_, Message> {
+        let ink = self.ink();
+        let active = self.tag.as_deref() == tag;
+        let label = tag.map_or_else(|| "All".to_owned(), |name| format!("#{name}"));
+        let chosen = tag.map(str::to_owned);
+        button(
+            row![
+                text(label).size(13).width(Fill),
+                text(count.to_string()).size(12).color(ink.muted),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        )
+        .width(Fill)
+        .padding([4.0, 8.0])
+        .on_press(Message::PickTag(chosen))
+        .style(list_row(active))
+        .into()
     }
 
     fn note_row(&self, note: &NoteSummary) -> Element<'_, Message> {
@@ -968,6 +995,18 @@ impl App {
                 meta.push_str(" · ");
             }
             meta.push_str("conflict");
+        }
+        if !note.tags.is_empty() {
+            if !meta.is_empty() {
+                meta.push_str(" · ");
+            }
+            for (index, tag) in note.tags.iter().take(3).enumerate() {
+                if index > 0 {
+                    meta.push(' ');
+                }
+                meta.push('#');
+                meta.push_str(tag);
+            }
         }
         if !meta.is_empty() {
             lines = lines.push(text(meta).size(12).color(ink.muted).width(Fill));
@@ -1023,7 +1062,7 @@ impl App {
             text("This goes in a note named Tasks. A box in any other note shows up here too.")
                 .size(13)
                 .color(ink.muted),
-            scrollable(list).height(Fill).width(Fill),
+            vscroll(list).height(Fill).width(Fill),
         ]
         .spacing(12)
         .width(Fill)
@@ -1072,31 +1111,30 @@ impl App {
     }
 
     fn rebuild_tasks(&mut self) {
-        let listed = self
-            .notebook
-            .as_ref()
-            .and_then(|book| book.list().ok())
-            .unwrap_or_default();
+        let selected = self.selected.clone();
+        let unsaved = self.unsaved.clone();
         let mut rows = Vec::new();
-        for note in listed {
-            if note.conflict {
-                continue;
-            }
-            let Some((body, conflict, _)) = self.task_source(&note.id) else {
-                continue;
-            };
-            if conflict {
-                continue;
-            }
-            for task in markdown::task_lines(&body) {
-                rows.push(TaskRow {
-                    note_id: note.id.clone(),
-                    note_title: note.title.clone(),
-                    line: task.line,
-                    done: task.done,
-                    text: task.text,
-                });
-            }
+        if let Some(book) = self.notebook.as_ref() {
+            let _ = book.visit_notes(|id, title, body, conflict| {
+                if selected.as_deref() == Some(id) {
+                    return;
+                }
+                if let Some((_, draft_title, draft_body)) = unsaved
+                    .iter()
+                    .find(|(key, _, _)| key.as_deref() == Some(id))
+                {
+                    push_tasks(&mut rows, id, draft_title, draft_body);
+                    return;
+                }
+                if !conflict {
+                    push_tasks(&mut rows, id, title, body);
+                }
+            });
+        }
+        if let Some(id) = &selected
+            && self.conflicts.is_empty()
+        {
+            push_tasks(&mut rows, id, &self.title_text, &self.body.text());
         }
         rows.sort_by(|left, right| {
             left.done
@@ -1229,7 +1267,7 @@ impl App {
                 versions = versions.push(text(format!("Version {number} · {writer}: {title}")));
                 versions = versions.push(text(note_body).color(ink.muted));
             }
-            body = body.push(scrollable(versions).height(160));
+            body = body.push(vscroll(versions).height(160));
         }
         if !self.note_writer.is_empty() && self.conflicts.is_empty() {
             body = body.push(
@@ -1251,10 +1289,6 @@ impl App {
         }
         body = body.push(markdown::view(&self.body));
         body = body.push(self.note_media());
-        if !self.send_open {
-            body = body.push(hairline());
-            body = body.push(self.note_tasks());
-        }
         if self.send_open {
             body = body.push(text("Which chat?").size(13).color(ink.muted));
             let mut choices = column![].spacing(4).width(Fill);
@@ -1274,7 +1308,7 @@ impl App {
                 .iter()
                 .fold(0.0_f32, |height, _| (height + 40.0).min(168.0))
                 .max(40.0);
-            body = body.push(scrollable(choices).height(list_h).width(Fill));
+            body = body.push(vscroll(choices).height(list_h).width(Fill));
             body = body.push(
                 row![
                     action_label("Send", Message::ConfirmSend),
@@ -1282,32 +1316,57 @@ impl App {
                 ]
                 .spacing(8),
             );
-        } else if self.confirm_delete {
-            body = body.push(self.delete_confirm());
-        } else {
-            body = body.push(self.note_actions());
+            return body.into();
         }
-        body.into()
+        if self.confirm_delete {
+            body = body.push(self.delete_confirm());
+            return body.into();
+        }
+        self.overlay_tools(body.into(), true)
     }
 
-    fn note_actions(&self) -> Element<'_, Message> {
-        let mut actions = row![
-            ghost_label("New", Message::NewNote),
-            action_label("Save", Message::Save),
+    fn overlay_tools<'a>(
+        &'a self,
+        page: Element<'a, Message>,
+        editing: bool,
+    ) -> Element<'a, Message> {
+        stack![
+            page,
+            container(self.tool_cluster(editing))
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Right)
+                .align_y(iced::alignment::Vertical::Bottom)
+                .padding(iced::Padding {
+                    top: 0.0,
+                    right: 2.0,
+                    bottom: 2.0,
+                    left: 0.0,
+                }),
         ]
-        .spacing(8);
-        if self.selected.is_some() || self.editor_dirty() {
-            let label = if self.selected.is_some() {
+        .width(Fill)
+        .height(Fill)
+        .into()
+    }
+
+    fn tool_cluster(&self, editing: bool) -> Element<'_, Message> {
+        let mut tools = row![circle_button("+", "New note", Message::NewNote)].spacing(8);
+        if editing && (self.selected.is_some() || self.editor_dirty()) {
+            let hint = if self.selected.is_some() {
                 "Delete"
             } else {
                 "Discard"
             };
-            actions = actions.push(ghost_label(label, Message::AskDelete));
+            tools = tools.push(circle_button("×", hint, Message::AskDelete));
         }
-        if self.selected.is_some() || !self.body.text().is_empty() || !self.title_text.is_empty() {
-            actions = actions.push(ghost_label("Send to chat", Message::SendNoteToChat));
+        if editing
+            && (self.selected.is_some()
+                || !self.body.text().is_empty()
+                || !self.title_text.is_empty())
+        {
+            tools = tools.push(circle_button("↗", "Send to chat", Message::SendNoteToChat));
         }
-        actions.into()
+        tools.into()
     }
 
     fn delete_confirm(&self) -> Element<'_, Message> {
@@ -1328,69 +1387,6 @@ impl App {
             .spacing(8),
         ]
         .spacing(8)
-        .into()
-    }
-
-    fn note_tasks(&self) -> Element<'_, Message> {
-        let ink = self.ink();
-        let tasks = markdown::task_lines(&self.body.text());
-        let block = column![
-            text("Tasks in this note").font(serif()).size(18),
-            row![
-                text_input("Add a task", &self.note_task_draft)
-                    .on_input(Message::NoteTaskDraft)
-                    .on_submit(Message::AddNoteTask)
-                    .padding(10)
-                    .width(Fill)
-                    .style(field_style),
-                action_label("Add", Message::AddNoteTask),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center)
-            .width(Fill),
-            text("A checkbox line in this note. Enter saves a renamed line.")
-                .size(13)
-                .color(ink.muted),
-        ]
-        .spacing(8)
-        .width(Fill);
-        if tasks.is_empty() {
-            return block.into();
-        }
-        let mut rows = column![].spacing(6).width(Fill);
-        for task in &tasks {
-            rows = rows.push(self.note_task_row(task));
-        }
-        let mut height = 0.0_f32;
-        for _ in &tasks {
-            height = (height + 40.0).min(168.0);
-        }
-        block
-            .push(scrollable(rows).height(height).width(Fill))
-            .into()
-    }
-
-    fn note_task_row(&self, task: &markdown::TaskLine) -> Element<'_, Message> {
-        let line = task.line;
-        let shown = self
-            .task_labels
-            .get(&line)
-            .cloned()
-            .unwrap_or_else(|| task.text.clone());
-        row![
-            checkbox(task.done).on_toggle(move |done| Message::SetOpenTask { line, done }),
-            text_input("", &shown)
-                .on_input(move |text| Message::TaskLabel { line, text })
-                .on_submit(Message::RenameTask(line))
-                .padding([6, 8])
-                .size(15)
-                .width(Fill)
-                .style(field_style),
-            ghost_label("Remove", Message::RemoveTask(line)),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center)
-        .width(Fill)
         .into()
     }
 
@@ -1477,7 +1473,7 @@ impl App {
         composer = composer.push(composer_controls);
         container(
             column![
-                scrollable(lines.width(Fill))
+                vscroll(lines.width(Fill))
                     .height(Fill)
                     .width(Fill)
                     .anchor_bottom(),
@@ -1526,7 +1522,7 @@ impl App {
             "Start conversation",
             Message::StartConversation,
         ));
-        scrollable(sheet).height(Fill).into()
+        vscroll(sheet).height(Fill).into()
     }
 
     fn devices_sheet(&self) -> Element<'_, Message> {
@@ -1574,7 +1570,7 @@ impl App {
             sheet = sheet.push(ghost_label("Open paired window", Message::OpenPaired));
             sheet = sheet.push(ghost_label("Open the other person", Message::OpenPerson));
         }
-        scrollable(sheet).height(Fill).into()
+        vscroll(sheet).height(Fill).into()
     }
 
     fn recovery_sheet(&self) -> Element<'_, Message> {
@@ -1599,7 +1595,7 @@ impl App {
             "Restore into new folder",
             Message::StartRestore,
         ));
-        scrollable(sheet).height(Fill).into()
+        vscroll(sheet).height(Fill).into()
     }
 
     fn sheet_title(title: &str) -> Element<'static, Message> {
@@ -1617,19 +1613,60 @@ impl App {
         let found = {
             let Some(book) = self.notebook.as_ref() else {
                 self.tasks.clear();
+                self.catalog.clear();
+                self.notes.clear();
                 return;
             };
-            if self.query.is_empty() {
-                book.list()
-            } else {
-                book.search(&self.query)
-            }
+            book.list()
         };
         match found {
-            Ok(notes) => self.notes = notes,
+            Ok(notes) => self.catalog = notes,
             Err(err) => self.message = err.to_string(),
         }
+        if self.tag.as_ref().is_some_and(|tag| {
+            !self
+                .catalog
+                .iter()
+                .any(|note| note.tags.iter().any(|item| item == tag))
+        }) {
+            self.tag = None;
+        }
+        self.refresh_shown();
         self.rebuild_tasks();
+    }
+
+    fn refresh_shown(&mut self) {
+        let base = if self.query.is_empty() {
+            self.catalog.clone()
+        } else {
+            match self.notebook.as_ref().map(|book| book.search(&self.query)) {
+                Some(Ok(notes)) => notes,
+                Some(Err(err)) => {
+                    self.message = err.to_string();
+                    Vec::new()
+                }
+                None => Vec::new(),
+            }
+        };
+        self.notes = match &self.tag {
+            Some(tag) => base
+                .into_iter()
+                .filter(|note| note.tags.iter().any(|item| item == tag))
+                .collect(),
+            None => base,
+        };
+    }
+
+    fn autosave(&mut self) {
+        if self.notebook.is_none() || !self.editor_dirty() {
+            return;
+        }
+        if self
+            .edited_at
+            .is_some_and(|at| at.elapsed() >= Duration::from_millis(700))
+        {
+            self.save_keeping_editor();
+        }
     }
 
     fn reload_chat(&mut self) {
@@ -1669,8 +1706,6 @@ impl App {
     fn show_note(&mut self, id: &str) {
         self.send_open = false;
         self.confirm_delete = false;
-        self.task_labels.clear();
-        self.note_task_draft.clear();
         if self.selected.as_deref() == Some(id) && self.editor_dirty() {
             self.screen = Screen::Notes;
             self.sheet = Sheet::None;
@@ -1720,8 +1755,6 @@ impl App {
     fn clear_editor(&mut self) {
         self.send_open = false;
         self.confirm_delete = false;
-        self.task_labels.clear();
-        self.note_task_draft.clear();
         self.remember_unsaved();
         let stash = self
             .unsaved
@@ -1811,10 +1844,7 @@ impl App {
     }
 
     fn begin_sync(&mut self) -> Task<Message> {
-        if self.syncing || self.notebook.is_none() {
-            return Task::none();
-        }
-        if self.net_mode == ambient_cli::NetMode::ThisComputer && !self.relay_ready {
+        if self.notebook.is_none() {
             return Task::none();
         }
         if self.editor_dirty()
@@ -1823,6 +1853,11 @@ impl App {
                 .is_some_and(|at| at.elapsed() >= Duration::from_millis(700))
         {
             self.save_keeping_editor();
+        }
+        if self.syncing
+            || (self.net_mode == ambient_cli::NetMode::ThisComputer && !self.relay_ready)
+        {
+            return Task::none();
         }
         self.syncing = true;
         sync_task(self.dir.clone(), self.writes)
@@ -1945,7 +1980,7 @@ impl App {
     }
 
     fn format_bar() -> Element<'static, Message> {
-        scrollable(
+        hscroll(
             row![
                 format_caption("Word"),
                 format_button("B", FormatKind::Bold),
@@ -1973,9 +2008,6 @@ impl App {
             .align_y(iced::Alignment::Center)
             .padding([2, 0]),
         )
-        .direction(scrollable::Direction::Horizontal(
-            scrollable::Scrollbar::default(),
-        ))
         .width(Fill)
         .into()
     }
@@ -2051,30 +2083,7 @@ impl App {
     }
 
     fn note_browser(&self) -> Element<'_, Message> {
-        let ink = self.ink();
-        let mut side = column![
-            text_input("Search notes", &self.query)
-                .on_input(Message::QueryChanged)
-                .padding(10)
-                .size(14)
-                .style(field_style),
-            action_fill("New note", Message::NewNote),
-        ]
-        .spacing(8)
-        .width(Fill);
-        if self.notes.is_empty() {
-            let empty = if self.query.is_empty() {
-                "No notes yet."
-            } else {
-                "No notes match."
-            };
-            side = side.push(text(empty).size(13).color(ink.muted));
-        }
-        let mut notes = column![].spacing(2);
-        for note in &self.notes {
-            notes = notes.push(self.note_row(note));
-        }
-        side.push(scrollable(notes).height(Fill)).into()
+        self.overlay_tools(self.note_index(), false)
     }
 
     fn chat_browser(&self) -> Element<'_, Message> {
@@ -2119,12 +2128,7 @@ impl App {
                 }
             }
         }
-        scrollable(row)
-            .direction(scrollable::Direction::Horizontal(
-                scrollable::Scrollbar::default(),
-            ))
-            .height(156)
-            .into()
+        hscroll(row).height(156).into()
     }
 
     fn chat_bubble(&self, line: &ChatBubble, width: f32) -> Element<'static, Message> {
@@ -2691,83 +2695,6 @@ impl App {
         }
     }
 
-    fn add_note_task(&mut self) {
-        let label = self.note_task_draft.trim().replace(['\n', '\r'], " ");
-        if label.is_empty() {
-            self.say("Write the task first.");
-            return;
-        }
-        if self.notebook.is_none() {
-            self.say("Folder is not open.");
-            return;
-        }
-        if !self.conflicts.is_empty() {
-            self.say("Two versions. Write the one you want to keep, then save.");
-            return;
-        }
-        let mut next = self.body.text();
-        if !next.is_empty() && !next.ends_with('\n') {
-            next.push('\n');
-        }
-        next.push_str("- [ ] ");
-        next.push_str(&label);
-        next.push('\n');
-        self.write_open_body(&next);
-        self.note_task_draft.clear();
-        if self.message.is_empty() {
-            self.say("Added to this note.");
-        }
-    }
-
-    fn rename_note_task(&mut self, line: usize) {
-        let Some(label) = self.task_labels.get(&line).cloned() else {
-            return;
-        };
-        if !self.conflicts.is_empty() {
-            self.say("Two versions. Write the one you want to keep, then save.");
-            return;
-        }
-        let Some(next) = markdown::rename_task_line(&self.body.text(), line, &label) else {
-            self.task_labels.remove(&line);
-            return;
-        };
-        self.write_open_body(&next);
-    }
-
-    fn remove_note_task(&mut self, line: usize) {
-        if !self.conflicts.is_empty() {
-            self.say("Two versions. Write the one you want to keep, then save.");
-            return;
-        }
-        let Some(next) = markdown::remove_task_line(&self.body.text(), line) else {
-            return;
-        };
-        self.write_open_body(&next);
-        if self.message.is_empty() {
-            self.say("Removed.");
-        }
-    }
-
-    fn set_open_task(&mut self, line: usize, done: bool) {
-        if !self.conflicts.is_empty() {
-            self.say("Two versions. Write the one you want to keep, then save.");
-            return;
-        }
-        let Some(next) = markdown::set_task_line(&self.body.text(), line, done) else {
-            return;
-        };
-        self.write_open_body(&next);
-    }
-
-    fn write_open_body(&mut self, next: &str) {
-        self.task_labels.clear();
-        self.body.load(next);
-        self.edited_at = Some(Instant::now());
-        if self.notebook.is_some() {
-            self.save_keeping_editor();
-        }
-    }
-
     fn delete_open_note(&mut self) {
         self.confirm_delete = false;
         let Some(id) = self.selected.clone() else {
@@ -2795,8 +2722,6 @@ impl App {
                 self.conflicts.clear();
                 self.note_writer.clear();
                 self.edited_at = None;
-                self.task_labels.clear();
-                self.note_task_draft.clear();
                 self.writes = self.writes.saturating_add(1);
                 self.pending = true;
                 self.reload();
@@ -2813,8 +2738,6 @@ impl App {
         self.disk_title.clear();
         self.disk_body.clear();
         self.edited_at = None;
-        self.task_labels.clear();
-        self.note_task_draft.clear();
         self.confirm_delete = false;
     }
 
@@ -3331,6 +3254,131 @@ fn chat_words(words: String) -> Element<'static, Message> {
         .size(15)
         .wrapping(iced::advanced::text::Wrapping::WordOrGlyph)
         .into()
+}
+
+fn push_tasks(rows: &mut Vec<TaskRow>, id: &str, title: &str, body: &str) {
+    for task in markdown::task_lines(body) {
+        rows.push(TaskRow {
+            note_id: id.to_owned(),
+            note_title: title.to_owned(),
+            line: task.line,
+            done: task.done,
+            text: task.text,
+        });
+    }
+}
+
+fn circle_button(
+    glyph: &'static str,
+    hint: &'static str,
+    message: Message,
+) -> Element<'static, Message> {
+    let face = button(
+        text(glyph)
+            .size(16)
+            .align_x(iced::alignment::Horizontal::Center)
+            .width(Fill),
+    )
+    .width(36)
+    .height(36)
+    .padding(0)
+    .on_press(message)
+    .style(circle_style);
+    tooltip(
+        face,
+        container(text(hint).size(12))
+            .padding([4, 8])
+            .style(card_style),
+        tooltip::Position::Top,
+    )
+    .gap(6)
+    .into()
+}
+
+fn circle_style(theme: &Theme, status: button::Status) -> button::Style {
+    let ink = ink_of(theme);
+    let background = match status {
+        button::Status::Hovered => mix(ink.surface, ink.accent, 0.18),
+        button::Status::Pressed => mix(ink.surface, ink.accent, 0.32),
+        _ => ink.surface,
+    };
+    button::Style {
+        background: Some(iced::Background::Color(background)),
+        text_color: ink.text,
+        border: iced::Border {
+            radius: 18.0.into(),
+            width: 1.0,
+            color: ink.hairline,
+        },
+        ..Default::default()
+    }
+}
+
+fn slim_bar() -> scrollable::Scrollbar {
+    scrollable::Scrollbar::new()
+        .width(4.0)
+        .scroller_width(3.0)
+        .margin(2.0)
+}
+
+fn vscroll<'a>(content: impl Into<Element<'a, Message>>) -> scrollable::Scrollable<'a, Message> {
+    scrollable(content)
+        .direction(scrollable::Direction::Vertical(slim_bar()))
+        .style(scroll_style)
+}
+
+fn hscroll<'a>(content: impl Into<Element<'a, Message>>) -> scrollable::Scrollable<'a, Message> {
+    scrollable(content)
+        .direction(scrollable::Direction::Horizontal(slim_bar()))
+        .style(scroll_style)
+}
+
+fn scroll_style(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
+    let mut style = scrollable::default(theme, status);
+    let ink = ink_of(theme);
+    let thumb = Color {
+        a: if scroll_hot(status) { 0.62 } else { 0.22 },
+        ..ink.muted
+    };
+    let rail = scrollable::Rail {
+        background: None,
+        border: iced::Border {
+            radius: 2.0.into(),
+            width: 0.0,
+            color: Color::TRANSPARENT,
+        },
+        scroller: scrollable::Scroller {
+            background: iced::Background::Color(thumb),
+            border: iced::Border {
+                radius: 2.0.into(),
+                width: 0.0,
+                color: Color::TRANSPARENT,
+            },
+        },
+    };
+    style.vertical_rail = rail;
+    style.horizontal_rail = rail;
+    style.gap = None;
+    style
+}
+
+fn scroll_hot(status: scrollable::Status) -> bool {
+    matches!(
+        status,
+        scrollable::Status::Hovered {
+            is_horizontal_scrollbar_hovered: true,
+            ..
+        } | scrollable::Status::Hovered {
+            is_vertical_scrollbar_hovered: true,
+            ..
+        } | scrollable::Status::Dragged {
+            is_horizontal_scrollbar_dragged: true,
+            ..
+        } | scrollable::Status::Dragged {
+            is_vertical_scrollbar_dragged: true,
+            ..
+        }
+    )
 }
 
 fn hairline() -> Element<'static, Message> {

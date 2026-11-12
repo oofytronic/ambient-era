@@ -3,8 +3,6 @@
 //! The sealed notes log stays the source of truth. This file is a projection.
 //! It is not uploaded. The protocol store crate does not link SQLCipher.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -36,12 +34,12 @@ pub(crate) fn match_ids(
     key: &[u8; 32],
     rows: &[(String, String, String)],
     query: &str,
+    stamp: u64,
 ) -> Result<Vec<String>, CliError> {
     let Some(match_query) = fts_query(query) else {
         return Err(CliError::message("query has no words"));
     };
     let path = dir.join("search.db");
-    let stamp = rows_stamp(rows);
     {
         let guard = held().lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(open) = guard.as_ref()
@@ -58,15 +56,20 @@ pub(crate) fn match_ids(
     Ok(ids)
 }
 
-fn rows_stamp(rows: &[(String, String, String)]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    rows.len().hash(&mut hasher);
-    for (id, title, body) in rows {
-        id.hash(&mut hasher);
-        title.hash(&mut hasher);
-        body.hash(&mut hasher);
+/// Query the open index when `stamp` still matches. `None` means the caller must rebuild.
+pub(crate) fn match_fresh(
+    dir: &Path,
+    stamp: u64,
+    query: &str,
+) -> Option<Result<Vec<String>, CliError>> {
+    let match_query = fts_query(query)?;
+    let path = dir.join("search.db");
+    let guard = held().lock().unwrap_or_else(PoisonError::into_inner);
+    let open = guard.as_ref()?;
+    if open.path != path || open.stamp != stamp {
+        return None;
     }
-    hasher.finish()
+    Some(query_ids(&open.conn, &match_query))
 }
 
 fn rebuild(conn: &Connection, rows: &[(String, String, String)]) -> Result<(), CliError> {

@@ -1,7 +1,9 @@
 //! The notebook both the CLI and the desktop window use.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet};
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use ambient_events::{EventId, encode_unsigned, sign_wire, verify};
@@ -40,6 +42,8 @@ pub struct NoteSummary {
     pub writer: String,
     /// More than one head is a conflict. The window must not pick a winner.
     pub conflict: bool,
+    /// Tags written in the body as `#name`. A view, not a separate record.
+    pub tags: Vec<String>,
 }
 
 /// One surviving snapshot.
@@ -179,6 +183,37 @@ impl Notebook {
             .collect())
     }
 
+    /// Walk each visible note without cloning its body.
+    ///
+    /// The closure must not call back into this notebook.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when the log cannot be projected.
+    pub fn visit_notes(
+        &self,
+        mut visit: impl FnMut(&str, &str, &str, bool),
+    ) -> Result<(), CliError> {
+        self.ensure()?;
+        let guard = self.cache.borrow();
+        let Some(item) = guard.as_ref() else {
+            return Ok(());
+        };
+        let Some(view) = item.projected.view.as_ref() else {
+            return Ok(());
+        };
+        for (id, heads) in &view.notes {
+            if heads_are_deleted(heads) {
+                continue;
+            }
+            let hex_id = hex(id);
+            let title = heads.first().map(|head| head.title.as_str()).unwrap_or("");
+            let body = heads.first().map(|head| head.body.as_str()).unwrap_or("");
+            visit(&hex_id, title, body, heads.len() > 1);
+        }
+        Ok(())
+    }
+
     /// Notes matching `query`.
     ///
     /// Uses the SQLCipher FTS5 index when it opens. Words are matched
@@ -193,6 +228,25 @@ impl Notebook {
             return Err(CliError::message("empty query"));
         }
         self.ensure()?;
+        let stamp = {
+            let guard = self.cache.borrow();
+            let Some(item) = guard.as_ref() else {
+                return Ok(Vec::new());
+            };
+            let Some(view) = item.projected.view.as_ref() else {
+                return Ok(Vec::new());
+            };
+            notes_stamp(view)
+        };
+        let Some(dir) = self.local.key_path.parent() else {
+            return self.search_cloned(query);
+        };
+        if let Some(found) = crate::index::match_fresh(dir, stamp, query) {
+            return match found {
+                Ok(ids) => self.summaries_for(ids),
+                Err(_) => self.search_cloned(query),
+            };
+        }
         let (view, names) = {
             let guard = self.cache.borrow();
             let Some(item) = guard.as_ref() else {
@@ -202,9 +256,6 @@ impl Notebook {
                 return Ok(Vec::new());
             };
             (view, item.projected.names.clone())
-        };
-        let Some(dir) = self.local.key_path.parent() else {
-            return Ok(search_scan(&view, query, &names));
         };
         let mut rows = Vec::new();
         for (id, heads) in &view.notes {
@@ -218,9 +269,9 @@ impl Notebook {
             }
             rows.push((hex(id), title, body));
         }
-        match crate::index::match_ids(dir, &self.local.store_key, &rows, query) {
+        match crate::index::match_ids(dir, &self.local.store_key, &rows, query, stamp) {
             Ok(ids) => {
-                let wanted: std::collections::BTreeSet<String> = ids.into_iter().collect();
+                let wanted: BTreeSet<String> = ids.into_iter().collect();
                 Ok(view
                     .notes
                     .iter()
@@ -230,6 +281,34 @@ impl Notebook {
             }
             Err(_) => Ok(search_scan(&view, query, &names)),
         }
+    }
+
+    fn search_cloned(&self, query: &str) -> Result<Vec<NoteSummary>, CliError> {
+        let guard = self.cache.borrow();
+        let Some(item) = guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let Some(view) = item.projected.view.as_ref() else {
+            return Ok(Vec::new());
+        };
+        Ok(search_scan(view, query, &item.projected.names))
+    }
+
+    fn summaries_for(&self, ids: Vec<String>) -> Result<Vec<NoteSummary>, CliError> {
+        let wanted: BTreeSet<String> = ids.into_iter().collect();
+        let guard = self.cache.borrow();
+        let Some(item) = guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let Some(view) = item.projected.view.as_ref() else {
+            return Ok(Vec::new());
+        };
+        Ok(view
+            .notes
+            .iter()
+            .filter(|(id, heads)| wanted.contains(&hex(*id)) && !heads_are_deleted(heads))
+            .map(|(id, heads)| summary(id, heads, &item.projected.names))
+            .collect())
     }
 
     /// Open one note, including every conflicting head.
@@ -623,11 +702,127 @@ fn summary(
             .map_or(String::new(), |head| head.title.clone()),
         writer,
         conflict: heads.len() > 1,
+        tags: note_tags(heads),
     }
 }
 
 fn short_hex(bytes: &[u8; 32]) -> String {
     hex(bytes).chars().take(8).collect()
+}
+
+fn notes_stamp(view: &ambient_spaces::Projection) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    view.notes.len().hash(&mut hasher);
+    for (id, heads) in &view.notes {
+        id.hash(&mut hasher);
+        heads.len().hash(&mut hasher);
+        for head in heads {
+            head.title.hash(&mut hasher);
+            head.body.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn note_tags(heads: &[ambient_spaces::NoteHead]) -> Vec<String> {
+    let mut tags = BTreeSet::new();
+    for head in heads {
+        for tag in tags_in(&head.body) {
+            tags.insert(tag);
+        }
+    }
+    tags.into_iter().collect()
+}
+
+/// Tags in `text`. A heading (`# Title`) is not a tag. Fenced and inline code are skipped.
+fn tags_in(text: &str) -> Vec<String> {
+    let mut tags = BTreeSet::new();
+    let mut fence: Option<bool> = None;
+    for line in text.split('\n') {
+        if fence_line(line, &mut fence) {
+            continue;
+        }
+        collect_tags(line, &mut tags);
+    }
+    tags.into_iter().collect()
+}
+
+fn fence_line(line: &str, fence: &mut Option<bool>) -> bool {
+    let spaces = line.bytes().take_while(|byte| *byte == b' ').count();
+    if spaces > 3 {
+        return fence.is_some();
+    }
+    let trimmed_start = line.trim_start();
+    let tilde = if trimmed_start.starts_with("~~~") {
+        true
+    } else if trimmed_start.starts_with("```") {
+        false
+    } else {
+        return fence.is_some();
+    };
+    let marker = line.trim();
+    let want = if tilde { '~' } else { '`' };
+    let closer = marker.len() >= 3 && marker.chars().all(|char| char == want);
+    match *fence {
+        Some(open) if open == tilde && closer => *fence = None,
+        None => *fence = Some(tilde),
+        Some(_) => {}
+    }
+    true
+}
+
+fn collect_tags(line: &str, tags: &mut BTreeSet<String>) {
+    let mut index = 0;
+    let mut code = false;
+    while index < line.len() {
+        let Some(char) = line[index..].chars().next() else {
+            break;
+        };
+        if char == '`' {
+            code = !code;
+            index = index.saturating_add(char.len_utf8());
+            continue;
+        }
+        if !code && char == '#' {
+            if let Some(end) = tag_end_at(line, index) {
+                if let Some(name) = line.get(index.saturating_add(1)..end) {
+                    tags.insert(name.to_owned());
+                }
+                index = end;
+                continue;
+            }
+        }
+        index = index.saturating_add(char.len_utf8());
+    }
+}
+
+fn tag_end_at(line: &str, index: usize) -> Option<usize> {
+    if index > 0 {
+        let prev = line.get(..index)?.chars().next_back()?;
+        if prev.is_ascii_alphanumeric() {
+            return None;
+        }
+    }
+    let rest = line.get(index..)?;
+    if !rest.starts_with('#') || rest.starts_with("##") {
+        return None;
+    }
+    let mut end = index.saturating_add(1);
+    let mut saw = false;
+    while end < line.len() {
+        let char = line.get(end..)?.chars().next()?;
+        if char.is_ascii_alphanumeric() || matches!(char, '_' | '-' | '/') {
+            saw = true;
+            end = end.saturating_add(char.len_utf8());
+        } else {
+            break;
+        }
+    }
+    while end > index.saturating_add(1) && line.as_bytes().get(end.saturating_sub(1)) == Some(&b'/')
+    {
+        end = end.saturating_sub(1);
+    }
+    (saw && end > index.saturating_add(1)).then_some(end)
 }
 
 fn identity_wires<'a>(local: &Local, wires: &'a [Vec<u8>]) -> Result<Vec<&'a [u8]>, CliError> {

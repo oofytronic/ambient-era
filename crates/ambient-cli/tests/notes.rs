@@ -74,3 +74,58 @@ fn run_ok(args: &[&str], stdin: &str) -> Result<String, String> {
     .map_err(|err| err.to_string())?;
     String::from_utf8(output).map_err(|err| err.to_string())
 }
+
+#[test]
+fn a_tag_in_the_body_files_the_note() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("ambient-cli-tags-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let book = ambient_cli::Notebook::create(&dir).map_err(|err| err.to_string())?;
+    book.add(
+        "Hours",
+        "# Clinic\n\nWaiting #clinic\nAlso #clinic and #follow-up\n`#nope`\n```\n#hidden\n```\n",
+    )
+    .map_err(|err| err.to_string())?;
+    book.add("Plain", "no tag").map_err(|err| err.to_string())?;
+    let notes = book.list().map_err(|err| err.to_string())?;
+    let hours = notes
+        .iter()
+        .find(|note| note.title == "Hours")
+        .ok_or("missing Hours")?;
+    if hours.tags != ["clinic", "follow-up"] {
+        return Err(format!("tags were {:?}", hours.tags));
+    }
+    let plain = notes
+        .iter()
+        .find(|note| note.title == "Plain")
+        .ok_or("missing Plain")?;
+    if !plain.tags.is_empty() {
+        return Err(format!("plain note was filed as {:?}", plain.tags));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[test]
+fn warm_search_reuses_the_index() -> Result<(), String> {
+    let dir = std::env::temp_dir().join(format!("ambient-cli-warm-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let book = ambient_cli::Notebook::create(&dir).map_err(|err| err.to_string())?;
+    let body = format!("alpha note #work\n{}", "word ".repeat(80));
+    for index in 0..24 {
+        book.add(&format!("Note {index}"), &body)
+            .map_err(|err| err.to_string())?;
+    }
+    let started = std::time::Instant::now();
+    for _ in 0..20 {
+        let found = book.search("word").map_err(|err| err.to_string())?;
+        if found.len() != 24 {
+            return Err(format!("search returned {}", found.len()));
+        }
+    }
+    let elapsed = started.elapsed();
+    if elapsed > std::time::Duration::from_millis(1500) {
+        return Err(format!("warm search took {elapsed:?}"));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}

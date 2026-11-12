@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-11 — a note is filed by a tag in its text
+
+Notes are grouped by `#tag` in the body. A heading is not a tag. Fenced and inline code are not tags. The list is a view: there is no folder record, because a note is a snapshot and a tag syncs with it. `#clinic/billing` is one tag. The note screen no longer keeps a task editor under the page. A task is still the toolbar button, and the Tasks screen is still the same checkbox lines. New, delete, and send are small round buttons at the bottom right of the note. On a narrow window the new button sits on the list the same way. A pause writes the note on this computer even when the relay is off. Scrollbars are a thin thumb with no track.
+
 ## 2026-11-11 — a note is deleted by a later snapshot
 
 The notes tab creates, opens, edits, and deletes a note. Delete asks first. The write is still `note.put`: the body is only `%%ambient-deleted%%`, and the list hides the note when every head is that snapshot. The older text stays in the log. It is not a new event type.
