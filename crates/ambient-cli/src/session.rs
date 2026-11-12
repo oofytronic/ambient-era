@@ -107,7 +107,19 @@ impl Notebook {
     ///
     /// Returns [`CliError`] when the directory or the first events cannot be written.
     pub fn create(dir: &Path) -> Result<Self, CliError> {
-        let local = keys::create(dir, "this-computer")?;
+        Self::create_with_label(dir, "this-computer")
+    }
+
+    /// Create a notebook whose device label is `label` (1 to 32 bytes).
+    ///
+    /// The label is stored in the key file and on this device's record.
+    /// It is not a username and it is not sent as one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when the directory, the label, or the first events cannot be written.
+    pub fn create_with_label(dir: &Path, label: &str) -> Result<Self, CliError> {
+        let local = keys::create(dir, label)?;
         let genesis = local
             .identity
             .as_ref()

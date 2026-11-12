@@ -27,6 +27,7 @@ use qrcode::QrCode;
 mod clock;
 mod files;
 mod markdown;
+mod profile;
 
 use markdown::FormatKind;
 
@@ -58,9 +59,9 @@ fn main() -> iced::Result {
 }
 
 fn theme(app: &App) -> Theme {
-    let ink = Ink::from_dark(app.dark);
+    let ink = Ink::from_dark(app.is_dark());
     Theme::custom(
-        if app.dark {
+        if app.is_dark() {
             "parchment-dark"
         } else {
             "parchment-light"
@@ -120,7 +121,18 @@ struct App {
     qr_bytes: Option<Vec<u8>>,
     unlock_input: String,
     sheet: Sheet,
-    dark: bool,
+    appearance: profile::Appearance,
+    system_dark: bool,
+    loaded: bool,
+    saving: bool,
+    save_again: bool,
+    save_token: u64,
+    your_name: String,
+    device_draft: String,
+    name_draft: String,
+    call_draft: String,
+    wipe_draft: String,
+    aliases: BTreeMap<String, String>,
     syncing: bool,
     edited_at: Option<Instant>,
     writes: u64,
@@ -175,8 +187,7 @@ enum Message {
     UnlockChanged(String),
     SubmitUnlock,
     ShowInvite,
-    ShowDevices,
-    ShowRecovery,
+    ShowSettings,
     CloseSheet,
     SelectChat(String),
     SetTask {
@@ -204,14 +215,30 @@ enum Message {
     CancelSend,
     Breeze,
     AutoSave,
+    Opened(Result<(), String>),
+    Saved(
+        u64,
+        Result<(String, Vec<NoteSummary>), String>,
+        String,
+        String,
+    ),
+    Applied(Result<Vec<NoteSummary>, String>),
+    DeviceDraft(String),
+    NameDraft(String),
+    FinishOnboarding,
+    PickAppearance(profile::Appearance),
+    CallDraft(String),
+    AliasDraft(String, String),
+    WipeDraft(String),
+    ExportNotes,
+    ConfirmWipe,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Sheet {
     None,
     Invite,
-    Devices,
-    Recovery,
+    Settings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -277,7 +304,18 @@ impl App {
             qr_bytes: None,
             unlock_input: String::new(),
             sheet: Sheet::None,
-            dark: true,
+            appearance: profile::Appearance::Dark,
+            system_dark: true,
+            loaded: false,
+            saving: false,
+            save_again: false,
+            save_token: 0,
+            your_name: String::new(),
+            device_draft: String::new(),
+            name_draft: String::new(),
+            call_draft: String::new(),
+            wipe_draft: String::new(),
+            aliases: BTreeMap::new(),
             syncing: false,
             edited_at: None,
             writes: 0,
@@ -291,37 +329,23 @@ impl App {
             boot_at: Instant::now(),
             breeze_frame: 0,
         };
-        match open_notebook(&app.dir) {
-            Ok(book) => {
-                let paired = !book.holds_root();
-                app.notebook = Some(book);
-                app.reload();
-                app.reload_chat();
-                if let Ok(card) = ambient_cli::contact_card(&app.dir) {
-                    app.my_card = card;
-                }
-                if let Ok(link) = ambient_cli::contact_link(&app.dir) {
-                    app.contact_link = link;
-                }
-                if paired && app.notes.is_empty() {
-                    app.say("Paired device. It does not hold the root. It syncs on its own while the relay is on.");
-                }
-                app.pending = ambient_cli::has_unsent(&app.dir).unwrap_or(false);
-                if let Ok(setting) = ambient_cli::net_setting(&app.dir) {
-                    app.net_mode = setting.mode;
-                    app.pin_draft = setting.pin;
-                    app.backup_draft = setting.backup;
-                }
-            }
-            Err(err) => app.open_error = err,
+        let saved = profile::load_profile(&app.dir);
+        app.appearance = saved.appearance;
+        app.your_name.clone_from(&saved.name);
+        app.name_draft.clone_from(&saved.name);
+        app.device_draft.clone_from(&saved.device);
+        app.system_dark = profile::system_is_dark();
+        for (id, name) in profile::load_names(&app.dir) {
+            app.aliases.insert(id, name);
         }
-        if app.open_error != "this folder is locked"
-            && app.net_mode == ambient_cli::NetMode::ThisComputer
-        {
-            app.start_relay();
-        }
+        let task = if app.dir.join("key").exists() {
+            open_task(app.dir.clone())
+        } else {
+            app.loaded = true;
+            Task::none()
+        };
         app.boot_at = Instant::now();
-        (app, Task::done(Message::AutoSync))
+        (app, task)
     }
 
     fn subscription(app: &App) -> iced::Subscription<Message> {
@@ -408,10 +432,7 @@ impl App {
                 }
                 Task::none()
             }
-            Message::Save => {
-                self.save_keeping_editor();
-                Task::none()
-            }
+            Message::Save => self.start_save(true),
             Message::ShowNotes => {
                 if self.compact()
                     && self.screen == Screen::Notes
@@ -550,8 +571,12 @@ impl App {
                 Task::none()
             }
             Message::SetTask { id, line, done } => {
-                self.set_task(&id, line, done);
-                Task::none()
+                let follow = self.set_task(&id, line, done);
+                if self.editor_dirty() && self.selected.as_deref() == Some(id.as_str()) {
+                    Task::batch([follow, self.start_save(true)])
+                } else {
+                    follow
+                }
             }
             Message::Revoke(id) => {
                 self.revoke(&id);
@@ -573,17 +598,13 @@ impl App {
                 self.sheet = Sheet::Invite;
                 Task::none()
             }
-            Message::ShowDevices => {
+            Message::ShowSettings => {
                 self.devices = self
                     .notebook
                     .as_ref()
                     .and_then(|book| book.devices().ok())
                     .unwrap_or_default();
-                self.sheet = Sheet::Devices;
-                Task::none()
-            }
-            Message::ShowRecovery => {
-                self.sheet = Sheet::Recovery;
+                self.sheet = Sheet::Settings;
                 Task::none()
             }
             Message::CloseSheet => {
@@ -591,7 +612,12 @@ impl App {
                 Task::none()
             }
             Message::ToggleTheme => {
-                self.dark = !self.dark;
+                self.appearance = if self.is_dark() {
+                    profile::Appearance::Light
+                } else {
+                    profile::Appearance::Dark
+                };
+                self.persist_profile();
                 Task::none()
             }
             Message::Resized(size) => {
@@ -643,8 +669,12 @@ impl App {
                 Task::none()
             }
             Message::AddTask => {
-                self.add_loose_task();
-                Task::none()
+                let follow = self.add_loose_task();
+                if self.editor_dirty() {
+                    Task::batch([follow, self.start_save(true)])
+                } else {
+                    follow
+                }
             }
             Message::AskDelete => {
                 if self.selected.is_some() || self.editor_dirty() {
@@ -676,10 +706,47 @@ impl App {
                 self.breeze_frame = self.breeze_frame.wrapping_add(1);
                 Task::none()
             }
-            Message::AutoSave => {
-                self.autosave();
+            Message::AutoSave => self.start_save(false),
+            Message::Opened(result) => self.finish_open(result),
+            Message::Saved(token, result, title, body) => {
+                self.finish_save(token, result, title, body)
+            }
+            Message::Applied(result) => self.finish_applied(result),
+            Message::DeviceDraft(text) => {
+                self.device_draft = text;
                 Task::none()
             }
+            Message::NameDraft(text) => {
+                self.name_draft = text;
+                self.your_name.clone_from(&self.name_draft);
+                self.persist_profile();
+                Task::none()
+            }
+            Message::FinishOnboarding => self.finish_onboarding(),
+            Message::PickAppearance(appearance) => {
+                self.appearance = appearance;
+                self.persist_profile();
+                Task::none()
+            }
+            Message::CallDraft(text) => {
+                self.call_draft = text;
+                Task::none()
+            }
+            Message::AliasDraft(id, text) => {
+                if text.trim().is_empty() {
+                    self.aliases.remove(&id);
+                } else {
+                    self.aliases.insert(id, text);
+                }
+                self.persist_names();
+                Task::none()
+            }
+            Message::WipeDraft(text) => {
+                self.wipe_draft = text;
+                Task::none()
+            }
+            Message::ExportNotes => self.export_notes(),
+            Message::ConfirmWipe => self.wipe_notebook(),
             Message::Synced(outcome) => self.finish_sync(outcome),
         }
     }
@@ -690,6 +757,9 @@ impl App {
         }
         if self.open_error == "this folder is locked" {
             return self.unlock_screen();
+        }
+        if self.notebook.is_none() && self.open_error.is_empty() {
+            return self.onboarding_screen();
         }
         if self.compact() {
             return column![
@@ -739,11 +809,14 @@ impl App {
         } else {
             bar = bar.push(space().width(Fill));
         }
-        bar = bar.push(ghost_label("Devices", Message::ShowDevices));
-        if self.notebook.as_ref().is_some_and(Notebook::holds_root) {
-            bar = bar.push(ghost_label("Recovery", Message::ShowRecovery));
-        }
-        bar = bar.push(icon_button(mode_handle(self.dark), Message::ToggleTheme));
+        bar = bar.push(icon_button(
+            gear_handle(self.is_dark()),
+            Message::ShowSettings,
+        ));
+        bar = bar.push(icon_button(
+            mode_handle(self.is_dark()),
+            Message::ToggleTheme,
+        ));
         if self.notebook.is_some() && !self.editor_dirty() {
             bar = bar.push(text("✓").size(18).color(Color::from_rgb8(46, 140, 96)));
         }
@@ -894,7 +967,7 @@ impl App {
             }
             for chat in &self.chats {
                 let selected = self.chat_id.as_deref() == Some(chat.id.as_str());
-                side = side.push(chat_row(&chat.label, &chat.id, selected));
+                side = side.push(chat_row(&self.chat_name(chat), &chat.id, selected));
             }
         } else if self.screen == Screen::Tasks {
             let open = self.tasks.iter().filter(|task| !task.done).count();
@@ -1165,24 +1238,23 @@ impl App {
         Some((head.body.clone(), shown.conflict, head.title.clone()))
     }
 
-    fn set_task(&mut self, id: &str, line: usize, done: bool) {
+    fn set_task(&mut self, id: &str, line: usize, done: bool) -> Task<Message> {
         let Some((body, conflict, title)) = self.task_source(id) else {
             self.say("That note is not here.");
-            return;
+            return Task::none();
         };
         if conflict {
             self.show_note(id);
             self.say("Two versions. Write the one you want to keep, then save.");
-            return;
+            return Task::none();
         }
         let Some(next) = markdown::set_task_line(&body, line, done) else {
-            return;
+            return Task::none();
         };
         if self.selected.as_deref() == Some(id) {
             self.body.load(&next);
             self.edited_at = Some(Instant::now());
-            self.save_keeping_editor();
-            return;
+            return Task::none();
         }
         if let Some(slot) = self
             .unsaved
@@ -1191,26 +1263,13 @@ impl App {
         {
             slot.2.clone_from(&next);
         }
-        let saved = match self.notebook.as_ref() {
-            Some(book) => book.edit(id, &title, &next),
-            None => return,
-        };
-        match saved {
-            Ok(()) => {
-                self.writes = self.writes.saturating_add(1);
-                self.pending = true;
-                self.message.clear();
-                self.reload();
-            }
-            Err(err) => self.message = err.to_string(),
-        }
+        self.apply_note(Some(id.to_owned()), title, next)
     }
 
     fn main(&self) -> Element<'_, Message> {
         let body = match self.sheet {
             Sheet::Invite => self.invite_sheet(),
-            Sheet::Devices => self.devices_sheet(),
-            Sheet::Recovery => self.recovery_sheet(),
+            Sheet::Settings => self.settings_sheet(),
             Sheet::None if self.screen == Screen::Chat => self.chat_pane(),
             Sheet::None if self.screen == Screen::Tasks => self.tasks_pane(),
             Sheet::None => self.notes_pane(),
@@ -1296,7 +1355,7 @@ impl App {
                 let chosen = self.send_choice.as_deref() == Some(chat.id.as_str());
                 let id = chat.id.clone();
                 choices = choices.push(
-                    button(text(chat.label.clone()).size(15).width(Fill))
+                    button(text(self.chat_name(chat)).size(15).width(Fill))
                         .width(Fill)
                         .padding([8.0, 10.0])
                         .on_press(Message::ChooseSend(id))
@@ -1518,6 +1577,18 @@ impl App {
                 .padding(10)
                 .style(field_style),
         );
+        sheet = sheet.push(text("What do you call them?").size(12).color(ink.muted));
+        sheet = sheet.push(
+            text("Only this computer remembers it. A contact card cannot carry a name yet. Their key still shows in Settings.")
+                .size(13)
+                .color(ink.muted),
+        );
+        sheet = sheet.push(
+            text_input("A name on this computer", &self.call_draft)
+                .on_input(Message::CallDraft)
+                .padding(10)
+                .style(field_style),
+        );
         sheet = sheet.push(action_label(
             "Start conversation",
             Message::StartConversation,
@@ -1528,7 +1599,7 @@ impl App {
     fn devices_sheet(&self) -> Element<'_, Message> {
         let ink = self.ink();
         let mut sheet = column![
-            Self::sheet_title("Devices"),
+            text("Devices").font(serif()).size(22),
             text(self.dir.display().to_string())
                 .size(13)
                 .color(ink.muted),
@@ -1570,13 +1641,13 @@ impl App {
             sheet = sheet.push(ghost_label("Open paired window", Message::OpenPaired));
             sheet = sheet.push(ghost_label("Open the other person", Message::OpenPerson));
         }
-        vscroll(sheet).height(Fill).into()
+        sheet.into()
     }
 
     fn recovery_sheet(&self) -> Element<'_, Message> {
         let ink = self.ink();
         let mut sheet = column![
-            Self::sheet_title("Recovery"),
+            text("Recovery").font(serif()).size(22),
             text("The phrase rebuilds the root on a new folder. It does not recreate the old device keys. The new folder adds itself so it can sync. Revoke the devices you no longer have. This is not social recovery.").size(14).color(ink.muted),
             action_label("Show recovery phrase", Message::ShowPhrase),
         ]
@@ -1595,7 +1666,7 @@ impl App {
             "Restore into new folder",
             Message::StartRestore,
         ));
-        vscroll(sheet).height(Fill).into()
+        sheet.into()
     }
 
     fn sheet_title(title: &str) -> Element<'static, Message> {
@@ -1655,18 +1726,6 @@ impl App {
                 .collect(),
             None => base,
         };
-    }
-
-    fn autosave(&mut self) {
-        if self.notebook.is_none() || !self.editor_dirty() {
-            return;
-        }
-        if self
-            .edited_at
-            .is_some_and(|at| at.elapsed() >= Duration::from_millis(700))
-        {
-            self.save_keeping_editor();
-        }
     }
 
     fn reload_chat(&mut self) {
@@ -1743,6 +1802,7 @@ impl App {
                     .first()
                     .map(|head| head.writer.clone())
                     .unwrap_or_default();
+                self.save_token = self.save_token.wrapping_add(1);
                 self.screen = Screen::Notes;
                 self.sheet = Sheet::None;
                 self.detail = true;
@@ -1756,6 +1816,7 @@ impl App {
         self.send_open = false;
         self.confirm_delete = false;
         self.remember_unsaved();
+        self.save_token = self.save_token.wrapping_add(1);
         let stash = self
             .unsaved
             .iter()
@@ -1796,51 +1857,42 @@ impl App {
     }
 
     fn ink(&self) -> Ink {
-        Ink::from_dark(self.dark)
+        Ink::from_dark(self.is_dark())
     }
 
-    fn save_keeping_editor(&mut self) {
-        let body = self.body.text();
-        let title = self.title_text.clone();
-        let current = self.selected.clone();
-        let saved = {
-            let _guard = io_lock();
-            let Some(book) = self.notebook.as_ref() else {
-                return;
-            };
-            match current.as_deref() {
-                Some(id) => book.edit(id, &title, &body).map(|()| id.to_owned()),
-                None => book.add(&title, &body),
-            }
-        };
-        match saved {
-            Ok(id) => {
-                self.unsaved
-                    .retain(|(key, _, _)| key.as_deref() != Some(id.as_str()));
-                if current.is_none() {
-                    self.unsaved.retain(|(key, _, _)| key.is_some());
-                }
-                self.selected = Some(id);
-                self.disk_title.clone_from(&self.title_text);
-                self.disk_body = body;
-                self.edited_at = None;
-                self.conflicts.clear();
-                self.confirm_delete = false;
-                self.message.clear();
-                self.reload();
-                self.writes = self.writes.saturating_add(1);
-                self.pending = true;
-                if self.note_writer.is_empty()
-                    && let Some(note) = self
-                        .notes
-                        .iter()
-                        .find(|note| self.selected.as_deref() == Some(note.id.as_str()))
-                {
-                    self.note_writer.clone_from(&note.writer);
-                }
-            }
-            Err(err) => self.message = err.to_string(),
+    fn is_dark(&self) -> bool {
+        match self.appearance {
+            profile::Appearance::Light => false,
+            profile::Appearance::Dark => true,
+            profile::Appearance::System => self.system_dark,
         }
+    }
+
+    fn start_save(&mut self, force: bool) -> Task<Message> {
+        if self.notebook.is_none() || !self.editor_dirty() {
+            return Task::none();
+        }
+        if self.saving {
+            self.save_again = true;
+            return Task::none();
+        }
+        if !force
+            && self
+                .edited_at
+                .is_none_or(|at| at.elapsed() < Duration::from_millis(700))
+        {
+            return Task::none();
+        }
+        self.saving = true;
+        self.save_again = false;
+        let token = self.save_token;
+        save_task(
+            self.dir.clone(),
+            self.selected.clone(),
+            self.title_text.clone(),
+            self.body.text(),
+            token,
+        )
     }
 
     fn begin_sync(&mut self) -> Task<Message> {
@@ -1852,9 +1904,10 @@ impl App {
                 .edited_at
                 .is_some_and(|at| at.elapsed() >= Duration::from_millis(700))
         {
-            self.save_keeping_editor();
+            return self.start_save(false);
         }
-        if self.syncing
+        if self.saving
+            || self.syncing
             || (self.net_mode == ambient_cli::NetMode::ThisComputer && !self.relay_ready)
         {
             return Task::none();
@@ -1884,7 +1937,11 @@ impl App {
         self.net_up = true;
         self.sync_detail = outcome.detail;
         if content_arrived(&self.sync_detail) {
-            match Notebook::open(&self.dir) {
+            let opened = {
+                let _guard = io_lock();
+                Notebook::open(&self.dir)
+            };
+            match opened {
                 Ok(book) => {
                     self.notebook = Some(book);
                     self.reload();
@@ -1983,26 +2040,26 @@ impl App {
         hscroll(
             row![
                 format_caption("Word"),
-                format_button("B", FormatKind::Bold),
-                format_button("I", FormatKind::Italic),
-                format_button("S", FormatKind::Strike),
-                format_button("==", FormatKind::Highlight),
-                format_button("</>", FormatKind::Code),
+                format_button("B", "Bold", FormatKind::Bold),
+                format_button("I", "Italic", FormatKind::Italic),
+                format_button("S", "Strike", FormatKind::Strike),
+                format_button("==", "Highlight", FormatKind::Highlight),
+                format_button("</>", "Code", FormatKind::Code),
                 space().width(14),
                 format_caption("Line"),
-                format_button("H", FormatKind::Heading),
-                format_button("List", FormatKind::List),
-                format_button("Task", FormatKind::Task),
-                format_button("Quote", FormatKind::Quote),
+                format_button("H", "Heading", FormatKind::Heading),
+                format_button("List", "List", FormatKind::List),
+                format_button("Task", "Task", FormatKind::Task),
+                format_button("Quote", "Quote", FormatKind::Quote),
                 space().width(14),
                 format_caption("Insert"),
-                format_button("Link", FormatKind::Link),
-                format_button("[[]]", FormatKind::Wiki),
-                format_button("Image", FormatKind::Image),
-                format_button("Table", FormatKind::Table),
-                format_button("—", FormatKind::Rule),
-                format_button("Callout", FormatKind::Callout),
-                format_button("```", FormatKind::CodeBlock),
+                format_button("Link", "Link", FormatKind::Link),
+                format_button("[[]]", "Wikilink", FormatKind::Wiki),
+                format_button("Image", "Image", FormatKind::Image),
+                format_button("Table", "Table", FormatKind::Table),
+                format_button("—", "Rule", FormatKind::Rule),
+                format_button("Callout", "Callout", FormatKind::Callout),
+                format_button("```", "Code block", FormatKind::CodeBlock),
             ]
             .spacing(4)
             .align_y(iced::Alignment::Center)
@@ -2040,7 +2097,14 @@ impl App {
         if self.notebook.is_some() && !self.editor_dirty() {
             nav = nav.push(text("✓").size(18).color(Color::from_rgb8(46, 140, 96)));
         }
-        nav = nav.push(icon_button(mode_handle(self.dark), Message::ToggleTheme));
+        nav = nav.push(icon_button(
+            gear_handle(self.is_dark()),
+            Message::ShowSettings,
+        ));
+        nav = nav.push(icon_button(
+            mode_handle(self.is_dark()),
+            Message::ToggleTheme,
+        ));
         nav = nav.push(anchored(
             icon_button(globe_handle(self.globe_color()), Message::ToggleSyncPop),
             self.sync_open.then(|| self.sync_card()),
@@ -2067,8 +2131,7 @@ impl App {
     fn compact_body(&self) -> Element<'_, Message> {
         let body = match self.sheet {
             Sheet::Invite => self.invite_sheet(),
-            Sheet::Devices => self.devices_sheet(),
-            Sheet::Recovery => self.recovery_sheet(),
+            Sheet::Settings => self.settings_sheet(),
             Sheet::None if self.screen == Screen::Tasks => self.tasks_pane(),
             Sheet::None if self.screen == Screen::Chat && !self.detail => self.chat_browser(),
             Sheet::None if self.screen == Screen::Chat => self.chat_pane(),
@@ -2096,7 +2159,7 @@ impl App {
         }
         for chat in &self.chats {
             let selected = self.chat_id.as_deref() == Some(chat.id.as_str());
-            side = side.push(chat_row(&chat.label, &chat.id, selected));
+            side = side.push(chat_row(&self.chat_name(chat), &chat.id, selected));
         }
         side.into()
     }
@@ -2156,14 +2219,18 @@ impl App {
                                 .height(180),
                         );
                     } else {
-                        body = body.push(text(format!("{name} · not on this computer")).size(13));
+                        body = body.push(
+                            text(format!("{name} · not on this computer"))
+                                .size(13)
+                                .color(if mine { ink.on_accent } else { ink.text }),
+                        );
                     }
                 }
                 files::Piece::Video { name, path } => {
-                    body = body.push(file_chip(&name, path, true));
+                    body = body.push(file_chip(&name, path, true, mine));
                 }
                 files::Piece::File { name, path } => {
-                    body = body.push(file_chip(&name, path, false));
+                    body = body.push(file_chip(&name, path, false, mine));
                 }
             }
         }
@@ -2432,6 +2499,12 @@ impl App {
         }
         match ambient_cli::start_conversation(&self.dir, card) {
             Ok(id) => {
+                let call = self.call_draft.trim().to_owned();
+                if !call.is_empty() {
+                    self.aliases.insert(id.clone(), call);
+                    self.persist_names();
+                }
+                self.call_draft.clear();
                 self.chat_id = Some(id);
                 self.screen = Screen::Chat;
                 self.sheet = Sheet::None;
@@ -2624,7 +2697,7 @@ impl App {
             .chats
             .iter()
             .find(|chat| chat.id == id)
-            .map_or_else(|| "that chat".to_owned(), |chat| chat.label.clone());
+            .map_or_else(|| "that chat".to_owned(), |chat| self.chat_name(chat));
         match ambient_cli::send_chat_in(&self.dir, &id, &text) {
             Ok(()) => {
                 self.send_open = false;
@@ -2639,15 +2712,15 @@ impl App {
         }
     }
 
-    fn add_loose_task(&mut self) {
+    fn add_loose_task(&mut self) -> Task<Message> {
         let label = self.task_draft.trim().replace(['\n', '\r'], " ");
         if label.is_empty() {
             self.say("Write the task first.");
-            return;
+            return Task::none();
         }
         if self.notebook.is_none() {
             self.say("Folder is not open.");
-            return;
+            return Task::none();
         }
         let line = format!("- [ ] {label}");
         let existing = self.notebook.as_ref().and_then(|book| {
@@ -2659,28 +2732,18 @@ impl App {
             })
         });
         let Some(id) = existing else {
-            let saved = self
-                .notebook
-                .as_ref()
-                .and_then(|book| book.add("Tasks", &format!("{line}\n")).ok());
-            if saved.is_some() {
-                self.task_draft.clear();
-                self.reload();
-                self.mark_pending();
-                self.say("Added to Tasks.");
-            } else {
-                self.say("Could not add the task.");
-            }
-            return;
+            self.task_draft.clear();
+            self.say("Added to Tasks.");
+            return self.apply_note(None, "Tasks".to_owned(), format!("{line}\n"));
         };
         let Some((body, conflict, title)) = self.task_source(&id) else {
             self.say("That note is not here.");
-            return;
+            return Task::none();
         };
         if conflict {
             self.show_note(&id);
             self.say("Two versions. Write the one you want to keep, then save.");
-            return;
+            return Task::none();
         }
         let mut next = body;
         if !next.is_empty() && !next.ends_with('\n') {
@@ -2688,15 +2751,20 @@ impl App {
         }
         next.push_str(&line);
         next.push('\n');
-        self.write_note(&id, &title, &next);
+        let follow = self.write_note(&id, &title, &next);
         if self.message.is_empty() {
             self.task_draft.clear();
             self.say("Added to Tasks.");
         }
+        follow
     }
 
     fn delete_open_note(&mut self) {
         self.confirm_delete = false;
+        if self.saving {
+            self.say("Still saving. Try delete again in a moment.");
+            return;
+        }
         let Some(id) = self.selected.clone() else {
             self.discard_draft();
             self.say("Discarded.");
@@ -2722,6 +2790,7 @@ impl App {
                 self.conflicts.clear();
                 self.note_writer.clear();
                 self.edited_at = None;
+                self.save_token = self.save_token.wrapping_add(1);
                 self.writes = self.writes.saturating_add(1);
                 self.pending = true;
                 self.reload();
@@ -2739,15 +2808,15 @@ impl App {
         self.disk_body.clear();
         self.edited_at = None;
         self.confirm_delete = false;
+        self.save_token = self.save_token.wrapping_add(1);
     }
 
-    fn write_note(&mut self, id: &str, title: &str, body: &str) {
+    fn write_note(&mut self, id: &str, title: &str, body: &str) -> Task<Message> {
         if self.selected.as_deref() == Some(id) {
             title.clone_into(&mut self.title_text);
             self.body.load(body);
             self.edited_at = Some(Instant::now());
-            self.save_keeping_editor();
-            return;
+            return Task::none();
         }
         if let Some(slot) = self
             .unsaved
@@ -2757,23 +2826,11 @@ impl App {
             title.clone_into(&mut slot.1);
             body.clone_into(&mut slot.2);
         }
-        let saved = match self.notebook.as_ref() {
-            Some(book) => book.edit(id, title, body),
-            None => return,
-        };
-        match saved {
-            Ok(()) => {
-                self.writes = self.writes.saturating_add(1);
-                self.pending = true;
-                self.message.clear();
-                self.reload();
-            }
-            Err(err) => self.message = err.to_string(),
-        }
+        self.apply_note(Some(id.to_owned()), title.to_owned(), body.to_owned())
     }
 
     fn breeze_on(&self) -> bool {
-        self.boot_at.elapsed() < Duration::from_millis(1500)
+        !self.loaded || self.boot_at.elapsed() < Duration::from_secs(3)
     }
 
     fn breeze_screen(&self) -> Element<'_, Message> {
@@ -2784,6 +2841,7 @@ impl App {
             bg: ink.bg,
             ink: ink.muted,
             second: ink.accent,
+            word: ink.text,
         })
         .width(Fill)
         .height(Fill)
@@ -2830,6 +2888,525 @@ impl App {
             Err(err) => self.message = err.to_string(),
         }
         Task::none()
+    }
+
+    fn finish_open(&mut self, result: Result<(), String>) -> Task<Message> {
+        match result {
+            Ok(()) => {
+                let Some(book) = take_notebook() else {
+                    "could not open this folder".clone_into(&mut self.open_error);
+                    self.loaded = true;
+                    return Task::none();
+                };
+                self.adopt_open_book(book);
+                self.loaded = true;
+                if self.open_error != "this folder is locked"
+                    && self.net_mode == ambient_cli::NetMode::ThisComputer
+                {
+                    self.start_relay();
+                }
+                self.begin_sync()
+            }
+            Err(err) => {
+                self.open_error = err;
+                self.loaded = true;
+                Task::none()
+            }
+        }
+    }
+
+    fn adopt_open_book(&mut self, book: Notebook) {
+        let paired = !book.holds_root();
+        self.notebook = Some(book);
+        self.reload();
+        self.reload_chat();
+        if let Ok(card) = ambient_cli::contact_card(&self.dir) {
+            self.my_card = card;
+        }
+        if let Ok(link) = ambient_cli::contact_link(&self.dir) {
+            self.contact_link = link;
+        }
+        self.devices = self
+            .notebook
+            .as_ref()
+            .and_then(|book| book.devices().ok())
+            .unwrap_or_default();
+        if self.device_draft.is_empty()
+            && let Some(label) = self
+                .devices
+                .iter()
+                .find(|device| device.current)
+                .map(|device| device.label.clone())
+        {
+            self.device_draft = label;
+            self.persist_profile();
+        }
+        if let Ok(setting) = ambient_cli::net_setting(&self.dir) {
+            self.net_mode = setting.mode;
+            self.pin_draft = setting.pin;
+            self.backup_draft = setting.backup;
+        }
+        self.pending = ambient_cli::has_unsent(&self.dir).unwrap_or(false);
+        if paired && self.notes.is_empty() {
+            self.say(
+                "Paired device. It does not hold the root. It syncs on its own while the relay is on.",
+            );
+        }
+    }
+
+    fn finish_save(
+        &mut self,
+        token: u64,
+        result: Result<(String, Vec<NoteSummary>), String>,
+        title: String,
+        body: String,
+    ) -> Task<Message> {
+        self.saving = false;
+        let current = token == self.save_token;
+        match result {
+            Ok((id, notes)) => {
+                if current && self.selected.is_none() {
+                    self.selected = Some(id);
+                }
+                if current && self.title_text == title && self.body.text() == body {
+                    self.disk_title = title;
+                    self.disk_body = body;
+                    self.edited_at = None;
+                }
+                self.writes = self.writes.saturating_add(1);
+                self.pending = true;
+                self.take_notes(notes);
+                if current
+                    && self.editor_dirty()
+                    && (self.save_again
+                        || self
+                            .edited_at
+                            .is_some_and(|at| at.elapsed() >= Duration::from_millis(700)))
+                {
+                    self.save_again = false;
+                    return self.start_save(true);
+                }
+                self.save_again = false;
+            }
+            Err(err) => {
+                self.message = err;
+                if current && self.save_again && self.editor_dirty() {
+                    self.save_again = false;
+                    return self.start_save(true);
+                }
+                self.save_again = false;
+            }
+        }
+        Task::none()
+    }
+
+    fn finish_applied(&mut self, result: Result<Vec<NoteSummary>, String>) -> Task<Message> {
+        match result {
+            Ok(notes) => {
+                self.writes = self.writes.saturating_add(1);
+                self.pending = true;
+                self.take_notes(notes);
+            }
+            Err(err) => self.message = err,
+        }
+        Task::none()
+    }
+
+    fn take_notes(&mut self, notes: Vec<NoteSummary>) {
+        if self.tag.as_ref().is_some_and(|tag| {
+            !notes
+                .iter()
+                .any(|note| note.tags.iter().any(|item| item == tag))
+        }) {
+            self.tag = None;
+        }
+        self.catalog = notes;
+        self.refresh_shown();
+        if self.screen == Screen::Tasks {
+            self.rebuild_tasks();
+        }
+    }
+
+    fn apply_note(&self, id: Option<String>, title: String, body: String) -> Task<Message> {
+        let dir = self.dir.clone();
+        Task::perform(
+            async move {
+                let (sender, receiver) = iced::futures::channel::oneshot::channel();
+                std::thread::spawn(move || {
+                    let result = write_snapshot(&dir, id.as_deref(), &title, &body)
+                        .map(|(_id, notes)| notes);
+                    let _ = sender.send(result);
+                });
+                receiver
+                    .await
+                    .unwrap_or_else(|_| Err("Save stopped before it finished.".to_owned()))
+            },
+            Message::Applied,
+        )
+    }
+
+    fn persist_profile(&mut self) {
+        let profile = profile::Profile {
+            device: self.device_draft.clone(),
+            name: self.your_name.clone(),
+            appearance: self.appearance,
+        };
+        if let Err(err) = profile::store_profile(&self.dir, &profile) {
+            self.message = err;
+        }
+    }
+
+    fn persist_names(&mut self) {
+        let names: Vec<(String, String)> = self
+            .aliases
+            .iter()
+            .map(|(id, name)| (id.clone(), name.clone()))
+            .collect();
+        if let Err(err) = profile::store_names(&self.dir, &names) {
+            self.message = err;
+        }
+    }
+
+    fn finish_onboarding(&mut self) -> Task<Message> {
+        let device = self.device_draft.trim();
+        if device.is_empty() {
+            self.say("Name this computer.");
+            return Task::none();
+        }
+        if device.len() > 32 {
+            self.say("Use a shorter name for this computer. 32 bytes is the limit.");
+            return Task::none();
+        }
+        if self.dir.join("key").exists() {
+            self.say("This folder already has a notebook.");
+            return Task::none();
+        }
+        match Notebook::create_with_label(&self.dir, device) {
+            Ok(book) => {
+                self.device_draft = device.to_owned();
+                self.your_name = self.name_draft.trim().to_owned();
+                self.name_draft.clone_from(&self.your_name);
+                self.persist_profile();
+                self.open_error.clear();
+                self.adopt_open_book(book);
+                self.loaded = true;
+                self.say("This notebook is on this computer.");
+                if self.net_mode == ambient_cli::NetMode::ThisComputer {
+                    self.start_relay();
+                }
+                self.begin_sync()
+            }
+            Err(err) => {
+                self.message = err.to_string();
+                Task::none()
+            }
+        }
+    }
+
+    fn export_notes(&mut self) -> Task<Message> {
+        let Some(book) = self.notebook.as_ref() else {
+            self.say("Nothing to export yet.");
+            return Task::none();
+        };
+        let mut notes = Vec::new();
+        if let Err(err) = book.visit_notes(|id, title, body, _conflict| {
+            notes.push((id.to_owned(), title.to_owned(), body.to_owned()));
+        }) {
+            self.message = err.to_string();
+            return Task::none();
+        }
+        if self.editor_dirty() {
+            if let Some(id) = &self.selected {
+                if let Some(slot) = notes.iter_mut().find(|(note_id, _, _)| note_id == id) {
+                    slot.1.clone_from(&self.title_text);
+                    slot.2 = self.body.text();
+                }
+            } else if !self.title_text.is_empty() || !self.body.text().is_empty() {
+                notes.push((
+                    "unsaved".to_owned(),
+                    self.title_text.clone(),
+                    self.body.text(),
+                ));
+            }
+        }
+        match profile::export_notes(&self.dir, &notes) {
+            Ok(path) => self.say(&format!("Exported to {}.", path.display())),
+            Err(err) => self.message = err,
+        }
+        Task::none()
+    }
+
+    fn wipe_notebook(&mut self) -> Task<Message> {
+        if self.wipe_draft.trim() != "delete" {
+            self.say("Type delete to erase this notebook.");
+            return Task::none();
+        }
+        if self.saving {
+            self.say("Still saving. Try again in a moment.");
+            return Task::none();
+        }
+        self.notebook = None;
+        let wiped = {
+            let _guard = io_lock();
+            profile::wipe_folder(&self.dir)
+        };
+        if let Err(err) = wiped {
+            self.message = err;
+            return Task::none();
+        }
+        self.reset_after_wipe();
+        Task::none()
+    }
+
+    fn reset_after_wipe(&mut self) {
+        self.catalog.clear();
+        self.notes.clear();
+        self.tasks.clear();
+        self.query.clear();
+        self.tag = None;
+        self.selected = None;
+        self.title_text.clear();
+        self.body.load("");
+        self.disk_title.clear();
+        self.disk_body.clear();
+        self.conflicts.clear();
+        self.note_writer.clear();
+        self.chats.clear();
+        self.chat.clear();
+        self.chat_id = None;
+        self.devices.clear();
+        self.draft_chat.clear();
+        self.my_card.clear();
+        self.their_card.clear();
+        self.unsaved.clear();
+        self.recovery_phrase.clear();
+        self.restore_phrase.clear();
+        self.contact_link.clear();
+        self.show_qr = false;
+        self.qr_bytes = None;
+        self.pending_files.clear();
+        self.task_draft.clear();
+        self.call_draft.clear();
+        self.wipe_draft.clear();
+        self.aliases.clear();
+        self.your_name.clear();
+        self.name_draft.clear();
+        self.device_draft.clear();
+        self.appearance = profile::Appearance::Dark;
+        self.open_error.clear();
+        self.message.clear();
+        self.edited_at = None;
+        self.saving = false;
+        self.save_again = false;
+        self.pending = false;
+        self.screen = Screen::Notes;
+        self.sheet = Sheet::None;
+        self.detail = false;
+        self.confirm_delete = false;
+        self.send_open = false;
+        self.save_token = self.save_token.wrapping_add(1);
+        self.loaded = true;
+        self.boot_at = Instant::now();
+        self.breeze_frame = 0;
+    }
+
+    fn onboarding_screen(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        container(
+            vscroll(
+                column![
+                    text("Welcome").font(serif()).size(36),
+                    text("Name this computer, and say what this notebook should call you. Then pick how it looks.")
+                        .size(15)
+                        .color(ink.muted),
+                    text("This computer").size(12).color(ink.muted),
+                    text_input("A short name, like laptop", &self.device_draft)
+                        .on_input(Message::DeviceDraft)
+                        .padding(10)
+                        .style(field_style),
+                    text("Stored with the key. Another device of yours can see it. It is not a username.")
+                        .size(13)
+                        .color(ink.muted),
+                    text("Your name").size(12).color(ink.muted),
+                    text_input("What should this notebook call you?", &self.name_draft)
+                        .on_input(Message::NameDraft)
+                        .padding(10)
+                        .style(field_style),
+                    text("A contact card cannot carry a name yet. This name stays on this computer. When you add someone, you can name them here, the way a phone does. Their key stays visible.")
+                        .size(13)
+                        .color(ink.muted),
+                    text("Appearance").size(12).color(ink.muted),
+                    self.appearance_row(),
+                    action_label("Continue", Message::FinishOnboarding),
+                    text(self.message.as_str()).size(13).color(ink.muted),
+                ]
+                .spacing(12)
+                .max_width(520),
+            )
+            .height(Fill),
+        )
+        .padding(48)
+        .width(Fill)
+        .height(Fill)
+        .into()
+    }
+
+    fn settings_sheet(&self) -> Element<'_, Message> {
+        vscroll(
+            column![
+                Self::sheet_title("Settings"),
+                self.you_section(),
+                self.appearance_section(),
+                self.devices_sheet(),
+                self.recovery_sheet(),
+                self.people_section(),
+                self.data_section(),
+            ]
+            .spacing(22)
+            .padding(iced::Padding {
+                top: 0.0,
+                right: 0.0,
+                bottom: 28.0,
+                left: 0.0,
+            }),
+        )
+        .height(Fill)
+        .into()
+    }
+
+    fn you_section(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        column![
+            text("You").font(serif()).size(22),
+            text("Your name stays in this folder. It is not on the contact card, so another person does not see it.")
+                .size(14)
+                .color(ink.muted),
+            text_input("Your name", &self.name_draft)
+                .on_input(Message::NameDraft)
+                .padding(10)
+                .style(field_style),
+            text(format!(
+                "This computer is called {}. That was set when the folder was created.",
+                self.this_device_label()
+            ))
+            .size(14)
+            .color(ink.muted),
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    fn appearance_section(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        column![
+            text("Appearance").font(serif()).size(22),
+            text("Light, dark, or whatever this computer is using.")
+                .size(14)
+                .color(ink.muted),
+            self.appearance_row(),
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    fn appearance_row(&self) -> Element<'_, Message> {
+        row![
+            choice_button(
+                "Light",
+                self.appearance == profile::Appearance::Light,
+                Message::PickAppearance(profile::Appearance::Light),
+            ),
+            choice_button(
+                "Dark",
+                self.appearance == profile::Appearance::Dark,
+                Message::PickAppearance(profile::Appearance::Dark),
+            ),
+            choice_button(
+                "System",
+                self.appearance == profile::Appearance::System,
+                Message::PickAppearance(profile::Appearance::System),
+            ),
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    fn people_section(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let mut section = column![
+            text("People").font(serif()).size(22),
+            text("A contact card has no name yet. What you type here is only on this computer. The key stays so you can tell them apart.")
+                .size(14)
+                .color(ink.muted),
+        ]
+        .spacing(8);
+        if self.chats.is_empty() {
+            section = section.push(
+                text("No one yet. Invite someone from Chat.")
+                    .size(13)
+                    .color(ink.muted),
+            );
+        }
+        for chat in &self.chats {
+            let tail = if chat.other.is_empty() {
+                "Key unknown".to_owned()
+            } else {
+                format!("Key {}", chat.other)
+            };
+            let draft = self.aliases.get(&chat.id).cloned().unwrap_or_default();
+            let id = chat.id.clone();
+            section = section.push(text(tail).size(12).color(ink.muted));
+            section = section.push(
+                text_input("What do you call them?", &draft)
+                    .on_input(move |text| Message::AliasDraft(id.clone(), text))
+                    .padding(10)
+                    .style(field_style),
+            );
+        }
+        section.into()
+    }
+
+    fn data_section(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        column![
+            text("Data").font(serif()).size(22),
+            text("Export writes markdown into this folder. Erase removes the notes, the key, and the names on this computer. It does not reach another device.")
+                .size(14)
+                .color(ink.muted),
+            action_label("Export notes", Message::ExportNotes),
+            text_input("Type delete to erase", &self.wipe_draft)
+                .on_input(Message::WipeDraft)
+                .padding(10)
+                .style(field_style),
+            action_label("Erase this notebook", Message::ConfirmWipe),
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    fn chat_name(&self, chat: &ambient_cli::ConversationSummary) -> String {
+        self.aliases
+            .get(&chat.id)
+            .filter(|name| !name.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| chat.label.clone())
+    }
+
+    fn this_device_label(&self) -> String {
+        self.devices
+            .iter()
+            .find(|device| device.current)
+            .map(|device| device.label.clone())
+            .filter(|label| !label.is_empty())
+            .or_else(|| {
+                let draft = self.device_draft.trim();
+                if draft.is_empty() {
+                    None
+                } else {
+                    Some(draft.to_owned())
+                }
+            })
+            .unwrap_or_else(|| "this computer".to_owned())
     }
 }
 
@@ -3222,27 +3799,76 @@ struct ChatBubble {
     mine: bool,
 }
 
-fn file_chip(name: &str, path: Option<PathBuf>, video: bool) -> Element<'static, Message> {
+fn file_chip(
+    name: &str,
+    path: Option<PathBuf>,
+    video: bool,
+    mine: bool,
+) -> Element<'static, Message> {
     let label = if video {
         format!("Video · {name}")
     } else {
         name.to_owned()
     };
     if let Some(path) = path {
-        ghost_label_owned(format!("Open {label}"), Message::OpenPath(path))
+        button(text(format!("Open {label}")).size(14))
+            .padding([8.0, 14.0])
+            .on_press(Message::OpenPath(path))
+            .style(move |theme, status| file_chip_style(theme, status, mine))
+            .into()
     } else {
         text(format!("{label} · not on this computer"))
             .size(13)
+            .style(move |theme: &Theme| {
+                let ink = ink_of(theme);
+                iced::widget::text::Style {
+                    color: Some(if mine { ink.on_accent } else { ink.text }),
+                }
+            })
             .into()
     }
 }
 
-fn format_button(label: &'static str, kind: FormatKind) -> Element<'static, Message> {
-    button(text(label).size(13))
+fn file_chip_style(theme: &Theme, status: button::Status, mine: bool) -> button::Style {
+    let ink = ink_of(theme);
+    if !mine {
+        return ghost_style(theme, status);
+    }
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => Some(iced::Background::Color(Color {
+            a: 0.16,
+            ..ink.on_accent
+        })),
+        _ => Some(iced::Background::Color(Color {
+            a: 0.08,
+            ..ink.on_accent
+        })),
+    };
+    button::Style {
+        background,
+        text_color: ink.on_accent,
+        border: iced::Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: Color {
+                a: 0.45,
+                ..ink.on_accent
+            },
+        },
+        ..Default::default()
+    }
+}
+
+fn format_button(
+    label: &'static str,
+    hint_text: &'static str,
+    kind: FormatKind,
+) -> Element<'static, Message> {
+    let face = button(text(label).size(13))
         .padding([6.0, 10.0])
         .on_press(Message::Format(kind))
-        .style(ghost_style)
-        .into()
+        .style(ghost_style);
+    hover_label(face, hint_text)
 }
 
 fn format_caption(label: &'static str) -> Element<'static, Message> {
@@ -3270,29 +3896,62 @@ fn push_tasks(rows: &mut Vec<TaskRow>, id: &str, title: &str, body: &str) {
 
 fn circle_button(
     glyph: &'static str,
-    hint: &'static str,
+    hint_text: &'static str,
     message: Message,
 ) -> Element<'static, Message> {
-    let face = button(
-        text(glyph)
-            .size(16)
-            .align_x(iced::alignment::Horizontal::Center)
-            .width(Fill),
-    )
-    .width(36)
-    .height(36)
-    .padding(0)
-    .on_press(message)
-    .style(circle_style);
+    let face = button(canvas(Glyph { content: glyph }).width(Fill).height(Fill))
+        .width(40)
+        .height(40)
+        .padding(0)
+        .on_press(message)
+        .style(circle_style);
+    hover_label(face, hint_text)
+}
+
+fn hover_label(
+    face: impl Into<Element<'static, Message>>,
+    label: &'static str,
+) -> Element<'static, Message> {
     tooltip(
         face,
-        container(text(hint).size(12))
+        container(text(label).size(12))
             .padding([4, 8])
             .style(card_style),
         tooltip::Position::Top,
     )
     .gap(6)
     .into()
+}
+
+struct Glyph {
+    content: &'static str,
+}
+
+impl canvas::Program<Message> for Glyph {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        theme: &Theme,
+        bounds: iced::Rectangle,
+        _cursor: iced::mouse::Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = canvas::Frame::new(renderer, bounds.size());
+        let ink = ink_of(theme);
+        frame.fill_text(canvas::Text {
+            content: self.content.to_owned(),
+            position: iced::Point::new(bounds.width / 2.0, bounds.height / 2.0),
+            color: ink.text,
+            size: iced::Pixels(22.0),
+            font: sans(),
+            align_x: iced::alignment::Horizontal::Center.into(),
+            align_y: iced::alignment::Vertical::Center,
+            ..canvas::Text::default()
+        });
+        vec![frame.into_geometry()]
+    }
 }
 
 fn circle_style(theme: &Theme, status: button::Status) -> button::Style {
@@ -3306,7 +3965,7 @@ fn circle_style(theme: &Theme, status: button::Status) -> button::Style {
         background: Some(iced::Background::Color(background)),
         text_color: ink.text,
         border: iced::Border {
-            radius: 18.0.into(),
+            radius: 20.0.into(),
             width: 1.0,
             color: ink.hairline,
         },
@@ -3470,6 +4129,53 @@ fn icon_button(handle: iced_image::Handle, message: Message) -> Element<'static,
         .into()
 }
 
+fn gear_handle(dark: bool) -> iced_image::Handle {
+    use std::sync::OnceLock;
+    static HANDLES: OnceLock<[iced_image::Handle; 2]> = OnceLock::new();
+    let handles = HANDLES.get_or_init(|| {
+        [
+            iced_image::Handle::from_bytes(gear_png([0x66, 0xA5, 0xE1])),
+            iced_image::Handle::from_bytes(gear_png([0x16, 0x44, 0x6F])),
+        ]
+    });
+    if dark {
+        handles[0].clone()
+    } else {
+        handles[1].clone()
+    }
+}
+
+fn gear_png(color: [u8; 3]) -> Vec<u8> {
+    let size = 64_u32;
+    let mut pixels = vec![0_u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let dx = f64::from(x) - 31.5;
+            let dy = f64::from(y) - 31.5;
+            if !gear_ink(dx.hypot(dy), dy.atan2(dx)) {
+                continue;
+            }
+            let index = ((y * size + x) * 4) as usize;
+            if let Some(pixel) = pixels.get_mut(index..index.saturating_add(4)) {
+                pixel.copy_from_slice(&[color[0], color[1], color[2], 255]);
+            }
+        }
+    }
+    encode_png(&pixels, size)
+}
+
+fn gear_ink(radius: f64, angle: f64) -> bool {
+    if !(6.5..14.5).contains(&radius) && !(16.0..23.5).contains(&radius) {
+        return false;
+    }
+    if radius < 16.0 {
+        return true;
+    }
+    let teeth = 8.0;
+    let turn = (angle * teeth / std::f64::consts::TAU).fract();
+    (0.12..0.88).contains(&turn)
+}
+
 fn mode_handle(dark: bool) -> iced_image::Handle {
     use std::sync::OnceLock;
     static HANDLES: OnceLock<[iced_image::Handle; 2]> = OnceLock::new();
@@ -3590,13 +4296,97 @@ fn sibling(dir: &Path, suffix: &str) -> PathBuf {
     }
 }
 
-fn open_notebook(dir: &Path) -> Result<Notebook, String> {
-    let opened = if dir.join("key").exists() {
-        Notebook::open(dir)
-    } else {
-        Notebook::create(dir)
+fn open_task(dir: PathBuf) -> Task<Message> {
+    Task::perform(
+        async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let result = (|| {
+                    let _guard = io_lock();
+                    let book = Notebook::open(&dir).map_err(|err| err.to_string())?;
+                    park_notebook(book);
+                    Ok(())
+                })();
+                let _ = sender.send(result);
+            });
+            receiver
+                .await
+                .unwrap_or_else(|_| Err("could not open this folder".to_owned()))
+        },
+        Message::Opened,
+    )
+}
+
+fn parked_notebook() -> &'static Mutex<Option<Notebook>> {
+    static PARK: Mutex<Option<Notebook>> = Mutex::new(None);
+    &PARK
+}
+
+fn park_notebook(book: Notebook) {
+    *parked_notebook()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(book);
+}
+
+fn take_notebook() -> Option<Notebook> {
+    parked_notebook()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+}
+
+fn save_task(
+    dir: PathBuf,
+    id: Option<String>,
+    title: String,
+    body: String,
+    token: u64,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                let result = write_snapshot(&dir, id.as_deref(), &title, &body);
+                let _ = sender.send((result, title, body));
+            });
+            let (result, title, body) = receiver.await.unwrap_or_else(|_| {
+                (
+                    Err("Save stopped before it finished.".to_owned()),
+                    String::new(),
+                    String::new(),
+                )
+            });
+            (token, result, title, body)
+        },
+        |(token, result, title, body)| Message::Saved(token, result, title, body),
+    )
+}
+
+fn write_snapshot(
+    dir: &Path,
+    id: Option<&str>,
+    title: &str,
+    body: &str,
+) -> Result<(String, Vec<NoteSummary>), String> {
+    let _guard = io_lock();
+    let book = Notebook::open(dir).map_err(|err| err.to_string())?;
+    let saved = match id {
+        Some(id) => {
+            book.edit(id, title, body).map_err(|err| err.to_string())?;
+            id.to_owned()
+        }
+        None => book.add(title, body).map_err(|err| err.to_string())?,
     };
-    opened.map_err(|err| err.to_string())
+    let notes = book.list().map_err(|err| err.to_string())?;
+    Ok((saved, notes))
+}
+
+fn choice_button(label: &str, active: bool, message: Message) -> Element<'_, Message> {
+    button(text(label).size(14))
+        .padding([8.0, 14.0])
+        .on_press(message)
+        .style(segment_style(active))
+        .into()
 }
 
 fn binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
@@ -3904,6 +4694,7 @@ struct Breeze {
     bg: Color,
     ink: Color,
     second: Color,
+    word: Color,
 }
 
 impl canvas::Program<Message> for Breeze {
@@ -3919,9 +4710,38 @@ impl canvas::Program<Message> for Breeze {
     ) -> Vec<canvas::Geometry> {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         frame.fill_rectangle(iced::Point::ORIGIN, bounds.size(), self.bg);
-        stroke_current(&mut frame, self.phase, 0.46, self.ink, 1.0);
-        stroke_current(&mut frame, self.phase + 0.8, 0.54, self.second, 0.85);
+        stroke_current(&mut frame, self.phase, 0.50, self.ink, 1.0);
+        stroke_current(&mut frame, self.phase + 0.8, 0.58, self.second, 0.85);
+        paint_word(&mut frame, self.phase, self.word);
         vec![frame.into_geometry()]
+    }
+}
+
+fn paint_word(frame: &mut canvas::Frame, phase: f32, color: Color) {
+    let size = (frame.width() * 0.072).clamp(42.0, 84.0);
+    let advance = size * 0.58;
+    let count = 8.0;
+    let total = advance * count;
+    let mut x = (frame.width() - total) / 2.0 + advance / 2.0;
+    let y = frame.height() * 0.34;
+    let mut start = 0.0;
+    for letter in "Aerodash".chars() {
+        let t = ((phase - start) / 0.35).clamp(0.0, 1.0);
+        let alpha = t * t * (3.0 - 2.0 * t);
+        if alpha > 0.01 {
+            frame.fill_text(canvas::Text {
+                content: letter.to_string(),
+                position: iced::Point::new(x, y),
+                color: Color { a: alpha, ..color },
+                size: iced::Pixels(size),
+                font: serif(),
+                align_x: iced::alignment::Horizontal::Center.into(),
+                align_y: iced::alignment::Vertical::Center,
+                ..canvas::Text::default()
+            });
+        }
+        start += 0.28;
+        x += advance;
     }
 }
 

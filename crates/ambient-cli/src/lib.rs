@@ -175,13 +175,15 @@ pub fn chat_lines(dir: &Path) -> Result<Vec<String>, CliError> {
         .collect())
 }
 
-/// One conversation. `id` is the Space id. `label` is a short name for the other key, not a global user id.
+/// One conversation. `id` is the Space id. `label` is a short local name for the other key, not a global user id. `other` is the start of that key, so a rename can keep it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConversationSummary {
     /// Hex Space id.
     pub id: String,
     /// Short label for the other member.
     pub label: String,
+    /// First bytes of the other member's key, hex. Empty when unknown.
+    pub other: String,
 }
 
 /// Conversations in this folder, in storage order.
@@ -192,7 +194,7 @@ pub struct ConversationSummary {
 pub fn list_conversations(dir: &Path) -> Result<Vec<ConversationSummary>, CliError> {
     Ok(sync::conversations(dir)?
         .into_iter()
-        .map(|(id, label)| ConversationSummary { id, label })
+        .map(|(id, label, other)| ConversationSummary { id, label, other })
         .collect())
 }
 

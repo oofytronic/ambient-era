@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-11 — names stay on this computer
+
+The window opens on the word Aerodash, one letter at a time, over the two lines. That stays up for at least three seconds and until the folder has opened. A folder with no key asks for a device name, a personal name, and light, dark, or system. An existing key does not. The device name is the key-file label, set once, 1 to 32 bytes. The personal name and the color are a local `profile` file. Nicknames are a local `names` file. Neither is a record. The contact card is still four fields and still has no name, so a preferred username cannot be projected yet. What you call someone is only on this computer, and their key stays visible. Devices, recovery, and erasing the folder live in settings. Erase deletes the folder's children and starts the opening again. Saving a note runs off the typing thread. The editor is not reloaded when the seal finishes.
+
 ## 2026-11-11 — a note is filed by a tag in its text
 
 Notes are grouped by `#tag` in the body. A heading is not a tag. Fenced and inline code are not tags. The list is a view: there is no folder record, because a note is a snapshot and a tag syncs with it. `#clinic/billing` is one tag. The note screen no longer keeps a task editor under the page. A task is still the toolbar button, and the Tasks screen is still the same checkbox lines. New, delete, and send are small round buttons at the bottom right of the note. On a narrow window the new button sits on the list the same way. A pause writes the note on this computer even when the relay is off. Scrollbars are a thin thumb with no track.

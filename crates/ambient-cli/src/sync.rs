@@ -510,7 +510,7 @@ pub(crate) fn messages_in(dir: &Path, id: &str) -> Result<Vec<crate::ChatMessage
         .ok_or_else(|| CliError::message("no such conversation"))
 }
 
-pub(crate) fn conversations(dir: &Path) -> Result<Vec<(String, String)>, CliError> {
+pub(crate) fn conversations(dir: &Path) -> Result<Vec<(String, String, String)>, CliError> {
     Ok(chat_snap(dir)?.listed)
 }
 
@@ -967,7 +967,7 @@ impl Slot {
 #[derive(Clone)]
 struct ChatSnap {
     stamps: Vec<(PathBuf, u64, u64)>,
-    listed: Vec<(String, String)>,
+    listed: Vec<(String, String, String)>,
     text: HashMap<String, String>,
     messages: HashMap<String, Vec<crate::ChatMessage>>,
 }
@@ -998,14 +998,16 @@ fn chat_snap(dir: &Path) -> Result<ChatSnap, CliError> {
             continue;
         };
         let id = hex_id(&view.space_id.0);
-        let label = view
+        let other_key = view
             .members
             .keys()
-            .find(|key| **key != slot.card.signing_key)
-            .map_or_else(
-                || "Conversation".to_owned(),
-                |key| format!("Person {}", short_id(key)),
-            );
+            .find(|key| **key != slot.card.signing_key);
+        let other = other_key.map(|key| short_id(key)).unwrap_or_default();
+        let label = if other.is_empty() {
+            "Conversation".to_owned()
+        } else {
+            format!("Person {other}")
+        };
         let mut body = String::new();
         let mut lines = Vec::new();
         for line in &view.messages {
@@ -1016,7 +1018,7 @@ fn chat_snap(dir: &Path) -> Result<ChatSnap, CliError> {
                 mine: line.sender == slot.card.signing_key,
             });
         }
-        listed.push((id.clone(), label));
+        listed.push((id.clone(), label, other));
         text.insert(id.clone(), body);
         messages.insert(id, lines);
     }
