@@ -149,6 +149,18 @@ struct App {
     drag_from: Option<usize>,
     /// Previous press, so a second click on the same word selects it.
     last_press: Option<(Instant, usize)>,
+    /// Steps for the note that is open. Not written into the log.
+    history: NoteHistory,
+    /// Set after a new folder is created, until the welcome is finished.
+    welcome: Option<WelcomeStep>,
+    /// False only until the first welcome is finished. Older folders stay true.
+    seen: bool,
+    task_query: String,
+    /// Note id and checkbox line being renamed in the task list.
+    task_rename: Option<(String, usize)>,
+    task_rename_text: String,
+    /// Last line and clock label for each conversation. Display only.
+    chat_last: BTreeMap<String, (String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -248,6 +260,23 @@ enum Message {
     WipeDraft(String),
     ExportNotes,
     ConfirmWipe,
+    Undo,
+    Redo,
+    TaskQuery(String),
+    BeginTaskEdit {
+        id: String,
+        line: usize,
+    },
+    TaskLabel(String),
+    CommitTaskRename,
+    CancelTaskEdit,
+    RemoveTask {
+        id: String,
+        line: usize,
+    },
+    CopyChat(String),
+    WelcomeStored,
+    WelcomeDone,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,6 +299,191 @@ struct TaskRow {
     line: usize,
     done: bool,
     text: String,
+}
+
+/// One step back. The next save writes whatever the page shows. It does not rewrite the log.
+#[derive(Clone)]
+struct EditSnap {
+    title: String,
+    body: String,
+    cursor: text_editor::Cursor,
+}
+
+impl EditSnap {
+    fn same_text(&self, title: &str, body: &str) -> bool {
+        self.title == title && self.body == body
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Burst {
+    Type,
+    Erase,
+    Break,
+}
+
+enum HistGate {
+    Coalesce {
+        burst: Option<Burst>,
+        at: Option<Instant>,
+    },
+    Step {
+        pushed: bool,
+        dropped: Option<EditSnap>,
+        redo: Vec<EditSnap>,
+        burst: Option<Burst>,
+        at: Option<Instant>,
+    },
+}
+
+struct NoteHistory {
+    undo: Vec<EditSnap>,
+    redo: Vec<EditSnap>,
+    burst: Option<Burst>,
+    at: Option<Instant>,
+}
+
+impl NoteHistory {
+    const CAP: usize = 80;
+
+    fn new() -> Self {
+        Self {
+            undo: Vec::new(),
+            redo: Vec::new(),
+            burst: None,
+            at: None,
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::new();
+    }
+
+    fn coalesced(&self, burst: Burst, now: Instant) -> bool {
+        matches!(burst, Burst::Type | Burst::Erase)
+            && self.burst == Some(burst)
+            && self
+                .at
+                .is_some_and(|at| now.saturating_duration_since(at) < Duration::from_millis(800))
+            && !self.undo.is_empty()
+    }
+
+    fn begin(
+        &mut self,
+        title: &str,
+        body: &str,
+        cursor: text_editor::Cursor,
+        burst: Burst,
+        now: Instant,
+    ) -> HistGate {
+        if self.coalesced(burst, now) {
+            let gate = HistGate::Coalesce {
+                burst: self.burst,
+                at: self.at,
+            };
+            self.burst = Some(burst);
+            self.at = Some(now);
+            return gate;
+        }
+        let redo = std::mem::take(&mut self.redo);
+        let previous_burst = self.burst;
+        let previous_at = self.at;
+        let snap = EditSnap {
+            title: title.to_owned(),
+            body: body.to_owned(),
+            cursor,
+        };
+        let mut pushed = false;
+        let mut dropped = None;
+        if self
+            .undo
+            .last()
+            .is_none_or(|top| !top.same_text(&snap.title, &snap.body))
+        {
+            self.undo.push(snap);
+            pushed = true;
+            if self.undo.len() > Self::CAP {
+                dropped = Some(self.undo.remove(0));
+            }
+        }
+        self.burst = if burst == Burst::Break {
+            None
+        } else {
+            Some(burst)
+        };
+        self.at = Some(now);
+        HistGate::Step {
+            pushed,
+            dropped,
+            redo,
+            burst: previous_burst,
+            at: previous_at,
+        }
+    }
+
+    fn abort(&mut self, gate: HistGate) {
+        match gate {
+            HistGate::Coalesce { burst, at } => {
+                self.burst = burst;
+                self.at = at;
+            }
+            HistGate::Step {
+                pushed,
+                dropped,
+                redo,
+                burst,
+                at,
+            } => {
+                if pushed {
+                    self.undo.pop();
+                }
+                if let Some(dropped) = dropped {
+                    self.undo.insert(0, dropped);
+                }
+                self.redo = redo;
+                self.burst = burst;
+                self.at = at;
+            }
+        }
+    }
+
+    fn undo(&mut self, current: EditSnap) -> Option<EditSnap> {
+        while self
+            .undo
+            .last()
+            .is_some_and(|top| top.same_text(&current.title, &current.body))
+        {
+            self.undo.pop();
+        }
+        let previous = self.undo.pop()?;
+        self.redo.push(current);
+        self.burst = None;
+        self.at = None;
+        Some(previous)
+    }
+
+    fn redo(&mut self, current: EditSnap) -> Option<EditSnap> {
+        let next = self.redo.pop()?;
+        if self
+            .undo
+            .last()
+            .is_none_or(|top| !top.same_text(&current.title, &current.body))
+        {
+            self.undo.push(current);
+            if self.undo.len() > Self::CAP {
+                self.undo.remove(0);
+            }
+        }
+        self.burst = None;
+        self.at = None;
+        Some(next)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WelcomeStep {
+    Phrase,
+    Guide,
 }
 
 impl App {
@@ -346,9 +560,17 @@ impl App {
             breeze_frame: 0,
             drag_from: None,
             last_press: None,
+            history: NoteHistory::new(),
+            welcome: None,
+            seen: true,
+            task_query: String::new(),
+            task_rename: None,
+            task_rename_text: String::new(),
+            chat_last: BTreeMap::new(),
         };
         let saved = profile::load_profile(&app.dir);
         app.appearance = saved.appearance;
+        app.seen = saved.seen;
         app.your_name.clone_from(&saved.name);
         app.name_draft.clone_from(&saved.name);
         app.device_draft.clone_from(&saved.device);
@@ -423,8 +645,12 @@ impl App {
                 Task::none()
             }
             Message::TitleChanged(title) => {
-                self.title_text = title;
-                self.edited_at = Some(Instant::now());
+                if title != self.title_text {
+                    self.revise(Burst::Type, |app| {
+                        app.title_text = title;
+                        true
+                    });
+                }
                 Task::none()
             }
             Message::BodyEdited(action) => {
@@ -444,6 +670,10 @@ impl App {
                 if let Some(change) = structured {
                     self.drag_from = None;
                     self.apply_change(change);
+                    return self.note_follow(true);
+                }
+                if let Some(burst) = edit_burst(&action) {
+                    self.revise(burst, |app| app.body.edit(&action));
                     return self.note_follow(true);
                 }
                 if self.body.edit(&action) {
@@ -495,10 +725,12 @@ impl App {
                 }
                 let text = self.body.text();
                 if let Some(next) = markdown::set_task_line(&text, line, done) {
-                    let cursor = self.body.cursor();
-                    self.body.load(&next);
-                    self.body.place(cursor);
-                    self.edited_at = Some(Instant::now());
+                    self.revise(Burst::Break, |app| {
+                        let cursor = app.body.cursor();
+                        app.body.load(&next);
+                        app.body.place(cursor);
+                        true
+                    });
                 }
                 self.note_follow(false)
             }
@@ -511,12 +743,10 @@ impl App {
             }
             Message::CutNote => {
                 if let Some(text) = self.body.selection() {
-                    let changed = self
-                        .body
-                        .edit(&text_editor::Action::Edit(text_editor::Edit::Delete));
-                    if changed {
-                        self.edited_at = Some(Instant::now());
-                    }
+                    self.revise(Burst::Break, |app| {
+                        app.body
+                            .edit(&text_editor::Action::Edit(text_editor::Edit::Delete))
+                    });
                     Task::batch([clipboard::write(text), self.note_follow(true)])
                 } else {
                     Task::none()
@@ -837,6 +1067,56 @@ impl App {
             }
             Message::ExportNotes => self.export_notes(),
             Message::ConfirmWipe => self.wipe_notebook(),
+            Message::Undo => {
+                self.undo_note();
+                self.note_follow(true)
+            }
+            Message::Redo => {
+                self.redo_note();
+                self.note_follow(true)
+            }
+            Message::TaskQuery(query) => {
+                self.task_query = query;
+                Task::none()
+            }
+            Message::BeginTaskEdit { id, line } => {
+                self.task_rename_text = self
+                    .tasks
+                    .iter()
+                    .find(|task| task.note_id == id && task.line == line)
+                    .map(|task| task.text.clone())
+                    .unwrap_or_default();
+                self.task_rename = Some((id, line));
+                Task::none()
+            }
+            Message::TaskLabel(text) => {
+                self.task_rename_text = text;
+                Task::none()
+            }
+            Message::CommitTaskRename => self.commit_task_rename(),
+            Message::CancelTaskEdit => {
+                self.task_rename = None;
+                self.task_rename_text.clear();
+                Task::none()
+            }
+            Message::RemoveTask { id, line } => self.remove_listed_task(&id, line),
+            Message::CopyChat(text) => {
+                self.say("Message copied.");
+                clipboard::write(text)
+            }
+            Message::WelcomeStored => {
+                if !self.recovery_phrase.is_empty() {
+                    self.welcome = Some(WelcomeStep::Guide);
+                }
+                Task::none()
+            }
+            Message::WelcomeDone => {
+                self.welcome = None;
+                self.seen = true;
+                self.persist_profile();
+                self.say("This notebook is on this computer.");
+                Task::none()
+            }
             Message::Synced(outcome) => self.finish_sync(outcome),
         }
     }
@@ -850,6 +1130,9 @@ impl App {
         }
         if self.notebook.is_none() && self.open_error.is_empty() {
             return self.onboarding_screen();
+        }
+        if self.welcome.is_some() {
+            return self.welcome_screen();
         }
         if self.compact() {
             return column![
@@ -1049,7 +1332,14 @@ impl App {
             }
             for chat in &self.chats {
                 let selected = self.chat_id.as_deref() == Some(chat.id.as_str());
-                side = side.push(chat_row(&self.chat_name(chat), &chat.id, selected));
+                let (preview, time) = self.chat_last.get(&chat.id).cloned().unwrap_or_default();
+                side = side.push(chat_row(
+                    &self.chat_name(chat),
+                    &preview,
+                    &time,
+                    &chat.id,
+                    selected,
+                ));
             }
         } else if self.screen == Screen::Tasks {
             let open = self.tasks.iter().filter(|task| !task.done).count();
@@ -1188,16 +1478,31 @@ impl App {
         .spacing(8)
         .align_y(iced::Alignment::Center)
         .width(Fill);
+        let search = text_input("Search tasks", &self.task_query)
+            .on_input(Message::TaskQuery)
+            .padding(10)
+            .width(Fill)
+            .style(field_style);
         let mut list = column![].spacing(14).width(Fill);
-        let open: Vec<&TaskRow> = self.tasks.iter().filter(|task| !task.done).collect();
-        let done: Vec<&TaskRow> = self.tasks.iter().filter(|task| task.done).collect();
-        if open.is_empty() && done.is_empty() {
+        let open: Vec<&TaskRow> = self
+            .tasks
+            .iter()
+            .filter(|task| !task.done && self.task_hit(task))
+            .collect();
+        let done: Vec<&TaskRow> = self
+            .tasks
+            .iter()
+            .filter(|task| task.done && self.task_hit(task))
+            .collect();
+        if self.tasks.is_empty() {
             list = list.push(text("Nothing to do yet.").font(serif()).size(32));
             list = list.push(
                 text("Or write a line like - [ ] call the clinic in any note.")
                     .size(14)
                     .color(ink.muted),
             );
+        } else if open.is_empty() && done.is_empty() {
+            list = list.push(text("No tasks match.").font(serif()).size(32));
         } else if open.is_empty() {
             list = list.push(text("Nothing open.").font(serif()).size(32));
         } else {
@@ -1214,6 +1519,7 @@ impl App {
         }
         column![
             add,
+            search,
             text("This goes in a note named Tasks. A box in any other note shows up here too.")
                 .size(13)
                 .color(ink.muted),
@@ -1225,28 +1531,46 @@ impl App {
         .into()
     }
 
+    fn task_hit(&self, task: &TaskRow) -> bool {
+        let query = self.task_query.trim();
+        if query.is_empty() {
+            return true;
+        }
+        let query = query.to_lowercase();
+        task.text.to_lowercase().contains(&query) || task.note_title.to_lowercase().contains(&query)
+    }
+
     fn task_row(&self, task: &TaskRow) -> Element<'_, Message> {
         let ink = self.ink();
         let id = task.note_id.clone();
         let line = task.line;
         let open_id = task.note_id.clone();
+        let rename_id = task.note_id.clone();
+        let remove_id = task.note_id.clone();
         let title = if task.note_title.is_empty() {
             "Untitled".to_owned()
         } else {
             task.note_title.clone()
         };
-        let label = if task.text.is_empty() {
-            "Empty task".to_owned()
-        } else {
-            task.text.clone()
-        };
+        let editing = self
+            .task_rename
+            .as_ref()
+            .is_some_and(|(note, row)| note == &task.note_id && *row == task.line);
         let words = if task.done { ink.muted } else { ink.text };
-        row![
-            checkbox(task.done).on_toggle(move |done| Message::SetTask {
-                id: id.clone(),
-                line,
-                done,
-            }),
+        let main: Element<'_, Message> = if editing {
+            text_input("Task", &self.task_rename_text)
+                .on_input(Message::TaskLabel)
+                .on_submit(Message::CommitTaskRename)
+                .padding(8)
+                .width(Fill)
+                .style(field_style)
+                .into()
+        } else {
+            let label = if task.text.is_empty() {
+                "Empty task".to_owned()
+            } else {
+                task.text.clone()
+            };
             button(
                 column![
                     text(label).size(16).color(words),
@@ -1258,11 +1582,39 @@ impl App {
             .width(Fill)
             .padding([2, 0])
             .on_press(Message::Select(open_id))
-            .style(quiet_style),
+            .style(quiet_style)
+            .into()
+        };
+        let mut line_row = row![
+            checkbox(task.done).on_toggle(move |done| Message::SetTask {
+                id: id.clone(),
+                line,
+                done,
+            }),
+            main,
         ]
         .spacing(12)
         .align_y(iced::Alignment::Center)
-        .into()
+        .width(Fill);
+        if editing {
+            line_row = line_row.push(ghost_label("Cancel", Message::CancelTaskEdit));
+        } else {
+            line_row = line_row.push(ghost_label_owned(
+                "Rename".to_owned(),
+                Message::BeginTaskEdit {
+                    id: rename_id,
+                    line,
+                },
+            ));
+            line_row = line_row.push(ghost_label_owned(
+                "Remove".to_owned(),
+                Message::RemoveTask {
+                    id: remove_id,
+                    line,
+                },
+            ));
+        }
+        line_row.into()
     }
 
     fn rebuild_tasks(&mut self) {
@@ -1333,11 +1685,84 @@ impl App {
         let Some(next) = markdown::set_task_line(&body, line, done) else {
             return Task::none();
         };
+        self.put_note_text(id, &title, &next)
+    }
+
+    fn commit_task_rename(&mut self) -> Task<Message> {
+        let Some((id, line)) = self.task_rename.clone() else {
+            return Task::none();
+        };
+        let label = self.task_rename_text.clone();
+        if label.trim().is_empty() {
+            self.say("Write the task first.");
+            return Task::none();
+        }
+        let Some((body, conflict, title)) = self.task_source(&id) else {
+            self.say("That note is not here.");
+            return Task::none();
+        };
+        if conflict {
+            self.show_note(&id);
+            self.say("Two versions. Write the one you want to keep, then save.");
+            return Task::none();
+        }
+        self.task_rename = None;
+        self.task_rename_text.clear();
+        let Some(next) = markdown::rename_task_line(&body, line, &label) else {
+            return Task::none();
+        };
+        self.store_task_edit(&id, &title, &next)
+    }
+
+    fn remove_listed_task(&mut self, id: &str, line: usize) -> Task<Message> {
+        if self
+            .task_rename
+            .as_ref()
+            .is_some_and(|(note, row)| note == id && *row == line)
+        {
+            self.task_rename = None;
+            self.task_rename_text.clear();
+        }
+        let Some((body, conflict, title)) = self.task_source(id) else {
+            self.say("That note is not here.");
+            return Task::none();
+        };
+        if conflict {
+            self.show_note(id);
+            self.say("Two versions. Write the one you want to keep, then save.");
+            return Task::none();
+        }
+        let Some(next) = markdown::remove_task_line(&body, line) else {
+            return Task::none();
+        };
+        self.store_task_edit(id, &title, &next)
+    }
+
+    fn store_task_edit(&mut self, id: &str, title: &str, next: &str) -> Task<Message> {
+        let follow = self.put_note_text(id, title, next);
+        if self.editor_dirty() && self.selected.as_deref() == Some(id) {
+            Task::batch([follow, self.start_save(true)])
+        } else {
+            follow
+        }
+    }
+
+    fn put_note_text(&mut self, id: &str, title: &str, next: &str) -> Task<Message> {
         if self.selected.as_deref() == Some(id) {
-            let cursor = self.body.cursor();
-            self.body.load(&next);
-            self.body.place(cursor);
-            self.edited_at = Some(Instant::now());
+            let title = title.to_owned();
+            let next = next.to_owned();
+            self.revise(Burst::Break, |app| {
+                let before = app.body.text();
+                let before_title = app.title_text.clone();
+                let cursor = app.body.cursor();
+                app.title_text.clone_from(&title);
+                app.body.load(&next);
+                app.body.place(cursor);
+                app.body.text() != before || app.title_text != before_title
+            });
+            if self.screen == Screen::Tasks {
+                self.rebuild_tasks();
+            }
             return Task::none();
         }
         if let Some(slot) = self
@@ -1345,9 +1770,10 @@ impl App {
             .iter_mut()
             .find(|(key, _, _)| key.as_deref() == Some(id))
         {
-            slot.2.clone_from(&next);
+            title.clone_into(&mut slot.1);
+            next.clone_into(&mut slot.2);
         }
-        self.apply_note(Some(id.to_owned()), title, next)
+        self.apply_note(Some(id.to_owned()), title.to_owned(), next.to_owned())
     }
 
     fn main(&self) -> Element<'_, Message> {
@@ -1622,21 +2048,37 @@ impl App {
             );
         }
         composer = composer.push(composer_controls);
-        container(
-            column![
-                vscroll(lines.width(Fill))
-                    .height(Fill)
-                    .width(Fill)
-                    .anchor_bottom(),
-                composer,
-            ]
-            .spacing(12)
-            .width(Fill)
-            .height(Fill),
-        )
-        .width(Fill)
-        .height(Fill)
-        .clip(true)
+        let mut page = column![].spacing(12).width(Fill).height(Fill);
+        if self.chat_id.is_some() {
+            page = page.push(self.chat_header());
+        }
+        page = page.push(
+            vscroll(lines.width(Fill))
+                .height(Fill)
+                .width(Fill)
+                .anchor_bottom(),
+        );
+        page = page.push(composer);
+        container(page).width(Fill).height(Fill).clip(true).into()
+    }
+
+    fn chat_header(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let Some(id) = &self.chat_id else {
+            return space().height(0).into();
+        };
+        let draft = self.aliases.get(id).cloned().unwrap_or_default();
+        let id = id.clone();
+        column![
+            text_input("What do you call them?", &draft)
+                .on_input(move |text| Message::AliasDraft(id.clone(), text))
+                .padding(10)
+                .style(field_style),
+            text("Only this computer remembers it.")
+                .size(12)
+                .color(ink.muted),
+        ]
+        .spacing(4)
         .into()
     }
 
@@ -1862,6 +2304,7 @@ impl App {
         if !known {
             self.chat_id = self.chats.first().map(|chat| chat.id.clone());
         }
+        self.fill_chat_last();
         let Some(id) = self.chat_id.clone() else {
             self.chat.clear();
             return;
@@ -1887,6 +2330,23 @@ impl App {
         }
     }
 
+    fn fill_chat_last(&mut self) {
+        let tz = clock::load_tz();
+        let now = clock::now_ms();
+        self.chat_last.clear();
+        for chat in &self.chats {
+            let Ok(lines) = ambient_cli::chat_messages_in(&self.dir, &chat.id) else {
+                continue;
+            };
+            let Some(last) = lines.last() else {
+                continue;
+            };
+            let when = clock::when(last.unix_ms, &tz, now);
+            self.chat_last
+                .insert(chat.id.clone(), (chat_preview(&last.text), when.time));
+        }
+    }
+
     fn show_note(&mut self, id: &str) {
         self.send_open = false;
         self.confirm_delete = false;
@@ -1897,6 +2357,7 @@ impl App {
         }
         if self.selected.as_deref() != Some(id) {
             self.remember_unsaved();
+            self.clear_history();
         }
         let stash = self
             .unsaved
@@ -1941,6 +2402,7 @@ impl App {
         self.send_open = false;
         self.confirm_delete = false;
         self.remember_unsaved();
+        self.clear_history();
         self.save_token = self.save_token.wrapping_add(1);
         let stash = self
             .unsaved
@@ -2284,7 +2746,14 @@ impl App {
         }
         for chat in &self.chats {
             let selected = self.chat_id.as_deref() == Some(chat.id.as_str());
-            side = side.push(chat_row(&self.chat_name(chat), &chat.id, selected));
+            let (preview, time) = self.chat_last.get(&chat.id).cloned().unwrap_or_default();
+            side = side.push(chat_row(
+                &self.chat_name(chat),
+                &preview,
+                &time,
+                &chat.id,
+                selected,
+            ));
         }
         side.into()
     }
@@ -2321,6 +2790,7 @@ impl App {
 
     fn chat_bubble(&self, line: &ChatBubble, width: f32) -> Element<'static, Message> {
         let ink = self.ink();
+        let copy_text = line.text.clone();
         let words = line.text.clone();
         let when = line.time.clone();
         let mine = line.mine;
@@ -2359,17 +2829,25 @@ impl App {
                 }
             }
         }
+        let time_color = if mine {
+            Color {
+                a: 0.72,
+                ..ink.on_accent
+            }
+        } else {
+            ink.muted
+        };
+        let mut meta = row![].spacing(8).align_y(iced::Alignment::Center);
         if !when.is_empty() {
-            let time_color = if mine {
-                Color {
-                    a: 0.72,
-                    ..ink.on_accent
-                }
-            } else {
-                ink.muted
-            };
-            body = body.push(text(when).size(11).color(time_color));
+            meta = meta.push(text(when).size(11).color(time_color));
         }
+        meta = meta.push(
+            button(text("Copy").size(11))
+                .padding([0, 2])
+                .on_press(Message::CopyChat(copy_text))
+                .style(move |theme, status| copy_style(theme, status, mine)),
+        );
+        body = body.push(meta);
         let bubble = container(body)
             .padding([8, 12])
             .max_width(width)
@@ -2407,11 +2885,14 @@ impl App {
                 } else {
                     format!("\n{markdown}")
                 };
-                self.body
-                    .perform(&text_editor::Action::Edit(text_editor::Edit::Paste(
-                        Arc::new(insert),
-                    )));
-                self.edited_at = Some(Instant::now());
+                self.revise(Burst::Break, |app| {
+                    let before = app.body.text();
+                    app.body
+                        .perform(&text_editor::Action::Edit(text_editor::Edit::Paste(
+                            Arc::new(insert),
+                        )));
+                    app.body.text() != before
+                });
                 self.screen = Screen::Notes;
                 self.sheet = Sheet::None;
                 self.detail = true;
@@ -2445,23 +2926,82 @@ impl App {
     }
 
     fn apply_change(&mut self, change: markdown::Change) {
-        if change.anchor == change.end {
-            self.body.place(text_editor::Cursor {
-                position: change.anchor,
-                selection: None,
-            });
+        self.revise(Burst::Break, |app| {
+            let before = app.body.text();
+            if change.anchor == change.end {
+                app.body.place(text_editor::Cursor {
+                    position: change.anchor,
+                    selection: None,
+                });
+            } else {
+                app.body.place(text_editor::Cursor {
+                    position: change.end,
+                    selection: Some(change.anchor),
+                });
+            }
+            app.body
+                .perform(&text_editor::Action::Edit(text_editor::Edit::Paste(
+                    Arc::new(change.insert),
+                )));
+            app.body.place(change.after);
+            app.body.text() != before
+        });
+    }
+
+    fn revise(&mut self, burst: Burst, change: impl FnOnce(&mut Self) -> bool) {
+        let now = Instant::now();
+        let gate = if self.history.coalesced(burst, now) {
+            self.history.begin("", "", self.body.cursor(), burst, now)
         } else {
-            self.body.place(text_editor::Cursor {
-                position: change.end,
-                selection: Some(change.anchor),
-            });
+            let cursor = self.body.cursor();
+            let title = self.title_text.clone();
+            let body = self.body.text();
+            self.history.begin(&title, &body, cursor, burst, now)
+        };
+        if change(self) {
+            self.edited_at = Some(now);
+        } else {
+            self.history.abort(gate);
         }
-        self.body
-            .perform(&text_editor::Action::Edit(text_editor::Edit::Paste(
-                Arc::new(change.insert),
-            )));
-        self.body.place(change.after);
-        self.edited_at = Some(Instant::now());
+    }
+
+    fn snap(&self) -> EditSnap {
+        EditSnap {
+            title: self.title_text.clone(),
+            body: self.body.text(),
+            cursor: self.body.cursor(),
+        }
+    }
+
+    fn restore_snap(&mut self, snap: EditSnap) {
+        self.title_text = snap.title;
+        self.body.load(&snap.body);
+        self.body.place(snap.cursor);
+        self.drag_from = None;
+        self.last_press = None;
+        if self.editor_dirty() {
+            self.edited_at = Some(Instant::now());
+        } else {
+            self.edited_at = None;
+        }
+    }
+
+    fn undo_note(&mut self) {
+        let Some(previous) = self.history.undo(self.snap()) else {
+            return;
+        };
+        self.restore_snap(previous);
+    }
+
+    fn redo_note(&mut self) {
+        let Some(next) = self.history.redo(self.snap()) else {
+            return;
+        };
+        self.restore_snap(next);
+    }
+
+    fn clear_history(&mut self) {
+        self.history.clear();
     }
 
     fn arm_press(&mut self, byte: usize) {
@@ -2736,7 +3276,9 @@ impl App {
         match ambient_cli::recovery_phrase(&self.dir) {
             Ok(phrase) => {
                 self.recovery_phrase = phrase;
-                self.say("Recovery phrase shown. Copy it and store it offline.");
+                if self.welcome.is_none() {
+                    self.say("Recovery phrase shown. Copy it and store it offline.");
+                }
             }
             Err(err) => self.message = err.to_string(),
         }
@@ -2949,6 +3491,7 @@ impl App {
                 self.note_writer.clear();
                 self.edited_at = None;
                 self.save_token = self.save_token.wrapping_add(1);
+                self.clear_history();
                 self.writes = self.writes.saturating_add(1);
                 self.pending = true;
                 self.reload();
@@ -2967,14 +3510,12 @@ impl App {
         self.edited_at = None;
         self.confirm_delete = false;
         self.save_token = self.save_token.wrapping_add(1);
+        self.clear_history();
     }
 
     fn write_note(&mut self, id: &str, title: &str, body: &str) -> Task<Message> {
         if self.selected.as_deref() == Some(id) {
-            title.clone_into(&mut self.title_text);
-            self.body.load(body);
-            self.edited_at = Some(Instant::now());
-            return Task::none();
+            return self.put_note_text(id, title, body);
         }
         if let Some(slot) = self
             .unsaved
@@ -3105,10 +3646,14 @@ impl App {
             self.backup_draft = setting.backup;
         }
         self.pending = ambient_cli::has_unsent(&self.dir).unwrap_or(false);
-        if paired && self.notes.is_empty() {
+        if paired && self.notes.is_empty() && self.seen {
             self.say(
                 "Paired device. It does not hold the root. It syncs on its own while the relay is on.",
             );
+        }
+        if !self.seen {
+            self.welcome = Some(WelcomeStep::Phrase);
+            self.show_phrase();
         }
     }
 
@@ -3208,6 +3753,7 @@ impl App {
             device: self.device_draft.clone(),
             name: self.your_name.clone(),
             appearance: self.appearance,
+            seen: self.seen,
         };
         if let Err(err) = profile::store_profile(&self.dir, &profile) {
             self.message = err;
@@ -3244,11 +3790,11 @@ impl App {
                 self.device_draft = device.to_owned();
                 self.your_name = self.name_draft.trim().to_owned();
                 self.name_draft.clone_from(&self.your_name);
+                self.seen = false;
                 self.persist_profile();
                 self.open_error.clear();
                 self.adopt_open_book(book);
                 self.loaded = true;
-                self.say("This notebook is on this computer.");
                 if self.net_mode == ambient_cli::NetMode::ThisComputer {
                     self.start_relay();
                 }
@@ -3344,6 +3890,10 @@ impl App {
         self.qr_bytes = None;
         self.pending_files.clear();
         self.task_draft.clear();
+        self.task_query.clear();
+        self.task_rename = None;
+        self.task_rename_text.clear();
+        self.chat_last.clear();
         self.call_draft.clear();
         self.wipe_draft.clear();
         self.aliases.clear();
@@ -3351,6 +3901,9 @@ impl App {
         self.name_draft.clear();
         self.device_draft.clear();
         self.appearance = profile::Appearance::Dark;
+        self.seen = true;
+        self.welcome = None;
+        self.clear_history();
         self.open_error.clear();
         self.message.clear();
         self.edited_at = None;
@@ -3412,6 +3965,101 @@ impl App {
         )
         .center(Fill)
         .padding(32)
+        .into()
+    }
+
+    fn welcome_screen(&self) -> Element<'_, Message> {
+        let page = match self.welcome {
+            Some(WelcomeStep::Guide) => self.guide_screen(),
+            _ => self.phrase_screen(),
+        };
+        container(vscroll(page).width(Fill).height(Fill))
+            .padding(32)
+            .width(Fill)
+            .height(Fill)
+            .into()
+    }
+
+    fn phrase_screen(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let width = (self.size.width - 64.0).clamp(280.0, 520.0);
+        let mut body = column![
+            text("Recovery phrase").font(serif()).size(40),
+            text("These words rebuild the notebook on a new computer. They are not a passphrase. A passphrase is optional. It only locks the key file on this computer, and you can set it later in Settings.")
+                .size(16)
+                .color(ink.muted),
+        ]
+        .spacing(16)
+        .width(width);
+        if self.recovery_phrase.is_empty() {
+            body = body.push(text(self.message.as_str()).size(14).color(ink.muted));
+            body = body.push(action_label("Show recovery phrase", Message::ShowPhrase));
+        } else {
+            body = body.push(
+                container(text(&self.recovery_phrase).size(16))
+                    .padding(14)
+                    .width(Fill)
+                    .style(field_well),
+            );
+            body = body.push(
+                row![
+                    ghost_label("Copy phrase", Message::CopyPhrase),
+                    action_label("I've stored it", Message::WelcomeStored),
+                ]
+                .spacing(8),
+            );
+            body = body.push(
+                text("Store it offline. Settings can show it again.")
+                    .size(13)
+                    .color(ink.muted),
+            );
+        }
+        container(body)
+            .width(Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .into()
+    }
+
+    fn guide_screen(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let width = (self.size.width - 64.0).clamp(280.0, 560.0);
+        container(
+            column![
+                text("Before the notes").font(serif()).size(40),
+                text("Settings holds the rest. Nothing on this page is sent.")
+                    .size(16)
+                    .color(ink.muted),
+                guide_line(
+                    "Passphrase",
+                    "Optional. Settings, then Devices. It locks the key file on this computer. It is not the recovery phrase, and this welcome does not ask for one.",
+                ),
+                guide_line(
+                    "Devices",
+                    "This computer already has a name. Another computer can pair later. Revoke stops new notes from a computer you no longer use. Notes it already wrote stay.",
+                ),
+                guide_line(
+                    "Recovery",
+                    "The phrase is in Settings if you need to copy it again. Restoring on a new computer does not bring back old device keys.",
+                ),
+                guide_line(
+                    "Your notes",
+                    "Export a copy into this folder, or erase this computer's notebook. Erasing does not reach another computer.",
+                ),
+                guide_line(
+                    "People",
+                    "What you call someone stays on this computer. An invite still has no name on it.",
+                ),
+                guide_line(
+                    "Chat",
+                    "An invite is a link or a QR. The words can sync. A file stays on this computer.",
+                ),
+                action_label("Open the notebook", Message::WelcomeDone),
+            ]
+            .spacing(18)
+            .width(width),
+        )
+        .width(Fill)
+        .align_x(iced::alignment::Horizontal::Center)
         .into()
     }
 
@@ -4369,15 +5017,105 @@ fn segment(label: &str, active: bool, message: Message) -> Element<'_, Message> 
         .into()
 }
 
-fn chat_row(label: &str, id: &str, selected: bool) -> Element<'static, Message> {
+fn chat_row(
+    label: &str,
+    preview: &str,
+    time: &str,
+    id: &str,
+    selected: bool,
+) -> Element<'static, Message> {
     let label = label.to_owned();
+    let preview = preview.to_owned();
+    let time = time.to_owned();
     let id = id.to_owned();
-    button(text(label).size(15).width(Fill))
+    let mut head = row![text(label).size(15).width(Fill)].align_y(iced::Alignment::Center);
+    if !time.is_empty() {
+        head = head.push(text(time).size(12).style(muted_style));
+    }
+    let mut lines = column![head].spacing(2).width(Fill);
+    if !preview.is_empty() {
+        lines = lines.push(text(preview).size(12).style(muted_style));
+    }
+    button(lines)
         .width(Fill)
         .padding([8.0, 10.0])
         .on_press(Message::SelectChat(id))
         .style(list_row(selected))
         .into()
+}
+
+fn guide_line(title: &'static str, body: &'static str) -> Element<'static, Message> {
+    column![
+        text(title).font(serif()).size(22),
+        text(body).size(14).style(muted_style),
+    ]
+    .spacing(4)
+    .into()
+}
+
+fn chat_preview(text: &str) -> String {
+    let line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    let mut out: String = line.chars().take(72).collect();
+    if line.chars().count() > 72 {
+        out.push_str("...");
+    }
+    out
+}
+
+fn edit_burst(action: &text_editor::Action) -> Option<Burst> {
+    match action {
+        text_editor::Action::Edit(text_editor::Edit::Insert(_)) => Some(Burst::Type),
+        text_editor::Action::Edit(text_editor::Edit::Backspace | text_editor::Edit::Delete) => {
+            Some(Burst::Erase)
+        }
+        text_editor::Action::Edit(
+            text_editor::Edit::Paste(_)
+            | text_editor::Edit::Enter
+            | text_editor::Edit::Indent
+            | text_editor::Edit::Unindent,
+        ) => Some(Burst::Break),
+        _ => None,
+    }
+}
+
+fn muted_style(theme: &Theme) -> iced::widget::text::Style {
+    let ink = ink_of(theme);
+    iced::widget::text::Style {
+        color: Some(ink.muted),
+    }
+}
+
+fn copy_style(theme: &Theme, status: button::Status, mine: bool) -> button::Style {
+    let ink = ink_of(theme);
+    let text_color = if mine {
+        Color {
+            a: 0.85,
+            ..ink.on_accent
+        }
+    } else {
+        ink.muted
+    };
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => Some(iced::Background::Color(Color {
+            a: 0.12,
+            ..if mine { ink.on_accent } else { ink.text }
+        })),
+        _ => None,
+    };
+    button::Style {
+        background,
+        text_color,
+        border: iced::Border {
+            radius: 6.0.into(),
+            width: 0.0,
+            color: Color::TRANSPARENT,
+        },
+        ..Default::default()
+    }
 }
 
 fn icon_button(handle: iced_image::Handle, message: Message) -> Element<'static, Message> {
@@ -4653,11 +5391,16 @@ fn binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>
         _ => None,
     };
     let command = press.modifiers.control() || press.modifiers.command();
-    match (character.as_deref(), command) {
-        (Some("s"), true) => Some(text_editor::Binding::Custom(Message::Save)),
-        (Some("n"), true) => Some(text_editor::Binding::Custom(Message::NewNote)),
-        (Some("c"), true) => Some(text_editor::Binding::Custom(Message::CopyNote)),
-        (Some("x"), true) => Some(text_editor::Binding::Custom(Message::CutNote)),
+    let shift = press.modifiers.shift();
+    match (character.as_deref(), command, shift) {
+        (Some("z" | "Z"), true, true) | (Some("y" | "Y"), true, _) => {
+            Some(text_editor::Binding::Custom(Message::Redo))
+        }
+        (Some("z" | "Z"), true, false) => Some(text_editor::Binding::Custom(Message::Undo)),
+        (Some("s"), true, _) => Some(text_editor::Binding::Custom(Message::Save)),
+        (Some("n"), true, _) => Some(text_editor::Binding::Custom(Message::NewNote)),
+        (Some("c"), true, _) => Some(text_editor::Binding::Custom(Message::CopyNote)),
+        (Some("x"), true, _) => Some(text_editor::Binding::Custom(Message::CutNote)),
         _ => text_editor::Binding::from_key_press(press),
     }
 }
@@ -5048,4 +5791,134 @@ fn stroke_current(
             .with_line_cap(canvas::LineCap::Round)
             .with_line_join(canvas::LineJoin::Round),
     );
+}
+
+#[cfg(test)]
+mod history_tests {
+    use std::time::{Duration, Instant};
+
+    use iced::widget::text_editor;
+
+    use super::{Burst, EditSnap, NoteHistory, chat_preview, edit_burst};
+
+    fn snap(body: &str) -> EditSnap {
+        EditSnap {
+            title: String::new(),
+            body: body.to_owned(),
+            cursor: text_editor::Cursor {
+                position: text_editor::Position { line: 0, column: 0 },
+                selection: None,
+            },
+        }
+    }
+
+    #[test]
+    fn typing_gathers_into_one_step() {
+        let mut history = NoteHistory::new();
+        let start = Instant::now();
+        let empty = snap("");
+        history.begin("", "", empty.cursor, Burst::Type, start);
+        history.begin(
+            "",
+            "a",
+            snap("a").cursor,
+            Burst::Type,
+            start + Duration::from_millis(120),
+        );
+        let back = history.undo(snap("ab")).expect("step");
+        assert_eq!(back.body, "");
+        let forward = history.redo(back).expect("forward");
+        assert_eq!(forward.body, "ab");
+    }
+
+    #[test]
+    fn a_pause_starts_another_step() {
+        let mut history = NoteHistory::new();
+        let start = Instant::now();
+        history.begin("", "", snap("").cursor, Burst::Type, start);
+        history.begin(
+            "",
+            "a",
+            snap("a").cursor,
+            Burst::Type,
+            start + Duration::from_millis(900),
+        );
+        let back = history.undo(snap("ab")).expect("step");
+        assert_eq!(back.body, "a");
+        let earlier = history.undo(back).expect("earlier");
+        assert_eq!(earlier.body, "");
+    }
+
+    #[test]
+    fn a_format_does_not_merge_with_typing() {
+        let mut history = NoteHistory::new();
+        let start = Instant::now();
+        history.begin("", "", snap("").cursor, Burst::Type, start);
+        history.begin(
+            "",
+            "hi",
+            snap("hi").cursor,
+            Burst::Break,
+            start + Duration::from_millis(40),
+        );
+        let back = history.undo(snap("**hi**")).expect("step");
+        assert_eq!(back.body, "hi");
+    }
+
+    #[test]
+    fn a_failed_edit_puts_the_step_back() {
+        let mut history = NoteHistory::new();
+        let gate = history.begin("", "a", snap("a").cursor, Burst::Erase, Instant::now());
+        history.abort(gate);
+        assert!(history.undo(snap("a")).is_none());
+    }
+
+    #[test]
+    fn redo_is_dropped_when_typing_starts_again() {
+        let mut history = NoteHistory::new();
+        let start = Instant::now();
+        history.begin("", "", snap("").cursor, Burst::Type, start);
+        let back = history.undo(snap("a")).expect("step");
+        assert_eq!(back.body, "");
+        history.begin(
+            "",
+            "",
+            snap("").cursor,
+            Burst::Type,
+            start + Duration::from_millis(40),
+        );
+        assert!(history.redo(snap("b")).is_none());
+    }
+
+    #[test]
+    fn the_stack_keeps_eighty_steps() {
+        let mut history = NoteHistory::new();
+        let start = Instant::now();
+        for index in 0..90 {
+            let body = "x".repeat(index);
+            let cursor = snap(&body).cursor;
+            let at = start + Duration::from_millis(u64::try_from(index).unwrap_or(0));
+            history.begin("", &body, cursor, Burst::Break, at);
+        }
+        assert_eq!(history.undo.len(), 80);
+    }
+
+    #[test]
+    fn a_chat_preview_is_one_short_line() {
+        assert_eq!(chat_preview("\nhello\nthere"), "hello");
+        let long = "a".repeat(80);
+        let preview = chat_preview(&long);
+        assert!(preview.ends_with("..."));
+        assert_eq!(preview.chars().count(), 75);
+    }
+
+    #[test]
+    fn paste_is_its_own_step() {
+        let pasted = text_editor::Action::Edit(text_editor::Edit::Paste(std::sync::Arc::new(
+            "x".to_owned(),
+        )));
+        assert_eq!(edit_burst(&pasted), Some(Burst::Break));
+        let typed = text_editor::Action::Edit(text_editor::Edit::Insert('a'));
+        assert_eq!(edit_burst(&typed), Some(Burst::Type));
+    }
 }

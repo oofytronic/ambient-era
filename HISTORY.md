@@ -4,6 +4,12 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-13 — undo is the open note, and the first open explains Settings
+
+Undo and redo are for the note that is open. Typing and deleting each gather into one step for a short moment. A format, a paste, or Enter is its own step. Ctrl+Z steps back. Ctrl+Shift+Z and Ctrl+Y step forward. Leaving the note drops the steps. The next save writes the text as it is. It does not rewrite the log.
+
+A new notebook shows the recovery phrase, then what lives in Settings, before the notes. The passphrase is optional and is not collected there. An older folder has no `seen` line and skips this. The Tasks list can rename a line, remove it, and search. A chat row shows the last message and its time. A message can be copied. The open chat can name the other person on this computer. This does not add a task record, a deleted message, or an agent.
+
 ## 2026-11-13 — a drag selects the letters
 
 A drag across the page selects those letters, including words that have already settled. Delete, backspace, and a mark such as bold use that range. Bold on words that already contain a mark wraps the words, instead of leaving a stray mark in the middle. The caret word stays the only editor. A selection does not open the marks on the rest of the line. This supersedes the line that said a click only puts the caret on the letter.

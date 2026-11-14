@@ -33,6 +33,9 @@ pub(super) struct Profile {
     pub device: String,
     pub name: String,
     pub appearance: Appearance,
+    /// False only for a folder that has not finished the first welcome.
+    /// Older profiles have no line for this, and those count as finished.
+    pub seen: bool,
 }
 
 impl Default for Profile {
@@ -41,6 +44,7 @@ impl Default for Profile {
             device: String::new(),
             name: String::new(),
             appearance: Appearance::Dark,
+            seen: true,
         }
     }
 }
@@ -55,10 +59,11 @@ pub(super) fn load_profile(dir: &Path) -> Profile {
 pub(super) fn store_profile(dir: &Path, profile: &Profile) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|_| "could not write settings".to_owned())?;
     let text = format!(
-        "v1\ndevice={}\nname={}\ntheme={}\n",
+        "v1\ndevice={}\nname={}\ntheme={}\nseen={}\n",
         one_line(&profile.device),
         one_line(&profile.name),
-        profile.appearance.as_str()
+        profile.appearance.as_str(),
+        if profile.seen { "yes" } else { "no" }
     );
     fs::write(dir.join("profile"), text).map_err(|_| "could not write settings".to_owned())
 }
@@ -158,6 +163,8 @@ fn parse_profile(text: &str) -> Profile {
             value.trim().clone_into(&mut profile.name);
         } else if let Some(value) = line.strip_prefix("theme=") {
             profile.appearance = Appearance::parse(value.trim());
+        } else if let Some(value) = line.strip_prefix("seen=") {
+            profile.seen = value.trim() != "no";
         }
     }
     profile
@@ -206,6 +213,20 @@ mod tests {
         assert_eq!(parsed.device, "laptop");
         assert_eq!(parsed.name, "Ada");
         assert_eq!(parsed.appearance, Appearance::System);
+        assert!(parsed.seen);
+    }
+
+    #[test]
+    fn a_missing_seen_line_counts_as_finished() {
+        let parsed = parse_profile("v1\ndevice=laptop\nname=Ada\ntheme=dark\n");
+        assert!(parsed.seen);
+    }
+
+    #[test]
+    fn seen_no_is_an_unfinished_welcome() {
+        let parsed = parse_profile("v1\nseen=no\n");
+        assert!(!parsed.seen);
+        assert!(parse_profile("v1\nseen=yes\n").seen);
     }
 
     #[test]

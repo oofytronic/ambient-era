@@ -1740,7 +1740,6 @@ pub(super) fn task_lines(body: &str) -> Vec<TaskLine> {
 }
 
 /// Removes one checkbox line. `None` when that line is not a task.
-#[cfg(test)]
 pub(super) fn remove_task_line(body: &str, line_index: usize) -> Option<String> {
     let (start, end) = line_span(body, line_index)?;
     let line = body.get(start..end)?;
@@ -1759,7 +1758,6 @@ pub(super) fn remove_task_line(body: &str, line_index: usize) -> Option<String> 
 
 /// Replaces the words of one checkbox line. The box and its done mark stay.
 /// `None` when that line is not a task, the label is empty, or it already matches.
-#[cfg(test)]
 pub(super) fn rename_task_line(body: &str, line_index: usize, label: &str) -> Option<String> {
     let label = label.trim().replace(['\n', '\r'], " ");
     if label.is_empty() {
@@ -1781,7 +1779,6 @@ pub(super) fn rename_task_line(body: &str, line_index: usize, label: &str) -> Op
     Some(out)
 }
 
-#[cfg(test)]
 fn task_prefix(line: &str, end: usize) -> String {
     let prefix = line.get(..end).unwrap_or("");
     if prefix.ends_with(' ') {
@@ -1791,7 +1788,6 @@ fn task_prefix(line: &str, end: usize) -> String {
     }
 }
 
-#[cfg(test)]
 fn line_span(body: &str, line_index: usize) -> Option<(usize, usize)> {
     let mut start = 0;
     for index in 0..=line_index {
