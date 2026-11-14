@@ -4,6 +4,14 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-14 — a drag ends with the button, and an invite is one path
+
+A selection grows only while the mouse button is down. Letting go, or the pointer leaving the window, ends it. A click still lands on the letter.
+
+The message box uses the same border as the other fields. Rename, remove, up, down, and search are icons. Search opens its field when the icon is pressed.
+
+An invite is one path. Either you paste their link and start, or you send your link and wait. The name is only on the path where you start, and only this computer keeps it.
+
 ## 2026-11-14 — a due day is the end of the line, and undo stays with the note
 
 A due day is a trailing `YYYY-MM-DD` on the checkbox line. It is not a new record. Open tasks with a date come first, soonest first. Hide done only hides them. Clear done removes those lines. The older copy stays in the log. Up and down swap a checkbox line with the next checkbox line in the same note.

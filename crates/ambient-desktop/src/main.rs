@@ -174,10 +174,23 @@ struct App {
     /// Index of the current find hit. `usize::MAX` means the next jump starts at the first.
     find_at: usize,
     command_down: bool,
+    /// True only while the button that started a selection is still down.
+    pointer_down: bool,
+    note_search: bool,
+    task_search: bool,
+    chat_search: bool,
+    invite_pick: Option<InvitePick>,
     /// Undo for notes that are not on screen. Still memory, still not the log.
     histories: BTreeMap<String, NoteHistory>,
     history_order: Vec<String>,
     history_key: String,
+}
+
+/// Which side of an invite this computer is on. One path, not both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InvitePick {
+    Theirs,
+    Mine,
 }
 
 #[derive(Clone, Debug)]
@@ -310,6 +323,10 @@ enum Message {
     FindNext,
     FindPrev,
     Mods(bool),
+    PickInvite(InvitePick),
+    ToggleNoteSearch,
+    ToggleTaskSearch,
+    ToggleChatSearch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -617,6 +634,11 @@ impl App {
             find_query: String::new(),
             find_at: usize::MAX,
             command_down: false,
+            pointer_down: false,
+            note_search: false,
+            task_search: false,
+            chat_search: false,
+            invite_pick: None,
             histories: BTreeMap::new(),
             history_order: Vec::new(),
             history_key: String::new(),
@@ -655,6 +677,14 @@ impl App {
             iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) => {
                 Some(Message::Mods(mods.control() || mods.command()))
             }
+            iced::Event::Mouse(
+                iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)
+                | iced::mouse::Event::CursorLeft,
+            )
+            | iced::Event::Window(iced::window::Event::Unfocused)
+            | iced::Event::Touch(
+                iced::touch::Event::FingerLifted { .. } | iced::touch::Event::FingerLost { .. },
+            ) => Some(Message::SelectStop),
             iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
                 if status == iced::event::Status::Ignored
                     && (modifiers.control() || modifiers.command())
@@ -720,6 +750,9 @@ impl App {
                 Task::none()
             }
             Message::BodyEdited(action) => {
+                if matches!(action, text_editor::Action::Drag(_)) && !self.pointer_down {
+                    return Task::none();
+                }
                 let pointer = matches!(
                     action,
                     text_editor::Action::Click(_) | text_editor::Action::Drag(_)
@@ -758,6 +791,7 @@ impl App {
                     text_editor::Action::SelectWord | text_editor::Action::SelectLine
                 ) && let Some((from, _)) = self.body.selection_bounds()
                 {
+                    self.pointer_down = true;
                     self.drag_from = Some(from);
                     return Task::none();
                 }
@@ -772,6 +806,10 @@ impl App {
                 self.note_follow(false)
             }
             Message::ExtendTo(byte) => {
+                if !self.pointer_down {
+                    self.drag_from = None;
+                    return Task::none();
+                }
                 let Some(anchor) = self.drag_from else {
                     return Task::none();
                 };
@@ -779,6 +817,7 @@ impl App {
                 Task::none()
             }
             Message::SelectStop => {
+                self.pointer_down = false;
                 if self.drag_from.take().is_some() {
                     self.body.end_select();
                 }
@@ -985,6 +1024,7 @@ impl App {
                     }
                     self.contact_link = link;
                 }
+                self.invite_pick = None;
                 self.sheet = Sheet::Invite;
                 Task::none()
             }
@@ -1230,6 +1270,13 @@ impl App {
                 self.command_down = down;
                 Task::none()
             }
+            Message::PickInvite(pick) => {
+                self.invite_pick = Some(pick);
+                Task::none()
+            }
+            Message::ToggleNoteSearch => self.toggle_note_search(),
+            Message::ToggleTaskSearch => self.toggle_task_search(),
+            Message::ToggleChatSearch => self.toggle_chat_search(),
             Message::WelcomeStored => {
                 if !self.recovery_phrase.is_empty() {
                     self.welcome = Some(WelcomeStep::Guide);
@@ -1492,18 +1539,64 @@ impl App {
             .into()
     }
 
+    fn toggle_note_search(&mut self) -> Task<Message> {
+        if self.note_search || !self.query.trim().is_empty() {
+            self.note_search = false;
+            self.query.clear();
+            self.refresh_shown();
+            Task::none()
+        } else {
+            self.note_search = true;
+            focus_named("note-search")
+        }
+    }
+
+    fn toggle_task_search(&mut self) -> Task<Message> {
+        if self.task_search || !self.task_query.trim().is_empty() {
+            self.task_search = false;
+            self.task_query.clear();
+            Task::none()
+        } else {
+            self.task_search = true;
+            focus_named("task-search")
+        }
+    }
+
+    fn toggle_chat_search(&mut self) -> Task<Message> {
+        if self.chat_search || !self.chat_query.trim().is_empty() {
+            self.chat_search = false;
+            self.chat_query.clear();
+            Task::none()
+        } else {
+            self.chat_search = true;
+            focus_named("chat-search")
+        }
+    }
+
     fn note_index(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        let mut block = column![
-            text_input("Search notes", &self.query)
-                .on_input(Message::QueryChanged)
-                .padding(10)
-                .size(14)
-                .style(field_style),
-        ]
+        let searching = self.note_search || !self.query.trim().is_empty();
+        let mut block = column![row![
+            space().width(Fill),
+            mini_button(
+                mini_handle(Mini::Search, self.is_dark()),
+                if searching { "Close search" } else { "Search" },
+                Message::ToggleNoteSearch,
+            ),
+        ]]
         .spacing(8)
         .width(Fill)
         .height(Fill);
+        if searching {
+            block = block.push(
+                text_input("Search notes", &self.query)
+                    .id(iced::widget::Id::new("note-search"))
+                    .on_input(Message::QueryChanged)
+                    .padding(10)
+                    .size(14)
+                    .style(field_style),
+            );
+        }
         if self.notes.is_empty() {
             let empty = if self.catalog.is_empty() {
                 "No notes yet."
@@ -1611,20 +1704,24 @@ impl App {
         .spacing(8)
         .align_y(iced::Alignment::Center)
         .width(Fill);
-        let search = text_input("Search tasks", &self.task_query)
-            .on_input(Message::TaskQuery)
-            .padding(10)
-            .width(Fill)
-            .style(field_style);
-        let mut tools = row![ghost_label(
-            if self.hide_done {
-                "Show done"
-            } else {
-                "Hide done"
-            },
-            Message::ToggleDone,
-        )]
-        .spacing(8);
+        let searching = self.task_search || !self.task_query.trim().is_empty();
+        let mut tools = row![
+            mini_button(
+                mini_handle(Mini::Search, self.is_dark()),
+                if searching { "Close search" } else { "Search" },
+                Message::ToggleTaskSearch,
+            ),
+            ghost_label(
+                if self.hide_done {
+                    "Show done"
+                } else {
+                    "Hide done"
+                },
+                Message::ToggleDone,
+            ),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
         if self.tasks.iter().any(|task| task.done) {
             tools = tools.push(ghost_label("Clear done", Message::AskClearDone));
         }
@@ -1667,17 +1764,20 @@ impl App {
                 list = list.push(self.task_row(task));
             }
         }
-        let mut page = column![
-            add,
-            search,
-            tools,
-            text("This goes in a note named Tasks. A box in any other note shows up here too. A date at the end, like 2026-11-20, is the due day.")
-                .size(13)
-                .color(ink.muted),
-        ]
-        .spacing(12)
-        .width(Fill)
-        .height(Fill);
+        let mut page = column![add].spacing(12).width(Fill).height(Fill);
+        if searching {
+            page = page.push(
+                text_input("Search tasks", &self.task_query)
+                    .id(iced::widget::Id::new("task-search"))
+                    .on_input(Message::TaskQuery)
+                    .padding(10)
+                    .width(Fill)
+                    .style(field_style),
+            );
+        }
+        page = page
+            .push(tools)
+            .push(text("This goes in a note named Tasks. A box in any other note shows up here too. A date at the end, like 2026-11-20, is the due day.").size(13).color(ink.muted));
         if self.confirm_clear {
             page = page.push(self.clear_confirm());
         }
@@ -1766,43 +1866,46 @@ impl App {
 
     fn task_actions(&self, task: &TaskRow, editing: bool) -> Element<'_, Message> {
         let line = task.line;
-        let mut actions = row![].spacing(8);
+        let dark = self.is_dark();
         if editing {
-            return actions
-                .push(ghost_label("Cancel", Message::CancelTaskEdit))
+            return row![ghost_label("Cancel", Message::CancelTaskEdit)]
+                .spacing(8)
                 .into();
         }
+        let mut actions = row![].spacing(4);
         if self.task_neighbor(task, true) {
-            let move_id = task.note_id.clone();
-            actions = actions.push(ghost_label_owned(
-                "Up".to_owned(),
+            actions = actions.push(mini_button(
+                mini_handle(Mini::Up, dark),
+                "Up",
                 Message::MoveTask {
-                    id: move_id,
+                    id: task.note_id.clone(),
                     line,
                     up: true,
                 },
             ));
         }
         if self.task_neighbor(task, false) {
-            let move_id = task.note_id.clone();
-            actions = actions.push(ghost_label_owned(
-                "Down".to_owned(),
+            actions = actions.push(mini_button(
+                mini_handle(Mini::Down, dark),
+                "Down",
                 Message::MoveTask {
-                    id: move_id,
+                    id: task.note_id.clone(),
                     line,
                     up: false,
                 },
             ));
         }
-        actions = actions.push(ghost_label_owned(
-            "Rename".to_owned(),
+        actions = actions.push(mini_button(
+            mini_handle(Mini::Pencil, dark),
+            "Rename",
             Message::BeginTaskEdit {
                 id: task.note_id.clone(),
                 line,
             },
         ));
-        actions = actions.push(ghost_label_owned(
-            "Remove".to_owned(),
+        actions = actions.push(mini_button(
+            mini_handle(Mini::Trash, dark),
+            "Remove",
             Message::RemoveTask {
                 id: task.note_id.clone(),
                 line,
@@ -2193,7 +2296,7 @@ impl App {
             vscroll(markdown::view(
                 &self.body,
                 self.is_dark(),
-                self.drag_from.is_some(),
+                self.pointer_down && self.drag_from.is_some(),
             ))
             .id(iced::widget::Id::new("note-scroll"))
             .height(Fill),
@@ -2354,7 +2457,7 @@ impl App {
             .padding(10)
             .on_action(Message::DraftEdited)
             .key_binding(composer_binding)
-            .style(editor_style);
+            .style(field_editor_style);
         let controls: Element<'_, Message> = if narrow {
             column![
                 field,
@@ -2424,33 +2527,114 @@ impl App {
         };
         let draft = self.aliases.get(id).cloned().unwrap_or_default();
         let id = id.clone();
-        column![
-            text_input("What do you call them?", &draft)
-                .on_input(move |text| Message::AliasDraft(id.clone(), text))
-                .padding(10)
-                .style(field_style),
+        let searching = self.chat_search || !self.chat_query.trim().is_empty();
+        let mut head = column![
+            row![
+                text_input("What do you call them?", &draft)
+                    .on_input(move |text| Message::AliasDraft(id.clone(), text))
+                    .padding(10)
+                    .width(Fill)
+                    .style(field_style),
+                mini_button(
+                    mini_handle(Mini::Search, self.is_dark()),
+                    if searching { "Close search" } else { "Search" },
+                    Message::ToggleChatSearch,
+                ),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
             text("Only this computer remembers it.")
                 .size(12)
                 .color(ink.muted),
-            text_input("Search this conversation", &self.chat_query)
-                .on_input(Message::ChatQuery)
-                .padding(10)
-                .style(field_style),
         ]
-        .spacing(4)
-        .into()
+        .spacing(4);
+        if searching {
+            head = head.push(
+                text_input("Search this conversation", &self.chat_query)
+                    .id(iced::widget::Id::new("chat-search"))
+                    .on_input(Message::ChatQuery)
+                    .padding(10)
+                    .style(field_style),
+            );
+        }
+        head.into()
     }
 
     fn invite_sheet(&self) -> Element<'_, Message> {
         let ink = self.ink();
         let mut sheet = column![
             Self::sheet_title("Invite"),
-            text("Share your link, or paste theirs. A link is for text. A QR is for someone nearby. Only one side starts the conversation.").size(14).color(ink.muted),
+            text("One of you starts. The other waits.")
+                .size(14)
+                .color(ink.muted),
+            row![
+                choice_button(
+                    "I have their link",
+                    self.invite_pick == Some(InvitePick::Theirs),
+                    Message::PickInvite(InvitePick::Theirs),
+                ),
+                choice_button(
+                    "Send them my link",
+                    self.invite_pick == Some(InvitePick::Mine),
+                    Message::PickInvite(InvitePick::Mine),
+                ),
+            ]
+            .spacing(8)
+            .width(Fill),
+        ]
+        .spacing(14);
+        sheet = match self.invite_pick {
+            Some(InvitePick::Theirs) => sheet.push(self.invite_theirs()),
+            Some(InvitePick::Mine) => sheet.push(self.invite_mine()),
+            None => sheet.push(
+                text("Pick one. You do not do both.")
+                    .size(13)
+                    .color(ink.muted),
+            ),
+        };
+        vscroll(sheet).height(Fill).into()
+    }
+
+    fn invite_theirs(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        column![
+            text("Paste the link they sent you. You start the conversation. They wait.")
+                .size(14)
+                .color(ink.muted),
+            text_input("Their link", &self.their_card)
+                .on_input(Message::TheirCardChanged)
+                .padding(10)
+                .style(field_style),
+            text("What do you call them? Leave it blank if you want. Only this computer remembers it.")
+                .size(13)
+                .color(ink.muted),
+            text_input("A name on this computer", &self.call_draft)
+                .on_input(Message::CallDraft)
+                .padding(10)
+                .style(field_style),
+            action_label("Start conversation", Message::StartConversation),
+        ]
+        .spacing(12)
+        .into()
+    }
+
+    fn invite_mine(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let mut body = column![
+            text("Copy this and send it. They paste it and start. You wait. Do not paste anything here.")
+                .size(14)
+                .color(ink.muted),
             text("Your link").size(12).color(ink.muted),
-            text(&self.contact_link).size(14),
+            container(text(&self.contact_link).size(14))
+                .padding(14)
+                .width(Fill)
+                .style(field_well),
             row![
                 ghost_label("Copy link", Message::CopyLink),
-                ghost_label(if self.show_qr { "Hide QR" } else { "Show QR" }, Message::ToggleQr),
+                ghost_label(
+                    if self.show_qr { "Hide QR" } else { "Show QR" },
+                    Message::ToggleQr,
+                ),
             ]
             .spacing(8),
         ]
@@ -2458,35 +2642,18 @@ impl App {
         if self.show_qr
             && let Some(bytes) = &self.qr_bytes
         {
-            sheet = sheet.push(
+            body = body.push(
                 iced_image::Image::new(iced_image::Handle::from_bytes(bytes.clone()))
                     .width(200)
                     .height(200),
             );
         }
-        sheet = sheet.push(
-            text_input("Their link or card", &self.their_card)
-                .on_input(Message::TheirCardChanged)
-                .padding(10)
-                .style(field_style),
-        );
-        sheet = sheet.push(text("What do you call them?").size(12).color(ink.muted));
-        sheet = sheet.push(
-            text("Only this computer remembers it. A contact card cannot carry a name yet. Their key still shows in Settings.")
+        body = body.push(
+            text("They show up in Chat once they start. Nothing else happens on this page.")
                 .size(13)
                 .color(ink.muted),
         );
-        sheet = sheet.push(
-            text_input("A name on this computer", &self.call_draft)
-                .on_input(Message::CallDraft)
-                .padding(10)
-                .style(field_style),
-        );
-        sheet = sheet.push(action_label(
-            "Start conversation",
-            Message::StartConversation,
-        ));
-        vscroll(sheet).height(Fill).into()
+        body.into()
     }
 
     fn devices_sheet(&self) -> Element<'_, Message> {
@@ -3540,6 +3707,7 @@ impl App {
     }
 
     fn arm_press(&mut self, byte: usize) {
+        self.pointer_down = true;
         let text = self.body.text();
         if let Some((when, previous)) = self.last_press
             && when.elapsed() < Duration::from_millis(400)
@@ -4451,6 +4619,11 @@ impl App {
         self.find_query.clear();
         self.find_at = usize::MAX;
         self.command_down = false;
+        self.pointer_down = false;
+        self.note_search = false;
+        self.task_search = false;
+        self.chat_search = false;
+        self.invite_pick = None;
         self.call_draft.clear();
         self.wipe_draft.clear();
         self.aliases.clear();
@@ -4611,7 +4784,7 @@ impl App {
                 ),
                 guide_line(
                     "Chat",
-                    "An invite is a link or a QR. The words can sync. A file stays on this computer.",
+                    "Either you paste their link and start, or you send yours and wait. The words can sync. A file stays on this computer.",
                 ),
                 action_label("Open the notebook", Message::WelcomeDone),
             ]
@@ -5121,6 +5294,21 @@ fn editor_style(theme: &Theme, _status: text_editor::Status) -> text_editor::Sty
             radius: 0.0.into(),
             width: 0.0,
             color: Color::TRANSPARENT,
+        },
+        placeholder: ink.muted,
+        value: ink.text,
+        selection: mix(ink.accent, ink.bg, 0.35),
+    }
+}
+
+fn field_editor_style(theme: &Theme, _status: text_editor::Status) -> text_editor::Style {
+    let ink = ink_of(theme);
+    text_editor::Style {
+        background: iced::Background::Color(ink.field),
+        border: iced::Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: ink.hairline,
         },
         placeholder: ink.muted,
         value: ink.text,
@@ -5695,6 +5883,125 @@ fn icon_button(handle: iced_image::Handle, message: Message) -> Element<'static,
         .on_press(message)
         .style(icon_style)
         .into()
+}
+
+fn focus_named(name: &'static str) -> Task<Message> {
+    iced::widget::operation::focus(iced::widget::Id::new(name))
+}
+
+#[derive(Clone, Copy)]
+enum Mini {
+    Search,
+    Pencil,
+    Trash,
+    Up,
+    Down,
+}
+
+fn mini_button(
+    handle: iced_image::Handle,
+    hint_text: &'static str,
+    message: Message,
+) -> Element<'static, Message> {
+    let face = button(iced_image::Image::new(handle).width(16).height(16))
+        .padding(6)
+        .on_press(message)
+        .style(icon_style);
+    hover_label(face, hint_text)
+}
+
+fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
+    use std::sync::OnceLock;
+    static HANDLES: OnceLock<[iced_image::Handle; 10]> = OnceLock::new();
+    let handles = HANDLES.get_or_init(|| {
+        let ink = [0xED, 0xEA, 0xDE];
+        let day = [0x1C, 0x19, 0x17];
+        [
+            iced_image::Handle::from_bytes(icon_png(ink, search_ink)),
+            iced_image::Handle::from_bytes(icon_png(day, search_ink)),
+            iced_image::Handle::from_bytes(icon_png(ink, pencil_ink)),
+            iced_image::Handle::from_bytes(icon_png(day, pencil_ink)),
+            iced_image::Handle::from_bytes(icon_png(ink, trash_ink)),
+            iced_image::Handle::from_bytes(icon_png(day, trash_ink)),
+            iced_image::Handle::from_bytes(icon_png(ink, up_ink)),
+            iced_image::Handle::from_bytes(icon_png(day, up_ink)),
+            iced_image::Handle::from_bytes(icon_png(ink, down_ink)),
+            iced_image::Handle::from_bytes(icon_png(day, down_ink)),
+        ]
+    });
+    let index = match kind {
+        Mini::Search => 0,
+        Mini::Pencil => 2,
+        Mini::Trash => 4,
+        Mini::Up => 6,
+        Mini::Down => 8,
+    } + usize::from(!dark);
+    handles
+        .get(index)
+        .cloned()
+        .unwrap_or_else(|| iced_image::Handle::from_bytes(Vec::new()))
+}
+
+fn icon_png(color: [u8; 3], ink: fn(f64, f64) -> bool) -> Vec<u8> {
+    let size = 64_u32;
+    let mut pixels = vec![0_u8; (size * size * 4) as usize];
+    for y in 0..size {
+        for x in 0..size {
+            let dx = f64::from(x) - 31.5;
+            let dy = f64::from(y) - 31.5;
+            if !ink(dx, dy) {
+                continue;
+            }
+            let index = ((y * size + x) * 4) as usize;
+            if let Some(pixel) = pixels.get_mut(index..index.saturating_add(4)) {
+                pixel.copy_from_slice(&[color[0], color[1], color[2], 255]);
+            }
+        }
+    }
+    encode_png(&pixels, size)
+}
+
+fn search_ink(dx: f64, dy: f64) -> bool {
+    let ox = dx + 6.0;
+    let oy = dy + 6.0;
+    let radius = ox.hypot(oy);
+    if (11.0..15.0).contains(&radius) {
+        return true;
+    }
+    dx > 4.0 && dy > 4.0 && dx < 20.0 && dy < 20.0 && (dx - dy).abs() < 2.8 && radius > 14.0
+}
+
+fn pencil_ink(dx: f64, dy: f64) -> bool {
+    let u = (dx + dy) * std::f64::consts::FRAC_1_SQRT_2;
+    let v = (dy - dx) * std::f64::consts::FRAC_1_SQRT_2;
+    if (-16.0..8.0).contains(&u) && v.abs() < 3.0 {
+        return true;
+    }
+    (8.0..16.0).contains(&u) && v.abs() < (16.0 - u) * 0.55
+}
+
+fn trash_ink(dx: f64, dy: f64) -> bool {
+    let x = dx.abs();
+    let handle = (-21.0..-16.5).contains(&dy) && x < 5.0 && (dy > -18.2 || x > 3.2);
+    let lid = (-16.5..-13.0).contains(&dy) && x < 16.0;
+    let side = (-12.0..15.0).contains(&dy) && (x - 11.0).abs() < 1.7;
+    let bottom = (13.0..16.5).contains(&dy) && x < 12.0;
+    handle || lid || side || bottom
+}
+
+fn up_ink(dx: f64, dy: f64) -> bool {
+    chevron_ink(true, dx, dy)
+}
+
+fn down_ink(dx: f64, dy: f64) -> bool {
+    chevron_ink(false, dx, dy)
+}
+
+fn chevron_ink(up: bool, dx: f64, dy: f64) -> bool {
+    let y = if up { dy + 2.0 } else { -dy + 2.0 };
+    let x = dx.abs();
+    let target = (y + 12.0) * (14.0 / 18.0);
+    (-12.0..8.0).contains(&y) && (x - target).abs() < 2.4 && x < 16.0
 }
 
 fn gear_handle(dark: bool) -> iced_image::Handle {
