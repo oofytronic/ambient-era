@@ -24,6 +24,9 @@ pub(super) struct NoteBody {
     live_at: Option<(usize, usize)>,
     /// Last line we scrolled to. Arrowing to a new line reveals it.
     shown_line: usize,
+    /// Parsed once per text change. A drag must not parse the page again.
+    cache: Vec<LineCache>,
+    cached: String,
 }
 
 const OPEN_CAP: usize = 8;
@@ -247,6 +250,8 @@ impl NoteBody {
             live: text_editor::Content::new(),
             live_at: None,
             shown_line: 0,
+            cache: Vec::new(),
+            cached: String::new(),
         };
         body.sync_live();
         body
@@ -259,6 +264,44 @@ impl NoteBody {
     /// Selected document text, if the caret is holding a range.
     pub(super) fn selection(&self) -> Option<String> {
         self.editor.selection()
+    }
+
+    /// Document bytes of the selection, if it covers more than a caret.
+    pub(super) fn selection_bounds(&self) -> Option<(usize, usize)> {
+        let cursor = self.editor.cursor();
+        let _ = cursor.selection?;
+        let text = self.editor.text();
+        let (from, to) = range_bytes(&text, &cursor);
+        (from != to).then_some((from, to))
+    }
+
+    pub(super) fn caret_byte(&self) -> usize {
+        pos_byte(&self.editor.text(), self.editor.cursor().position)
+    }
+
+    /// Selects the source between two bytes without rebuilding the page cache.
+    pub(super) fn select_between(&mut self, anchor: usize, focus: usize) {
+        let text = self.editor.text();
+        let len = text.len();
+        let anchor = anchor.min(len);
+        let focus = focus.min(len);
+        let position = byte_pos(&text, focus);
+        let anchor_pos = byte_pos(&text, anchor);
+        let selection = (anchor_pos != position).then_some(anchor_pos);
+        self.editor.move_to(text_editor::Cursor {
+            position,
+            selection,
+        });
+        self.shown_line = position.line;
+        if let Some((start, end)) = self.live_at {
+            let local = local_cursor(&text, &self.editor.cursor(), start, end);
+            self.live.move_to(local);
+        }
+    }
+
+    /// Opens the word at the caret after a drag ends. The selection stays.
+    pub(super) fn end_select(&mut self) {
+        self.sync_live();
     }
 
     /// Replaces the text. The same text keeps the cursor where it is.
@@ -355,9 +398,10 @@ impl NoteBody {
 
     fn sync_live(&mut self) {
         self.park_task_caret();
+        self.ensure_cache();
         let text = self.editor.text();
         let cursor = self.editor.cursor();
-        let (start, end) = window_bytes(&text, &cursor);
+        let (start, end) = window_bytes(&text, &cursor, &self.cache);
         let slice = text.get(start..end).unwrap_or("");
         let local = local_cursor(&text, &cursor, start, end);
         let same = self.live_at == Some((start, end)) && self.live.text() == slice;
@@ -366,6 +410,15 @@ impl NoteBody {
         }
         self.live.move_to(local);
         self.live_at = Some((start, end));
+    }
+
+    fn ensure_cache(&mut self) {
+        let text = self.editor.text();
+        if self.cached == text {
+            return;
+        }
+        self.cache = cache_lines(&text);
+        self.cached = text;
     }
 
     /// A task's marks are the checkbox, not text. Keep the caret in the words.
@@ -410,15 +463,20 @@ impl NoteBody {
     }
 }
 
-pub(super) fn view(body: &NoteBody, dark: bool) -> Element<'_, Message> {
+pub(super) fn view(body: &NoteBody, dark: bool, dragging: bool) -> Element<'_, Message> {
     let text = body.text();
     let (win_start, win_end) = body.live_at.unwrap_or((0, 0));
     let active = byte_pos(&text, win_start.min(text.len())).line;
-    let carries = line_carries(&text);
+    let selected = body.selection_bounds();
+    let paint = selection_color(dark);
     let placeholder = text.is_empty();
     let mut page = column![].spacing(2).width(Length::Fill);
     for (index, line) in split_lines(&text).into_iter().enumerate() {
-        let incoming = carries.get(index).copied().unwrap_or_default();
+        let incoming = body
+            .cache
+            .get(index)
+            .map(|row| row.carry)
+            .unwrap_or_default();
         let at_start = index == 0;
         let base = line_start(&text, index);
         if index == active {
@@ -437,13 +495,27 @@ pub(super) fn view(body: &NoteBody, dark: bool) -> Element<'_, Message> {
                 at_start,
                 dark,
                 placeholder && line.is_empty(),
+                selected,
+                paint,
+                dragging,
             ));
         } else {
-            page = page.push(settled_line(line, index, base, incoming, at_start, dark));
+            page = page.push(settled_line(
+                line,
+                index,
+                base,
+                incoming,
+                at_start,
+                dark,
+                selected,
+                paint,
+                dragging,
+                body.cache.get(index),
+            ));
         }
     }
     page = page.push(space().height(48));
-    page.into()
+    Release { child: page.into() }.into()
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -1955,6 +2027,7 @@ fn wrap(text: &str, cursor: &text_editor::Cursor, left: &str, right: &str) -> Ch
             to = word_to;
         }
     }
+    (from, to) = expand_pairs(text, from, to, left);
     let inner = text.get(from..to).unwrap_or("");
     if let Some(stripped) = peel(inner, left, right) {
         return rewrite(text, from, to, stripped, stripped.len(), None);
@@ -1964,16 +2037,90 @@ fn wrap(text: &str, cursor: &text_editor::Cursor, left: &str, right: &str) -> Ch
         let end = to.saturating_add(right.len());
         return rewrite(text, start, end, inner, inner.len(), None);
     }
-    let mut insert = String::with_capacity(left.len() + inner.len() + right.len());
+    let plain = strip_delim(inner, left);
+    let mut insert = String::with_capacity(left.len() + plain.len() + right.len());
     insert.push_str(left);
-    insert.push_str(inner);
+    insert.push_str(&plain);
     insert.push_str(right);
-    let cursor_at = if inner.is_empty() {
+    let cursor_at = if plain.is_empty() {
         left.len()
     } else {
         insert.len()
     };
     rewrite(text, from, to, &insert, cursor_at, None)
+}
+
+/// A mark pair that overlaps the range is part of the selection. Wrapping then
+/// sees the whole pair, instead of a closer stranded in the middle of the words.
+fn expand_pairs(text: &str, mut from: usize, mut to: usize, left: &str) -> (usize, usize) {
+    if from >= to || left.is_empty() {
+        return (from, to);
+    }
+    let carries = line_carries(text);
+    let start_line = byte_pos(text, from).line;
+    let end_line = byte_pos(text, to.saturating_sub(1)).line;
+    for line_no in start_line..=end_line {
+        let ls = line_start(text, line_no);
+        let le = line_end(text, line_no);
+        let line = text.get(ls..le).unwrap_or("");
+        let carry = carries.get(line_no).copied().unwrap_or_default();
+        let (pairs, _) = scan_pairs(line, carry);
+        for pair in pairs {
+            if !pair.local_open || pair.open_len != left.len() || pair.close_len != left.len() {
+                continue;
+            }
+            let abs_start = ls.saturating_add(pair.start);
+            let abs_end = ls.saturating_add(pair.end);
+            if abs_end <= from || abs_start >= to {
+                continue;
+            }
+            if text.get(abs_start..abs_start.saturating_add(left.len())) != Some(left) {
+                continue;
+            }
+            if abs_start < from {
+                from = abs_start;
+            }
+            if abs_end > to {
+                to = abs_end;
+            }
+        }
+    }
+    (from, to)
+}
+
+fn strip_delim(inner: &str, delim: &str) -> String {
+    if delim.is_empty() || !inner.contains(delim) {
+        return inner.to_owned();
+    }
+    let Some(mark) = delim.chars().next() else {
+        return inner.to_owned();
+    };
+    if !delim.chars().all(|char| char == mark) {
+        return inner.to_owned();
+    }
+    let mut out = String::with_capacity(inner.len());
+    let mut index = 0;
+    while index < inner.len() {
+        if inner[index..].starts_with(delim) {
+            let end = index.saturating_add(delim.len());
+            let longer_before = index > 0
+                && inner
+                    .get(..index)
+                    .and_then(|prefix| prefix.chars().next_back())
+                    == Some(mark);
+            let longer_after = inner.get(end..).is_some_and(|rest| rest.starts_with(mark));
+            if !longer_before && !longer_after {
+                index = end;
+                continue;
+            }
+        }
+        let Some(char) = inner.get(index..).and_then(|rest| rest.chars().next()) else {
+            break;
+        };
+        out.push(char);
+        index = index.saturating_add(char.len_utf8());
+    }
+    out
 }
 
 fn link_insert(text: &str, cursor: &text_editor::Cursor) -> Change {
@@ -2282,7 +2429,7 @@ fn floor_boundary(line: &str, column: usize) -> usize {
     column
 }
 
-fn word_bounds(text: &str, at: usize) -> (usize, usize) {
+pub(super) fn word_bounds(text: &str, at: usize) -> (usize, usize) {
     let at = at.min(text.len());
     let mut start = at;
     while start > 0 {
@@ -2308,6 +2455,15 @@ fn word_bounds(text: &str, at: usize) -> (usize, usize) {
         end = end.saturating_add(char.len_utf8());
     }
     (start, end)
+}
+
+pub(super) fn same_word(text: &str, left: usize, right: usize) -> bool {
+    let (start, end) = word_bounds(text, left);
+    if start == end {
+        return false;
+    }
+    let (other_start, other_end) = word_bounds(text, right);
+    start == other_start && end == other_end
 }
 
 fn is_word(char: char) -> bool {
@@ -2384,6 +2540,16 @@ fn heading_px(level: u8) -> f32 {
 }
 
 fn line_carries(text: &str) -> Vec<Carry> {
+    cache_lines(text).into_iter().map(|row| row.carry).collect()
+}
+
+struct LineCache {
+    carry: Carry,
+    spans: Vec<(Range<usize>, Mark)>,
+    unclosed: Vec<usize>,
+}
+
+fn cache_lines(text: &str) -> Vec<LineCache> {
     let mut incoming = Carry {
         blank: true,
         ..Carry::default()
@@ -2399,44 +2565,38 @@ fn line_carries(text: &str) -> Vec<Carry> {
         } else {
             incoming
         };
-        rows.push(stored);
-        let (_, next) = paint_in(line, stored, first);
+        let (spans, next) = paint_in(line, stored, first);
+        let (_, unclosed) = scan_pairs(line, stored);
+        rows.push(LineCache {
+            carry: stored,
+            spans,
+            unclosed,
+        });
         incoming = next;
         first = false;
     }
     if rows.is_empty() {
-        rows.push(Carry {
-            blank: true,
-            ..Carry::default()
+        rows.push(LineCache {
+            carry: Carry {
+                blank: true,
+                ..Carry::default()
+            },
+            spans: Vec::new(),
+            unclosed: Vec::new(),
         });
     }
     rows
 }
 
-fn window_bytes(text: &str, cursor: &text_editor::Cursor) -> (usize, usize) {
+fn window_bytes(text: &str, cursor: &text_editor::Cursor, cache: &[LineCache]) -> (usize, usize) {
     let caret = pos_byte(text, cursor.position);
     let line_no = byte_pos(text, caret).line;
     let ls = line_start(text, line_no);
     let le = line_end(text, line_no);
-    let (sel_from, sel_to) = if cursor.selection.is_some() {
-        range_bytes(text, cursor)
-    } else {
-        (caret, caret)
-    };
-    if sel_from < ls || sel_to > le {
-        return (ls, le);
-    }
     let line = text.get(ls..le).unwrap_or("");
-    let incoming = line_carries(text).get(line_no).copied().unwrap_or_default();
+    let incoming = cache.get(line_no).map(|row| row.carry).unwrap_or_default();
     let at = floor_boundary(line, caret.saturating_sub(ls).min(line.len()));
-    let mut win = edit_window(line, at, incoming);
-    if sel_from != sel_to {
-        let a = floor_boundary(line, sel_from.saturating_sub(ls).min(line.len()));
-        let b = floor_boundary(line, sel_to.saturating_sub(ls).min(line.len()));
-        let start = win.start.min(a);
-        let end = win.end.max(b).min(line.len());
-        win = start..end.max(start);
-    }
+    let win = edit_window(line, at, incoming);
     let start = floor_boundary(line, win.start.min(line.len()));
     let end = floor_boundary(line, win.end.max(start).min(line.len()));
     let info = lead(line);
@@ -2778,11 +2938,13 @@ fn look_at(line: &str, at: usize, carry: Carry, at_start: bool, dark: bool) -> L
 #[derive(Clone)]
 struct Piece {
     text: String,
-    /// Document byte where this drawn text starts, when `literal`.
+    /// Document byte where a click on this drawn text lands, when `literal`.
     origin: usize,
     /// The drawn letters are the source bytes. A bullet is not.
     literal: bool,
     look: Look,
+    /// Document bytes this drawn text stands for. Selection uses this.
+    covers: Range<usize>,
 }
 
 fn pieces_between(
@@ -2793,9 +2955,20 @@ fn pieces_between(
     at_start: bool,
     dark: bool,
 ) -> Vec<Piece> {
-    let lead = lead(line);
     let (spans, _) = paint_in(line, carry, at_start);
     let (_, unclosed) = scan_pairs(line, carry);
+    pieces_ready(line, base, show, &spans, &unclosed, dark)
+}
+
+fn pieces_ready(
+    line: &str,
+    base: usize,
+    show: Range<usize>,
+    spans: &[(Range<usize>, Mark)],
+    unclosed: &[usize],
+    dark: bool,
+) -> Vec<Piece> {
+    let lead = lead(line);
     let mut out = Vec::new();
     if show.start == 0
         && lead.skip > 0
@@ -2810,12 +2983,15 @@ fn pieces_between(
             origin: base.saturating_add(lead.skip),
             literal: false,
             look: look_of(text_mark(), dark),
+            covers: base..base.saturating_add(lead.skip),
         });
     }
     let plain = look_of(lead.base, dark);
     let limit = show.end.min(line.len());
     let mut cursor = show.start.min(limit);
-    for (range, mark) in spans {
+    for pair in spans {
+        let range = pair.0.clone();
+        let mark = pair.1;
         if range.end <= cursor || range.start >= limit {
             continue;
         }
@@ -2836,7 +3012,7 @@ fn pieces_between(
         if cursor >= draw_to {
             continue;
         }
-        if mark.face == Face::Marker && hide_marker(line, cursor..draw_to, &unclosed) {
+        if mark.face == Face::Marker && hide_marker(line, cursor..draw_to, unclosed) {
             cursor = draw_to;
             continue;
         }
@@ -2898,11 +3074,13 @@ fn push_words(out: &mut Vec<Piece>, text: &str, source_at: usize, base: usize, l
         let Some(slice) = text.get(index..end) else {
             break;
         };
+        let origin = base.saturating_add(source_at).saturating_add(index);
         out.push(Piece {
             text: slice.to_owned(),
-            origin: base.saturating_add(source_at).saturating_add(index),
+            origin,
             literal: true,
             look,
+            covers: origin..origin.saturating_add(slice.len()),
         });
         index = end;
     }
@@ -2958,7 +3136,76 @@ fn paint_spans(pieces: &[Piece]) -> (Vec<iced::advanced::text::Span<'static, (),
     (spans, size)
 }
 
-fn rich_of<'a>(pieces: &[Piece], fill: bool) -> Element<'a, Message> {
+fn shade(pieces: Vec<Piece>, selected: Option<(usize, usize)>, paint: Color) -> Vec<Piece> {
+    let Some((from, to)) = selected else {
+        return pieces;
+    };
+    if from >= to {
+        return pieces;
+    }
+    let mut out = Vec::new();
+    for piece in pieces {
+        let start = piece.covers.start;
+        let end = piece.covers.end;
+        if end <= from || start >= to || start >= end {
+            out.push(piece);
+            continue;
+        }
+        if !piece.literal {
+            let mut piece = piece;
+            piece.look.background = Some(paint);
+            out.push(piece);
+            continue;
+        }
+        let local_from = from.max(start).saturating_sub(start);
+        let local_to = to.min(end).saturating_sub(start);
+        let text = piece.text;
+        let origin = piece.origin;
+        let look = piece.look;
+        if local_from > 0
+            && let Some(head) = text.get(..local_from)
+            && !head.is_empty()
+        {
+            out.push(Piece {
+                covers: origin..origin.saturating_add(head.len()),
+                origin,
+                text: head.to_owned(),
+                literal: true,
+                look,
+            });
+        }
+        if let Some(mid) = text.get(local_from..local_to)
+            && !mid.is_empty()
+        {
+            let mut marked = look;
+            marked.background = Some(paint);
+            let at = origin.saturating_add(local_from);
+            out.push(Piece {
+                covers: at..at.saturating_add(mid.len()),
+                origin: at,
+                text: mid.to_owned(),
+                literal: true,
+                look: marked,
+            });
+        }
+        if local_to < text.len()
+            && let Some(tail) = text.get(local_to..)
+            && !tail.is_empty()
+        {
+            let at = origin.saturating_add(local_to);
+            out.push(Piece {
+                covers: at..at.saturating_add(tail.len()),
+                origin: at,
+                text: tail.to_owned(),
+                literal: true,
+                look,
+            });
+        }
+    }
+    out
+}
+
+fn rich_of<'a>(pieces: &[Piece], fill: bool, listen: bool, dragging: bool) -> Element<'a, Message> {
     if pieces.is_empty() {
         return text("").size(BODY).into();
     }
@@ -2975,6 +3222,8 @@ fn rich_of<'a>(pieces: &[Piece], fill: bool) -> Element<'a, Message> {
     PageText {
         pieces: pieces.to_vec(),
         fill,
+        listen,
+        dragging,
         child: rich.into(),
     }
     .into()
@@ -2984,6 +3233,8 @@ fn rich_of<'a>(pieces: &[Piece], fill: bool) -> Element<'a, Message> {
 struct PageText<'a> {
     pieces: Vec<Piece>,
     fill: bool,
+    listen: bool,
+    dragging: bool,
     child: Element<'a, Message>,
 }
 
@@ -3023,14 +3274,37 @@ impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for PageText
         shell: &mut iced::advanced::Shell<'_, Message>,
         viewport: &iced::Rectangle,
     ) {
-        if let iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) =
-            event
-            && let Some(point) = cursor.position_in(layout.bounds())
-        {
-            let byte = hit_byte(&self.pieces, self.fill, layout.bounds().size(), point);
-            shell.publish(Message::Place(byte));
-            shell.capture_event();
+        if !self.listen {
             return;
+        }
+        let over = cursor.position_in(layout.bounds());
+        match event {
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left))
+                if over.is_some() =>
+            {
+                let byte = hit_byte(
+                    &self.pieces,
+                    self.fill,
+                    layout.bounds().size(),
+                    over.unwrap_or_default(),
+                );
+                shell.publish(Message::SelectFrom(byte));
+                shell.capture_event();
+                return;
+            }
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. })
+                if self.dragging && over.is_some() =>
+            {
+                let byte = hit_byte(
+                    &self.pieces,
+                    self.fill,
+                    layout.bounds().size(),
+                    over.unwrap_or_default(),
+                );
+                shell.publish(Message::ExtendTo(byte));
+                return;
+            }
+            _ => {}
         }
         let Some(child) = tree.children.first_mut() else {
             return;
@@ -3131,7 +3405,11 @@ fn hit_byte(pieces: &[Piece], fill: bool, bounds: Size, point: iced::Point) -> u
     place_of(pieces, shown)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::fn_params_excessive_bools
+)]
 fn active_line<'a>(
     body: &'a NoteBody,
     line: &str,
@@ -3142,9 +3420,29 @@ fn active_line<'a>(
     at_start: bool,
     dark: bool,
     placeholder: bool,
+    selected: Option<(usize, usize)>,
+    paint: Color,
+    dragging: bool,
 ) -> Element<'a, Message> {
-    let prefix = pieces_between(line, base, 0..win.start, carry, at_start, dark);
-    let suffix = pieces_between(line, base, win.end..line.len(), carry, at_start, dark);
+    let cached = body.cache.get(index);
+    let prefix = shade(
+        line_pieces(cached, line, base, 0..win.start, carry, at_start, dark),
+        selected,
+        paint,
+    );
+    let suffix = shade(
+        line_pieces(
+            cached,
+            line,
+            base,
+            win.end..line.len(),
+            carry,
+            at_start,
+            dark,
+        ),
+        selected,
+        paint,
+    );
     let sample = line.get(win.start..win.end).unwrap_or("").to_owned();
     let probe = if win.start < win.end {
         win.end.saturating_sub(1)
@@ -3181,31 +3479,42 @@ fn active_line<'a>(
         editor.into()
     } else {
         Fitted {
-            sample,
+            sample: sample.clone(),
             font: look.font,
             size: look.size,
             child: editor.into(),
         }
         .into()
     };
-    let end = base.saturating_add(line.len());
-    let gap = mouse_area(space().width(Length::Fill).height(look.size * LEADING))
-        .on_press(Message::Place(end));
+    let gap = space().width(Length::Fill).height(look.size * LEADING);
     let inner = row![
-        rich_of(&prefix, false),
+        rich_of(&prefix, false, false, false),
         edited,
-        rich_of(&suffix, false),
+        rich_of(&suffix, false, false, false),
         gap
     ]
     .spacing(0)
     .align_y(iced::alignment::Vertical::Top)
     .width(Length::Fill);
+    let hit = ActiveHit {
+        prefix,
+        suffix,
+        base,
+        window: win.clone(),
+        line_len: line.len(),
+        sample,
+        font: look.font,
+        size: look.size,
+        dragging,
+        child: inner.into(),
+    }
+    .into();
     let lead = lead(line);
     let quoted = quote_end(line).is_some() && win.start >= lead.skip;
     let body_row = if quoted {
-        quote_row(inner.into(), look.size, dark)
+        quote_row(hit, look.size, dark)
     } else {
-        inner.into()
+        hit
     };
     let show_box = lead.box_at.is_some();
     if show_box {
@@ -3223,6 +3532,7 @@ fn active_line<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn settled_line(
     line: &str,
     index: usize,
@@ -3230,14 +3540,20 @@ fn settled_line(
     carry: Carry,
     at_start: bool,
     dark: bool,
+    selected: Option<(usize, usize)>,
+    paint: Color,
+    dragging: bool,
+    cached: Option<&LineCache>,
 ) -> Element<'static, Message> {
     if line.is_empty() {
-        return mouse_area(space().width(Length::Fill).height(line_px(line)))
-            .on_press(Message::Place(base))
-            .into();
+        return press_at(
+            space().width(Length::Fill).height(line_px(line)).into(),
+            base,
+            dragging,
+        );
     }
     if is_rule(line) {
-        return mouse_area(
+        return press_at(
             container(rule::horizontal(1))
                 .width(Length::Fill)
                 .padding(Padding {
@@ -3245,16 +3561,21 @@ fn settled_line(
                     right: 0.0,
                     bottom: 10.0,
                     left: 0.0,
-                }),
-        )
-        .on_press(Message::Place(base.saturating_add(line.len())))
-        .into();
+                })
+                .into(),
+            base.saturating_add(line.len()),
+            dragging,
+        );
     }
-    let shown = pieces_between(line, base, 0..line.len(), carry, at_start, dark);
+    let shown = shade(
+        line_pieces(cached, line, base, 0..line.len(), carry, at_start, dark),
+        selected,
+        paint,
+    );
     let size = shown
         .iter()
         .fold(BODY, |size, piece| size.max(piece.look.size));
-    let text = rich_of(&shown, true);
+    let text = rich_of(&shown, true, true, dragging);
     let lead = lead(line);
     let quoted = quote_end(line).is_some();
     let body = if quoted {
@@ -3276,6 +3597,44 @@ fn settled_line(
     }
 }
 
+fn line_pieces(
+    cached: Option<&LineCache>,
+    line: &str,
+    base: usize,
+    show: Range<usize>,
+    carry: Carry,
+    at_start: bool,
+    dark: bool,
+) -> Vec<Piece> {
+    match cached {
+        Some(row) => pieces_ready(line, base, show, &row.spans, &row.unclosed, dark),
+        None => pieces_between(line, base, show, carry, at_start, dark),
+    }
+}
+
+fn press_at(content: Element<'_, Message>, byte: usize, dragging: bool) -> Element<'_, Message> {
+    let mut area = mouse_area(content).on_press(Message::SelectFrom(byte));
+    if dragging {
+        area = area.on_move(move |_| Message::ExtendTo(byte));
+    }
+    area.into()
+}
+
+fn selection_color(dark: bool) -> Color {
+    let accent = accent(dark);
+    let bg = if dark {
+        Color::from_rgb8(0x1C, 0x19, 0x17)
+    } else {
+        Color::from_rgb8(0xED, 0xEA, 0xDE)
+    };
+    Color {
+        r: accent.r + (bg.r - accent.r) * 0.35,
+        g: accent.g + (bg.g - accent.g) * 0.35,
+        b: accent.b + (bg.b - accent.b) * 0.35,
+        a: 1.0,
+    }
+}
+
 fn quote_row(inner: Element<'_, Message>, size: f32, dark: bool) -> Element<'_, Message> {
     let paint = accent(dark);
     row![
@@ -3289,6 +3648,299 @@ fn quote_row(inner: Element<'_, Message>, size: f32, dark: bool) -> Element<'_, 
     .align_y(iced::alignment::Vertical::Center)
     .width(Length::Fill)
     .into()
+}
+
+struct ActiveHit<'a> {
+    prefix: Vec<Piece>,
+    suffix: Vec<Piece>,
+    base: usize,
+    window: Range<usize>,
+    line_len: usize,
+    sample: String,
+    font: Font,
+    size: f32,
+    dragging: bool,
+    child: Element<'a, Message>,
+}
+
+impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for ActiveHit<'_> {
+    fn size(&self) -> Size<Length> {
+        self.child.as_widget().size()
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        vec![iced::advanced::widget::Tree::new(&self.child)]
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        tree.diff_children(&[self.child.as_widget()]);
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        let Some(child) = tree.children.first_mut() else {
+            return iced::advanced::layout::Node::new(Size::ZERO);
+        };
+        self.child.as_widget_mut().layout(child, renderer, limits)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+        viewport: &iced::Rectangle,
+    ) {
+        if let Some(child) = tree.children.first_mut() {
+            self.child.as_widget_mut().update(
+                child, event, layout, cursor, renderer, clipboard, shell, viewport,
+            );
+        }
+        let Some(absolute) = cursor.position() else {
+            return;
+        };
+        if !layout.bounds().contains(absolute) {
+            return;
+        }
+        let Some(byte) = self.byte_at(layout, absolute) else {
+            return;
+        };
+        match event {
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
+                if region_at(layout, absolute) != Some(1) {
+                    shell.publish(Message::SelectFrom(byte));
+                }
+            }
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) if self.dragging => {
+                shell.publish(Message::ExtendTo(byte));
+            }
+            _ => {}
+        }
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        let Some(child) = tree.children.first() else {
+            return;
+        };
+        self.child
+            .as_widget()
+            .draw(child, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+        renderer: &iced::Renderer,
+    ) -> iced::advanced::mouse::Interaction {
+        let Some(child) = tree.children.first() else {
+            return iced::advanced::mouse::Interaction::None;
+        };
+        self.child
+            .as_widget()
+            .mouse_interaction(child, layout, cursor, viewport, renderer)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        self.child
+            .as_widget_mut()
+            .operate(child, layout, renderer, operation);
+    }
+}
+
+impl ActiveHit<'_> {
+    fn byte_at(&self, layout: iced::advanced::Layout<'_>, absolute: iced::Point) -> Option<usize> {
+        let index = region_at(layout, absolute)?;
+        let child = layout.children().nth(index)?;
+        let bounds = child.bounds();
+        let point = iced::Point::new(absolute.x - bounds.x, absolute.y - bounds.y);
+        Some(match index {
+            0 => hit_byte(&self.prefix, false, bounds.size(), point),
+            1 => {
+                let local = hit_sample(&self.sample, self.font, self.size, bounds.size(), point);
+                self.base
+                    .saturating_add(self.window.start)
+                    .saturating_add(local)
+            }
+            2 => hit_byte(&self.suffix, false, bounds.size(), point),
+            _ => self.base.saturating_add(self.line_len),
+        })
+    }
+}
+
+impl<'a> From<ActiveHit<'a>> for Element<'a, Message> {
+    fn from(hit: ActiveHit<'a>) -> Self {
+        Element::new(hit)
+    }
+}
+
+/// One place hears the mouse button lift, so a drag ends even on another line.
+struct Release<'a> {
+    child: Element<'a, Message>,
+}
+
+impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for Release<'_> {
+    fn size(&self) -> Size<Length> {
+        self.child.as_widget().size()
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        vec![iced::advanced::widget::Tree::new(&self.child)]
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        tree.diff_children(&[self.child.as_widget()]);
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        let Some(child) = tree.children.first_mut() else {
+            return iced::advanced::layout::Node::new(Size::ZERO);
+        };
+        self.child.as_widget_mut().layout(child, renderer, limits)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+        viewport: &iced::Rectangle,
+    ) {
+        if let iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) =
+            event
+        {
+            shell.publish(Message::SelectStop);
+        }
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        self.child.as_widget_mut().update(
+            child, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        let Some(child) = tree.children.first() else {
+            return;
+        };
+        self.child
+            .as_widget()
+            .draw(child, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+        renderer: &iced::Renderer,
+    ) -> iced::advanced::mouse::Interaction {
+        let Some(child) = tree.children.first() else {
+            return iced::advanced::mouse::Interaction::None;
+        };
+        self.child
+            .as_widget()
+            .mouse_interaction(child, layout, cursor, viewport, renderer)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        self.child
+            .as_widget_mut()
+            .operate(child, layout, renderer, operation);
+    }
+}
+
+impl<'a> From<Release<'a>> for Element<'a, Message> {
+    fn from(release: Release<'a>) -> Self {
+        Element::new(release)
+    }
+}
+
+fn region_at(layout: iced::advanced::Layout<'_>, absolute: iced::Point) -> Option<usize> {
+    layout
+        .children()
+        .enumerate()
+        .find(|(_, child)| child.bounds().contains(absolute))
+        .map(|(index, _)| index)
+}
+
+fn hit_sample(sample: &str, font: Font, size: f32, bounds: Size, point: iced::Point) -> usize {
+    if sample.is_empty() {
+        return 0;
+    }
+    let paragraph = <iced::Renderer as iced::advanced::text::Renderer>::Paragraph::with_text(
+        iced::advanced::text::Text {
+            content: sample,
+            bounds: Size::new(bounds.width.max(1.0), bounds.height.max(1.0)),
+            size: size.into(),
+            line_height: iced::advanced::text::LineHeight::Relative(LEADING),
+            font,
+            align_x: iced::advanced::text::Alignment::Left,
+            align_y: iced::alignment::Vertical::Top,
+            shaping: iced::advanced::text::Shaping::Advanced,
+            wrapping: iced::advanced::text::Wrapping::None,
+        },
+    );
+    paragraph
+        .hit_test(point)
+        .map_or(sample.len(), iced::advanced::text::Hit::cursor)
+        .min(sample.len())
 }
 
 struct Fitted<'a> {
@@ -4132,6 +4784,7 @@ mod tests {
             origin: 10,
             literal: true,
             look: super::look_of(super::text_mark(), true),
+            covers: 10..15,
         };
         assert_eq!(super::place_of(std::slice::from_ref(&piece), 0), 10);
         assert_eq!(super::place_of(std::slice::from_ref(&piece), 2), 12);
@@ -4153,5 +4806,82 @@ mod tests {
         assert!(super::heading_px(1) > super::heading_px(2));
         assert!(super::heading_px(5) > super::heading_px(6));
         assert!(super::heading_px(1) < 36.0);
+    }
+
+    #[test]
+    fn a_drag_selects_words_for_delete_and_bold() {
+        let mut body = super::NoteBody::new();
+        body.load("one two three");
+        body.select_between(4, 13);
+        assert_eq!(body.selection().as_deref(), Some("two three"));
+        assert!(body.edit(&super::text_editor::Action::Edit(
+            super::text_editor::Edit::Backspace
+        )));
+        assert_eq!(body.text(), "one ");
+
+        body.load("one two three");
+        body.select_between(4, 7);
+        body.end_select();
+        assert!(body.edit(&super::text_editor::Action::Edit(
+            super::text_editor::Edit::Insert('X')
+        )));
+        assert_eq!(body.text(), "one X three");
+
+        body.load("say **hello** there");
+        body.select_between(6, 19);
+        let change = super::format_change(&body.text(), body.cursor(), super::FormatKind::Bold);
+        let (out, _) = apply_change("say **hello** there", &change);
+        assert_eq!(out, "say **hello there**");
+
+        let toggled = applied("say **hello** there", caret(0, 8), super::FormatKind::Bold);
+        assert_eq!(toggled, "say hello there");
+    }
+
+    #[test]
+    fn a_selection_keeps_the_word_window() {
+        let mut body = super::NoteBody::new();
+        let text = "hello **bold** there";
+        body.load(text);
+        body.select_between(0, text.len());
+        body.end_select();
+        let (start, end) = body.live_at.expect("window");
+        assert!(
+            end.saturating_sub(start) < text.len(),
+            "selection opened the whole line {start}..{end}"
+        );
+    }
+
+    #[test]
+    fn a_long_page_moves_quickly() {
+        let mut note = String::new();
+        for index in 0..250 {
+            let _ = std::fmt::Write::write_fmt(
+                &mut note,
+                format_args!(
+                    "Line {index} keeps **a word** and ==mark== in view.\n- [ ] task {index} stays boxed\n"
+                ),
+            );
+        }
+        let started = std::time::Instant::now();
+        let mut body = super::NoteBody::new();
+        body.load(&note);
+        let loaded = started.elapsed();
+        let step = (note.len() / 40).max(1);
+        let mut at = 0;
+        while at < note.len() {
+            body.place_byte(at);
+            at = at.saturating_add(step);
+        }
+        body.select_between(10, note.len() / 2);
+        assert!(body.edit(&super::text_editor::Action::Edit(
+            super::text_editor::Edit::Delete
+        )));
+        let elapsed = started.elapsed();
+        assert!(loaded.as_millis() < 800, "parsing the page took {loaded:?}");
+        assert!(
+            elapsed.as_millis() < 1500,
+            "moving through the page took {elapsed:?}"
+        );
+        assert!(body.text().len() < note.len());
     }
 }

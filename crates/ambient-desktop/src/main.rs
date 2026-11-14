@@ -145,6 +145,10 @@ struct App {
     send_choice: Option<String>,
     boot_at: Instant,
     breeze_frame: u32,
+    /// Byte where the current drag started. Empty when the mouse is up.
+    drag_from: Option<usize>,
+    /// Previous press, so a second click on the same word selects it.
+    last_press: Option<(Instant, usize)>,
 }
 
 #[derive(Clone, Debug)]
@@ -155,7 +159,12 @@ enum Message {
     NewNote,
     TitleChanged(String),
     BodyEdited(text_editor::Action),
-    Place(usize),
+    /// Press on a letter. Starts a drag and puts the caret there.
+    SelectFrom(usize),
+    /// Drag across letters. The range is the source under the pointer.
+    ExtendTo(usize),
+    /// The mouse button lifted.
+    SelectStop,
     SetOpenTask {
         line: usize,
         done: bool,
@@ -335,6 +344,8 @@ impl App {
             send_choice: None,
             boot_at: Instant::now(),
             breeze_frame: 0,
+            drag_from: None,
+            last_press: None,
         };
         let saved = profile::load_profile(&app.dir);
         app.appearance = saved.appearance;
@@ -417,6 +428,10 @@ impl App {
                 Task::none()
             }
             Message::BodyEdited(action) => {
+                let pointer = matches!(
+                    action,
+                    text_editor::Action::Click(_) | text_editor::Action::Drag(_)
+                );
                 let structured = match &action {
                     text_editor::Action::Edit(text_editor::Edit::Enter) => {
                         markdown::continue_enter(&self.body.text(), self.body.cursor())
@@ -427,17 +442,47 @@ impl App {
                     _ => None,
                 };
                 if let Some(change) = structured {
+                    self.drag_from = None;
                     self.apply_change(change);
                     return self.note_follow(true);
                 }
                 if self.body.edit(&action) {
                     self.edited_at = Some(Instant::now());
                 }
+                if let text_editor::Action::Click(_) = action {
+                    let byte = self.body.caret_byte();
+                    self.arm_press(byte);
+                    return Task::none();
+                }
+                if pointer {
+                    return Task::none();
+                }
+                if matches!(
+                    action,
+                    text_editor::Action::SelectWord | text_editor::Action::SelectLine
+                ) && let Some((from, _)) = self.body.selection_bounds()
+                {
+                    self.drag_from = Some(from);
+                    return Task::none();
+                }
                 self.note_follow(true)
             }
-            Message::Place(byte) => {
-                self.body.place_byte(byte);
+            Message::SelectFrom(byte) => {
+                self.arm_press(byte);
                 self.note_follow(false)
+            }
+            Message::ExtendTo(byte) => {
+                let Some(anchor) = self.drag_from else {
+                    return Task::none();
+                };
+                self.body.select_between(anchor, byte);
+                Task::none()
+            }
+            Message::SelectStop => {
+                if self.drag_from.take().is_some() {
+                    self.body.end_select();
+                }
+                Task::none()
             }
             Message::SetOpenTask { line, done } => {
                 if let Some(id) = self.selected.clone() {
@@ -1386,9 +1431,13 @@ impl App {
             body = body.push(Self::format_bar());
         }
         body = body.push(
-            vscroll(markdown::view(&self.body, self.is_dark()))
-                .id(iced::widget::Id::new("note-scroll"))
-                .height(Fill),
+            vscroll(markdown::view(
+                &self.body,
+                self.is_dark(),
+                self.drag_from.is_some(),
+            ))
+            .id(iced::widget::Id::new("note-scroll"))
+            .height(Fill),
         );
         body = body.push(self.note_media());
         if self.send_open {
@@ -2413,6 +2462,23 @@ impl App {
             )));
         self.body.place(change.after);
         self.edited_at = Some(Instant::now());
+    }
+
+    fn arm_press(&mut self, byte: usize) {
+        let text = self.body.text();
+        if let Some((when, previous)) = self.last_press
+            && when.elapsed() < Duration::from_millis(400)
+            && markdown::same_word(&text, previous, byte)
+        {
+            let (from, to) = markdown::word_bounds(&text, byte);
+            self.body.select_between(from, to);
+            self.drag_from = Some(from);
+            self.last_press = None;
+            return;
+        }
+        self.last_press = Some((Instant::now(), byte));
+        self.drag_from = Some(byte);
+        self.body.place_byte(byte);
     }
 
     fn note_follow(&mut self, scroll: bool) -> Task<Message> {

@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-13 — a drag selects the letters
+
+A drag across the page selects those letters, including words that have already settled. Delete, backspace, and a mark such as bold use that range. Bold on words that already contain a mark wraps the words, instead of leaving a stray mark in the middle. The caret word stays the only editor. A selection does not open the marks on the rest of the line. This supersedes the line that said a click only puts the caret on the letter.
+
 ## 2026-11-12 — the agent note is kept in full
 
 The owner's note is [docs/agent-layer.md](docs/agent-layer.md), as written. [docs/agents.md](docs/agents.md) is how that note is read against the app. The decision is unchanged: an agent is a short-lived grant, not a teammate, and it is not v0.1. This supersedes the line that said the shape lived only in docs/agents.md.
