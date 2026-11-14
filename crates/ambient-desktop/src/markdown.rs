@@ -343,6 +343,12 @@ impl NoteBody {
         self.sync_live();
     }
 
+    /// Scroll target for a find hit. Always the caret line, even if it just moved.
+    pub(super) fn reveal(&mut self) -> f32 {
+        self.shown_line = self.caret_line();
+        self.caret_top()
+    }
+
     /// `Some(y)` when the caret moved to another line and the page should scroll there.
     pub(super) fn follow(&mut self) -> Option<f32> {
         let line = self.caret_line();
@@ -1804,6 +1810,239 @@ fn line_span(body: &str, line_index: usize) -> Option<(usize, usize)> {
         start = end.saturating_add(1);
     }
     None
+}
+
+/// Swaps a checkbox line with the previous or next checkbox line in the same note.
+/// `None` when that line is not a task, or there is no neighbor that way.
+pub(super) fn move_task_line(body: &str, line_index: usize, up: bool) -> Option<String> {
+    let tasks = task_lines(body);
+    let pos = tasks.iter().position(|task| task.line == line_index)?;
+    let other = if up {
+        pos.checked_sub(1)?
+    } else {
+        let next = pos.saturating_add(1);
+        if next >= tasks.len() {
+            return None;
+        }
+        next
+    };
+    let here = tasks.get(pos)?;
+    let there = tasks.get(other)?;
+    let left = here.line.min(there.line);
+    let right = here.line.max(there.line);
+    let (start_left, end_left) = line_span(body, left)?;
+    let (start_right, end_right) = line_span(body, right)?;
+    let line_left = body.get(start_left..end_left)?;
+    let line_right = body.get(start_right..end_right)?;
+    let mut out = String::with_capacity(body.len());
+    out.push_str(body.get(..start_left)?);
+    out.push_str(line_right);
+    out.push_str(body.get(end_left..start_right)?);
+    out.push_str(line_left);
+    out.push_str(body.get(end_right..).unwrap_or(""));
+    (out != body).then_some(out)
+}
+
+/// A trailing `YYYY-MM-DD` on a task label. It is still the words of the line.
+pub(super) fn due_day(label: &str) -> Option<&str> {
+    let token = label.split_whitespace().last()?;
+    is_due_day(token).then_some(token)
+}
+
+pub(super) fn is_due_day(token: &str) -> bool {
+    if token.len() != 10 {
+        return false;
+    }
+    let mut parts = token.split('-');
+    let year = parts.next().and_then(|text| text.parse::<u16>().ok());
+    let month = parts.next().and_then(|text| text.parse::<u8>().ok());
+    let day = parts.next().and_then(|text| text.parse::<u8>().ok());
+    let Some(year) = year else {
+        return false;
+    };
+    let Some(month) = month else {
+        return false;
+    };
+    let Some(day) = day else {
+        return false;
+    };
+    parts.next().is_none()
+        && (1900..=9999).contains(&year)
+        && (1..=12).contains(&month)
+        && (1..=31).contains(&day)
+}
+
+/// The label without a trailing due day.
+pub(super) fn task_words(label: &str) -> String {
+    match due_day(label) {
+        Some(day) => label[..label.len().saturating_sub(day.len())]
+            .trim()
+            .to_owned(),
+        None => label.trim().to_owned(),
+    }
+}
+
+pub(super) fn join_due(words: &str, due: &str) -> String {
+    let words = words.trim().replace(['\n', '\r'], " ");
+    let due = due.trim();
+    if due.is_empty() {
+        words
+    } else if words.is_empty() {
+        due.to_owned()
+    } else {
+        format!("{words} {due}")
+    }
+}
+
+/// Byte starts of `query` in `text`. ASCII case is ignored. Empty when there is no query.
+pub(super) fn find_bytes(text: &str, query: &str) -> Vec<usize> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let needle = query.as_bytes();
+    let hay = text.as_bytes();
+    let mut hits = Vec::new();
+    let mut index: usize = 0;
+    while index.saturating_add(needle.len()) <= hay.len() {
+        let end = index.saturating_add(needle.len());
+        if text.is_char_boundary(index)
+            && hay
+                .get(index..end)
+                .is_some_and(|slice| slice.eq_ignore_ascii_case(needle))
+        {
+            hits.push(index);
+            index = end.max(index.saturating_add(1));
+        } else {
+            index = index.saturating_add(1);
+        }
+    }
+    hits
+}
+
+/// Where a Ctrl-click should go. A plain click still only moves the caret.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum OpenLink {
+    Url(String),
+    Note(String),
+}
+
+pub(super) fn opened_at(text: &str, byte: usize) -> Option<OpenLink> {
+    if byte > text.len() {
+        return None;
+    }
+    let start = text
+        .get(..byte)
+        .and_then(|prefix| prefix.rfind('\n'))
+        .map_or(0, |at| at.saturating_add(1));
+    let end = text
+        .get(byte..)
+        .and_then(|rest| rest.find('\n'))
+        .map_or(text.len(), |at| byte.saturating_add(at));
+    let line = text.get(start..end)?;
+    opened_in_line(line, byte.saturating_sub(start))
+}
+
+fn opened_in_line(line: &str, at: usize) -> Option<OpenLink> {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes.get(index..index.saturating_add(2)) == Some(b"[[")
+            && let Some((end, name)) = wiki_name(line, index)
+        {
+            if (index.saturating_add(2)..end.saturating_sub(2)).contains(&at) {
+                return Some(OpenLink::Note(name));
+            }
+            index = end;
+            continue;
+        }
+        if let Some((end, url, label_start, label_end)) = md_url(line, index) {
+            if (label_start..label_end).contains(&at) || (label_end..end).contains(&at) {
+                return Some(OpenLink::Url(url));
+            }
+            index = end;
+            continue;
+        }
+        if let Some(end) = bare_url_end(line, index)
+            && (index..end).contains(&at)
+        {
+            let raw = line.get(index..end).unwrap_or("");
+            let trimmed = raw.trim_end_matches(['.', ',', ';', ')', ']']);
+            if !trimmed.is_empty() {
+                return Some(OpenLink::Url(trimmed.to_owned()));
+            }
+        }
+        index = index.saturating_add(1);
+    }
+    None
+}
+
+fn wiki_name(line: &str, start: usize) -> Option<(usize, String)> {
+    let rest = line.get(start..)?;
+    if !rest.starts_with("[[") {
+        return None;
+    }
+    let close = rest.find("]]")?;
+    let end = start.saturating_add(close).saturating_add(2);
+    let inner = rest.get(2..close)?;
+    if inner.is_empty() {
+        return None;
+    }
+    let name = inner.split_once('|').map_or(inner, |(target, _)| target);
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some((end, name.to_owned()))
+}
+
+fn md_url(line: &str, start: usize) -> Option<(usize, String, usize, usize)> {
+    let rest = line.get(start..)?;
+    let label_at = if rest.starts_with("![") {
+        2
+    } else if rest.starts_with('[') && !rest.starts_with("[^") && !rest.starts_with("[[") {
+        1
+    } else {
+        return None;
+    };
+    let label_rel = rest.get(label_at..)?.find("](")?;
+    let label_start = start.saturating_add(label_at);
+    let label_end = label_start.saturating_add(label_rel);
+    let url_at = label_end.saturating_add(2);
+    let url_rel = line.get(url_at..)?.find(')')?;
+    let end = url_at.saturating_add(url_rel).saturating_add(1);
+    let url = line.get(url_at..url_at.saturating_add(url_rel))?.trim();
+    if url.is_empty() {
+        return None;
+    }
+    Some((end, url.to_owned(), label_start, label_end))
+}
+
+fn bare_url_end(line: &str, start: usize) -> Option<usize> {
+    let rest = line.get(start..)?;
+    let prefix = if rest.starts_with("https://") {
+        8
+    } else if rest.starts_with("http://") {
+        7
+    } else {
+        return None;
+    };
+    if start > 0 {
+        let prev = line.get(..start)?.chars().next_back()?;
+        if prev.is_ascii_alphanumeric() {
+            return None;
+        }
+    }
+    let bytes = line.as_bytes();
+    let mut end = start.saturating_add(prefix);
+    while end < bytes.len() {
+        let byte = bytes.get(end).copied()?;
+        if byte.is_ascii_whitespace() || byte == b')' || byte == b']' {
+            break;
+        }
+        end = end.saturating_add(1);
+    }
+    Some(end)
 }
 
 /// Writes `[x]` or `[ ]` on one line. `None` when that line is not a task, or it already matches.
@@ -4202,6 +4441,58 @@ mod tests {
         assert!(super::rename_task_line(body, 2, "two").is_none());
         assert!(super::rename_task_line(body, 2, "  ").is_none());
         assert!(super::rename_task_line(body, 0, "nope").is_none());
+    }
+
+    #[test]
+    fn a_task_moves_within_its_note() {
+        let body = "keep\n- [ ] one\nmiddle\n- [ ] two\n";
+        assert_eq!(
+            super::move_task_line(body, 3, true).as_deref(),
+            Some("keep\n- [ ] two\nmiddle\n- [ ] one\n")
+        );
+        assert!(super::move_task_line(body, 1, true).is_none());
+        assert!(super::move_task_line(body, 3, false).is_none());
+    }
+
+    #[test]
+    fn a_trailing_date_is_the_due_day() {
+        assert_eq!(super::due_day("call 2026-11-20"), Some("2026-11-20"));
+        assert!(super::due_day("call tomorrow").is_none());
+        assert_eq!(super::task_words("call 2026-11-20"), "call");
+        assert_eq!(super::join_due("call", "2026-11-20"), "call 2026-11-20");
+        assert_eq!(super::join_due("call", ""), "call");
+    }
+
+    #[test]
+    fn find_ignores_ascii_case() {
+        assert_eq!(
+            super::find_bytes("Alpha beta", "beta"),
+            vec!["Alpha ".len()]
+        );
+        assert_eq!(super::find_bytes("Alpha", "alpha"), vec![0]);
+        assert!(super::find_bytes("Alpha", " ").is_empty());
+    }
+
+    #[test]
+    fn a_ctrl_click_finds_a_link_or_a_note_name() {
+        let text = "See [the clinic](https://example.com) today\n";
+        let at = text.find("clinic").expect("label");
+        assert_eq!(
+            super::opened_at(text, at),
+            Some(super::OpenLink::Url("https://example.com".to_owned()))
+        );
+        let wiki = "Open [[Daily|today]]\n";
+        let at = wiki.find("today").expect("label");
+        assert_eq!(
+            super::opened_at(wiki, at),
+            Some(super::OpenLink::Note("Daily".to_owned()))
+        );
+        let bare = "go https://example.com/a. now";
+        let at = bare.find("https").expect("url");
+        assert_eq!(
+            super::opened_at(bare, at),
+            Some(super::OpenLink::Url("https://example.com/a".to_owned()))
+        );
     }
 
     #[test]

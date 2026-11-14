@@ -4,6 +4,20 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-14 — a due day is the end of the line, and undo stays with the note
+
+A due day is a trailing `YYYY-MM-DD` on the checkbox line. It is not a new record. Open tasks with a date come first, soonest first. Hide done only hides them. Clear done removes those lines. The older copy stays in the log. Up and down swap a checkbox line with the next checkbox line in the same note.
+
+Unread is a local `seen` file, the same kind of file as names. The first time a conversation is listed, it is caught up, so an older folder does not light up. A later message shows New, and the Chat tab counts those conversations. Looking at the conversation clears it. Messages are not deleted.
+
+The message box keeps more than one line. Shift+Enter starts a line. Enter still sends. Search in the header looks through that conversation.
+
+Ctrl+F finds in the open note. Ctrl+click or Cmd+click opens an http, https, or mailto link, or a wikilink's note. A plain click still only lands on the letter. That click rule is unchanged.
+
+Undo steps stay with the note you left, in memory, for the last eight notes. They are still not the log. This supersedes the line that said leaving the note drops the steps.
+
+A file still stays on this computer. The citation can sync. The bytes cannot.
+
 ## 2026-11-13 — undo is the open note, and the first open explains Settings
 
 Undo and redo are for the note that is open. Typing and deleting each gather into one step for a short moment. A format, a paste, or Enter is its own step. Ctrl+Z steps back. Ctrl+Shift+Z and Ctrl+Y step forward. Leaving the note drops the steps. The next save writes the text as it is. It does not rewrite the log.

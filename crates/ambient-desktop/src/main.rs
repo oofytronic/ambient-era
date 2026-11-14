@@ -98,7 +98,7 @@ struct App {
     chat_id: Option<String>,
     devices: Vec<ambient_cli::DeviceLine>,
     chat: Vec<ChatBubble>,
-    draft_chat: String,
+    draft_editor: text_editor::Content,
     my_card: String,
     their_card: String,
     relay_ready: bool,
@@ -161,6 +161,23 @@ struct App {
     task_rename_text: String,
     /// Last line and clock label for each conversation. Display only.
     chat_last: BTreeMap<String, (String, String)>,
+    /// How many messages each conversation had last time the list was read.
+    chat_count: BTreeMap<String, usize>,
+    /// How many this computer has already looked at. A local file, not the log.
+    seen_count: BTreeMap<String, usize>,
+    chat_query: String,
+    hide_done: bool,
+    confirm_clear: bool,
+    task_due_text: String,
+    find_open: bool,
+    find_query: String,
+    /// Index of the current find hit. `usize::MAX` means the next jump starts at the first.
+    find_at: usize,
+    command_down: bool,
+    /// Undo for notes that are not on screen. Still memory, still not the log.
+    histories: BTreeMap<String, NoteHistory>,
+    history_order: Vec<String>,
+    history_key: String,
 }
 
 #[derive(Clone, Debug)]
@@ -203,7 +220,7 @@ enum Message {
     MyCardChanged(String),
     TheirCardChanged(String),
     StartConversation,
-    DraftChat(String),
+    DraftEdited(text_editor::Action),
     SendChat,
     ShowPhrase,
     CopyPhrase,
@@ -277,6 +294,22 @@ enum Message {
     CopyChat(String),
     WelcomeStored,
     WelcomeDone,
+    ToggleDone,
+    AskClearDone,
+    CancelClearDone,
+    ClearDone,
+    MoveTask {
+        id: String,
+        line: usize,
+        up: bool,
+    },
+    DueDraft(String),
+    ChatQuery(String),
+    FindOpen,
+    FindQuery(String),
+    FindNext,
+    FindPrev,
+    Mods(bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -341,6 +374,12 @@ struct NoteHistory {
     redo: Vec<EditSnap>,
     burst: Option<Burst>,
     at: Option<Instant>,
+}
+
+impl Default for NoteHistory {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NoteHistory {
@@ -487,6 +526,7 @@ enum WelcomeStep {
 }
 
 impl App {
+    #[allow(clippy::too_many_lines)]
     fn boot() -> (Self, Task<Message>) {
         let dir = std::env::args()
             .nth(1)
@@ -511,7 +551,7 @@ impl App {
             chat_id: None,
             devices: Vec::new(),
             chat: Vec::new(),
-            draft_chat: String::new(),
+            draft_editor: text_editor::Content::new(),
             my_card: String::new(),
             their_card: String::new(),
             relay_ready: false,
@@ -567,6 +607,19 @@ impl App {
             task_rename: None,
             task_rename_text: String::new(),
             chat_last: BTreeMap::new(),
+            chat_count: BTreeMap::new(),
+            seen_count: BTreeMap::new(),
+            chat_query: String::new(),
+            hide_done: false,
+            confirm_clear: false,
+            task_due_text: String::new(),
+            find_open: false,
+            find_query: String::new(),
+            find_at: usize::MAX,
+            command_down: false,
+            histories: BTreeMap::new(),
+            history_order: Vec::new(),
+            history_key: String::new(),
         };
         let saved = profile::load_profile(&app.dir);
         app.appearance = saved.appearance;
@@ -577,6 +630,9 @@ impl App {
         app.system_dark = profile::system_is_dark();
         for (id, name) in profile::load_names(&app.dir) {
             app.aliases.insert(id, name);
+        }
+        for (id, count) in profile::load_seen(&app.dir) {
+            app.seen_count.insert(id, count);
         }
         let task = if app.dir.join("key").exists() {
             open_task(app.dir.clone())
@@ -589,12 +645,22 @@ impl App {
     }
 
     fn subscription(app: &App) -> iced::Subscription<Message> {
-        let window = iced::event::listen_with(|event, _status, _id| match event {
+        let window = iced::event::listen_with(|event, status, _id| match event {
             iced::Event::Window(
                 iced::window::Event::Resized(size) | iced::window::Event::Opened { size, .. },
             ) => Some(Message::Resized(size)),
             iced::Event::Window(iced::window::Event::FileDropped(path)) => {
                 Some(Message::FileDropped(path))
+            }
+            iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) => {
+                Some(Message::Mods(mods.control() || mods.command()))
+            }
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
+                if status == iced::event::Status::Ignored
+                    && (modifiers.control() || modifiers.command())
+                    && matches!(key.as_ref(), Key::Character(text) if text.eq_ignore_ascii_case("f")) =>
+            {
+                Some(Message::FindOpen)
             }
             _ => None,
         });
@@ -698,6 +764,10 @@ impl App {
                 self.note_follow(true)
             }
             Message::SelectFrom(byte) => {
+                if self.command_down && self.try_open_at(byte) {
+                    self.drag_from = None;
+                    return Task::none();
+                }
                 self.arm_press(byte);
                 self.note_follow(false)
             }
@@ -852,8 +922,8 @@ impl App {
                 self.start_chat();
                 Task::none()
             }
-            Message::DraftChat(text) => {
-                self.draft_chat = text;
+            Message::DraftEdited(action) => {
+                self.draft_editor.perform(action);
                 Task::none()
             }
             Message::SendChat => {
@@ -1080,12 +1150,16 @@ impl App {
                 Task::none()
             }
             Message::BeginTaskEdit { id, line } => {
-                self.task_rename_text = self
+                let label = self
                     .tasks
                     .iter()
                     .find(|task| task.note_id == id && task.line == line)
                     .map(|task| task.text.clone())
                     .unwrap_or_default();
+                markdown::due_day(&label)
+                    .unwrap_or("")
+                    .clone_into(&mut self.task_due_text);
+                self.task_rename_text = markdown::task_words(&label);
                 self.task_rename = Some((id, line));
                 Task::none()
             }
@@ -1093,16 +1167,68 @@ impl App {
                 self.task_rename_text = text;
                 Task::none()
             }
+            Message::DueDraft(text) => {
+                self.task_due_text = text;
+                Task::none()
+            }
             Message::CommitTaskRename => self.commit_task_rename(),
             Message::CancelTaskEdit => {
                 self.task_rename = None;
                 self.task_rename_text.clear();
+                self.task_due_text.clear();
                 Task::none()
             }
             Message::RemoveTask { id, line } => self.remove_listed_task(&id, line),
+            Message::MoveTask { id, line, up } => self.move_listed_task(&id, line, up),
+            Message::ToggleDone => {
+                self.hide_done = !self.hide_done;
+                Task::none()
+            }
+            Message::AskClearDone => {
+                if self.tasks.iter().any(|task| task.done) {
+                    self.confirm_clear = true;
+                }
+                Task::none()
+            }
+            Message::CancelClearDone => {
+                self.confirm_clear = false;
+                Task::none()
+            }
+            Message::ClearDone => self.clear_done_tasks(),
             Message::CopyChat(text) => {
                 self.say("Message copied.");
                 clipboard::write(text)
+            }
+            Message::ChatQuery(query) => {
+                self.chat_query = query;
+                Task::none()
+            }
+            Message::FindOpen => {
+                self.find_open = !self.find_open;
+                if self.find_open {
+                    self.find_at = usize::MAX;
+                    self.screen = Screen::Notes;
+                    self.sheet = Sheet::None;
+                    self.detail = true;
+                }
+                Task::none()
+            }
+            Message::FindQuery(query) => {
+                self.find_query = query;
+                self.find_at = usize::MAX;
+                Task::none()
+            }
+            Message::FindNext => {
+                self.seek_find(true);
+                self.note_reveal()
+            }
+            Message::FindPrev => {
+                self.seek_find(false);
+                self.note_reveal()
+            }
+            Message::Mods(down) => {
+                self.command_down = down;
+                Task::none()
             }
             Message::WelcomeStored => {
                 if !self.recovery_phrase.is_empty() {
@@ -1301,11 +1427,17 @@ impl App {
 
     fn sidebar(&self) -> Element<'_, Message> {
         let ink = self.ink();
+        let tasks_name = self.tasks_tab();
+        let chat_name = self.chat_tab();
         let modes = container(
             row![
                 segment("Notes", self.screen == Screen::Notes, Message::ShowNotes),
-                segment("Tasks", self.screen == Screen::Tasks, Message::ShowTasks),
-                segment("Chat", self.screen == Screen::Chat, Message::ShowChat),
+                segment(
+                    &tasks_name,
+                    self.screen == Screen::Tasks,
+                    Message::ShowTasks,
+                ),
+                segment(&chat_name, self.screen == Screen::Chat, Message::ShowChat),
             ]
             .spacing(4),
         )
@@ -1339,6 +1471,7 @@ impl App {
                     &time,
                     &chat.id,
                     selected,
+                    self.chat_is_new(&chat.id),
                 ));
             }
         } else if self.screen == Screen::Tasks {
@@ -1483,6 +1616,18 @@ impl App {
             .padding(10)
             .width(Fill)
             .style(field_style);
+        let mut tools = row![ghost_label(
+            if self.hide_done {
+                "Show done"
+            } else {
+                "Hide done"
+            },
+            Message::ToggleDone,
+        )]
+        .spacing(8);
+        if self.tasks.iter().any(|task| task.done) {
+            tools = tools.push(ghost_label("Clear done", Message::AskClearDone));
+        }
         let mut list = column![].spacing(14).width(Fill);
         let open: Vec<&TaskRow> = self
             .tasks
@@ -1492,7 +1637,7 @@ impl App {
         let done: Vec<&TaskRow> = self
             .tasks
             .iter()
-            .filter(|task| task.done && self.task_hit(task))
+            .filter(|task| task.done && self.task_hit(task) && !self.hide_done)
             .collect();
         if self.tasks.is_empty() {
             list = list.push(text("Nothing to do yet.").font(serif()).size(32));
@@ -1502,7 +1647,12 @@ impl App {
                     .color(ink.muted),
             );
         } else if open.is_empty() && done.is_empty() {
-            list = list.push(text("No tasks match.").font(serif()).size(32));
+            let empty = if self.task_query.trim().is_empty() {
+                "Nothing open."
+            } else {
+                "No tasks match."
+            };
+            list = list.push(text(empty).font(serif()).size(32));
         } else if open.is_empty() {
             list = list.push(text("Nothing open.").font(serif()).size(32));
         } else {
@@ -1517,18 +1667,21 @@ impl App {
                 list = list.push(self.task_row(task));
             }
         }
-        column![
+        let mut page = column![
             add,
             search,
-            text("This goes in a note named Tasks. A box in any other note shows up here too.")
+            tools,
+            text("This goes in a note named Tasks. A box in any other note shows up here too. A date at the end, like 2026-11-20, is the due day.")
                 .size(13)
                 .color(ink.muted),
-            vscroll(list).height(Fill).width(Fill),
         ]
         .spacing(12)
         .width(Fill)
-        .height(Fill)
-        .into()
+        .height(Fill);
+        if self.confirm_clear {
+            page = page.push(self.clear_confirm());
+        }
+        page.push(vscroll(list).height(Fill).width(Fill)).into()
     }
 
     fn task_hit(&self, task: &TaskRow) -> bool {
@@ -1545,8 +1698,6 @@ impl App {
         let id = task.note_id.clone();
         let line = task.line;
         let open_id = task.note_id.clone();
-        let rename_id = task.note_id.clone();
-        let remove_id = task.note_id.clone();
         let title = if task.note_title.is_empty() {
             "Untitled".to_owned()
         } else {
@@ -1558,34 +1709,45 @@ impl App {
             .is_some_and(|(note, row)| note == &task.note_id && *row == task.line);
         let words = if task.done { ink.muted } else { ink.text };
         let main: Element<'_, Message> = if editing {
-            text_input("Task", &self.task_rename_text)
-                .on_input(Message::TaskLabel)
-                .on_submit(Message::CommitTaskRename)
-                .padding(8)
-                .width(Fill)
-                .style(field_style)
-                .into()
+            row![
+                text_input("Task", &self.task_rename_text)
+                    .on_input(Message::TaskLabel)
+                    .on_submit(Message::CommitTaskRename)
+                    .padding(8)
+                    .width(Fill)
+                    .style(field_style),
+                text_input("2026-11-20", &self.task_due_text)
+                    .on_input(Message::DueDraft)
+                    .on_submit(Message::CommitTaskRename)
+                    .padding(8)
+                    .width(140)
+                    .style(field_style),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .into()
         } else {
-            let label = if task.text.is_empty() {
+            let words_text = markdown::task_words(&task.text);
+            let label = if words_text.is_empty() {
                 "Empty task".to_owned()
             } else {
-                task.text.clone()
+                words_text
             };
-            button(
-                column![
-                    text(label).size(16).color(words),
-                    text(title).size(12).color(ink.muted),
-                ]
+            let mut lines = column![text(label).size(16).color(words)]
                 .spacing(2)
-                .width(Fill),
-            )
-            .width(Fill)
-            .padding([2, 0])
-            .on_press(Message::Select(open_id))
-            .style(quiet_style)
-            .into()
+                .width(Fill);
+            if let Some(day) = markdown::due_day(&task.text) {
+                lines = lines.push(text(format!("Due {day}")).size(12).color(ink.muted));
+            }
+            lines = lines.push(text(title).size(12).color(ink.muted));
+            button(lines)
+                .width(Fill)
+                .padding([2, 0])
+                .on_press(Message::Select(open_id))
+                .style(quiet_style)
+                .into()
         };
-        let mut line_row = row![
+        let line_row = row![
             checkbox(task.done).on_toggle(move |done| Message::SetTask {
                 id: id.clone(),
                 line,
@@ -1596,25 +1758,57 @@ impl App {
         .spacing(12)
         .align_y(iced::Alignment::Center)
         .width(Fill);
+        column![line_row, self.task_actions(task, editing)]
+            .spacing(4)
+            .width(Fill)
+            .into()
+    }
+
+    fn task_actions(&self, task: &TaskRow, editing: bool) -> Element<'_, Message> {
+        let line = task.line;
+        let mut actions = row![].spacing(8);
         if editing {
-            line_row = line_row.push(ghost_label("Cancel", Message::CancelTaskEdit));
-        } else {
-            line_row = line_row.push(ghost_label_owned(
-                "Rename".to_owned(),
-                Message::BeginTaskEdit {
-                    id: rename_id,
+            return actions
+                .push(ghost_label("Cancel", Message::CancelTaskEdit))
+                .into();
+        }
+        if self.task_neighbor(task, true) {
+            let move_id = task.note_id.clone();
+            actions = actions.push(ghost_label_owned(
+                "Up".to_owned(),
+                Message::MoveTask {
+                    id: move_id,
                     line,
-                },
-            ));
-            line_row = line_row.push(ghost_label_owned(
-                "Remove".to_owned(),
-                Message::RemoveTask {
-                    id: remove_id,
-                    line,
+                    up: true,
                 },
             ));
         }
-        line_row.into()
+        if self.task_neighbor(task, false) {
+            let move_id = task.note_id.clone();
+            actions = actions.push(ghost_label_owned(
+                "Down".to_owned(),
+                Message::MoveTask {
+                    id: move_id,
+                    line,
+                    up: false,
+                },
+            ));
+        }
+        actions = actions.push(ghost_label_owned(
+            "Rename".to_owned(),
+            Message::BeginTaskEdit {
+                id: task.note_id.clone(),
+                line,
+            },
+        ));
+        actions = actions.push(ghost_label_owned(
+            "Remove".to_owned(),
+            Message::RemoveTask {
+                id: task.note_id.clone(),
+                line,
+            },
+        ));
+        actions.into()
     }
 
     fn rebuild_tasks(&mut self) {
@@ -1646,6 +1840,17 @@ impl App {
         rows.sort_by(|left, right| {
             left.done
                 .cmp(&right.done)
+                .then_with(|| {
+                    match (
+                        markdown::due_day(&left.text),
+                        markdown::due_day(&right.text),
+                    ) {
+                        (Some(earlier), Some(later)) => earlier.cmp(later),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                })
                 .then_with(|| left.note_title.cmp(&right.note_title))
                 .then_with(|| left.line.cmp(&right.line))
         });
@@ -1693,10 +1898,16 @@ impl App {
             return Task::none();
         };
         let label = self.task_rename_text.clone();
-        if label.trim().is_empty() {
+        if label.trim().is_empty() && self.task_due_text.trim().is_empty() {
             self.say("Write the task first.");
             return Task::none();
         }
+        let due = self.task_due_text.trim();
+        if !due.is_empty() && !markdown::is_due_day(due) {
+            self.say("Use a date like 2026-11-20.");
+            return Task::none();
+        }
+        let label = markdown::join_due(&label, due);
         let Some((body, conflict, title)) = self.task_source(&id) else {
             self.say("That note is not here.");
             return Task::none();
@@ -1708,6 +1919,7 @@ impl App {
         }
         self.task_rename = None;
         self.task_rename_text.clear();
+        self.task_due_text.clear();
         let Some(next) = markdown::rename_task_line(&body, line, &label) else {
             return Task::none();
         };
@@ -1736,6 +1948,124 @@ impl App {
             return Task::none();
         };
         self.store_task_edit(id, &title, &next)
+    }
+
+    fn move_listed_task(&mut self, id: &str, line: usize, up: bool) -> Task<Message> {
+        let Some((body, conflict, title)) = self.task_source(id) else {
+            self.say("That note is not here.");
+            return Task::none();
+        };
+        if conflict {
+            self.show_note(id);
+            self.say("Two versions. Write the one you want to keep, then save.");
+            return Task::none();
+        }
+        let Some(next) = markdown::move_task_line(&body, line, up) else {
+            return Task::none();
+        };
+        self.store_task_edit(id, &title, &next)
+    }
+
+    fn clear_done_tasks(&mut self) -> Task<Message> {
+        self.confirm_clear = false;
+        let mut by_note: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for task in &self.tasks {
+            if task.done {
+                by_note
+                    .entry(task.note_id.clone())
+                    .or_default()
+                    .push(task.line);
+            }
+        }
+        let mut writes = Vec::new();
+        for (id, mut lines) in by_note {
+            lines.sort_unstable();
+            lines.dedup();
+            let Some((body, conflict, title)) = self.task_source(&id) else {
+                continue;
+            };
+            if conflict {
+                self.show_note(&id);
+                self.say("Two versions. Write the one you want to keep, then save.");
+                continue;
+            }
+            let mut next = body.clone();
+            for line in lines.into_iter().rev() {
+                if let Some(updated) = markdown::remove_task_line(&next, line) {
+                    next = updated;
+                }
+            }
+            if next != body {
+                writes.push(self.store_task_edit(&id, &title, &next));
+            }
+        }
+        if writes.is_empty() {
+            Task::none()
+        } else {
+            self.say("Cleared. The older lines stay in the log.");
+            Task::batch(writes)
+        }
+    }
+
+    fn task_neighbor(&self, task: &TaskRow, up: bool) -> bool {
+        self.tasks.iter().any(|other| {
+            other.note_id == task.note_id
+                && if up {
+                    other.line < task.line
+                } else {
+                    other.line > task.line
+                }
+        })
+    }
+
+    fn clear_confirm(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        column![
+            text(
+                "Clear done tasks? Those lines leave their notes. The older copy stays in the log."
+            )
+            .size(14)
+            .color(ink.muted),
+            row![
+                action_label("Clear done", Message::ClearDone),
+                ghost_label("Cancel", Message::CancelClearDone),
+            ]
+            .spacing(8),
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    fn tasks_tab(&self) -> String {
+        let open = self.tasks.iter().filter(|task| !task.done).count();
+        if open == 0 {
+            "Tasks".to_owned()
+        } else {
+            format!("Tasks {open}")
+        }
+    }
+
+    fn chat_tab(&self) -> String {
+        let fresh = self
+            .chats
+            .iter()
+            .filter(|chat| self.chat_is_new(&chat.id))
+            .count();
+        if fresh == 0 {
+            "Chat".to_owned()
+        } else {
+            format!("Chat {fresh}")
+        }
+    }
+
+    fn chat_is_new(&self, id: &str) -> bool {
+        match (
+            self.chat_count.get(id).copied(),
+            self.seen_count.get(id).copied(),
+        ) {
+            (Some(count), Some(seen)) => count > seen,
+            _ => false,
+        }
     }
 
     fn store_task_edit(&mut self, id: &str, title: &str, next: &str) -> Task<Message> {
@@ -1853,6 +2183,9 @@ impl App {
                 .padding([2.0, 0.0])
                 .style(title_style),
         );
+        if self.find_open {
+            body = body.push(self.find_bar());
+        }
         if !self.compact() {
             body = body.push(Self::format_bar());
         }
@@ -1974,9 +2307,15 @@ impl App {
             lines = lines.push(text("No messages yet.").color(ink.muted));
             lines = lines.push(action_label("Invite someone", Message::ShowInvite));
         }
+        let query = self.chat_query.trim().to_lowercase();
         let width = self.bubble_width();
         let mut day = String::new();
+        let mut shown = 0_usize;
         for line in &self.chat {
+            if !query.is_empty() && !line.text.to_lowercase().contains(&query) {
+                continue;
+            }
+            shown = shown.saturating_add(1);
             if !line.day.is_empty() && line.day != day {
                 day.clone_from(&line.day);
                 lines = lines.push(
@@ -1988,14 +2327,35 @@ impl App {
             }
             lines = lines.push(self.chat_bubble(line, width));
         }
+        if shown == 0 && !query.is_empty() {
+            lines = lines.push(text("No messages match.").color(ink.muted));
+        }
+        let composer = self.composer();
+        let mut page = column![].spacing(12).width(Fill).height(Fill);
+        if self.chat_id.is_some() {
+            page = page.push(self.chat_header());
+        }
+        page = page.push(
+            vscroll(lines.width(Fill))
+                .height(Fill)
+                .width(Fill)
+                .anchor_bottom(),
+        );
+        page = page.push(composer);
+        container(page).width(Fill).height(Fill).clip(true).into()
+    }
+
+    fn composer(&self) -> Element<'_, Message> {
+        let ink = self.ink();
         let narrow = self.chat_inner() < 420.0;
-        let field = text_input("Message", &self.draft_chat)
-            .on_input(Message::DraftChat)
-            .on_submit(Message::SendChat)
+        let field = text_editor::TextEditor::new(&self.draft_editor)
+            .placeholder("Message")
+            .height(72)
             .padding(10)
-            .width(Fill)
-            .style(field_style);
-        let composer_controls: Element<'_, Message> = if narrow {
+            .on_action(Message::DraftEdited)
+            .key_binding(composer_binding)
+            .style(editor_style);
+        let controls: Element<'_, Message> = if narrow {
             column![
                 field,
                 row![
@@ -2047,19 +2407,14 @@ impl App {
                 .color(ink.muted),
             );
         }
-        composer = composer.push(composer_controls);
-        let mut page = column![].spacing(12).width(Fill).height(Fill);
-        if self.chat_id.is_some() {
-            page = page.push(self.chat_header());
-        }
-        page = page.push(
-            vscroll(lines.width(Fill))
-                .height(Fill)
-                .width(Fill)
-                .anchor_bottom(),
-        );
-        page = page.push(composer);
-        container(page).width(Fill).height(Fill).clip(true).into()
+        composer
+            .push(controls)
+            .push(
+                text("Shift+Enter for a new line.")
+                    .size(12)
+                    .color(ink.muted),
+            )
+            .into()
     }
 
     fn chat_header(&self) -> Element<'_, Message> {
@@ -2077,6 +2432,10 @@ impl App {
             text("Only this computer remembers it.")
                 .size(12)
                 .color(ink.muted),
+            text_input("Search this conversation", &self.chat_query)
+                .on_input(Message::ChatQuery)
+                .padding(10)
+                .style(field_style),
         ]
         .spacing(4)
         .into()
@@ -2334,16 +2693,60 @@ impl App {
         let tz = clock::load_tz();
         let now = clock::now_ms();
         self.chat_last.clear();
+        let mut learned = false;
         for chat in &self.chats {
             let Ok(lines) = ambient_cli::chat_messages_in(&self.dir, &chat.id) else {
                 continue;
             };
+            let count = lines.len();
+            self.chat_count.insert(chat.id.clone(), count);
+            if let std::collections::btree_map::Entry::Vacant(slot) =
+                self.seen_count.entry(chat.id.clone())
+            {
+                slot.insert(count);
+                learned = true;
+            }
             let Some(last) = lines.last() else {
                 continue;
             };
             let when = clock::when(last.unix_ms, &tz, now);
             self.chat_last
                 .insert(chat.id.clone(), (chat_preview(&last.text), when.time));
+        }
+        if learned {
+            self.persist_seen();
+        }
+        if self.reading_chat() {
+            self.mark_open_chat();
+        }
+    }
+
+    fn reading_chat(&self) -> bool {
+        self.screen == Screen::Chat && self.sheet == Sheet::None && (!self.compact() || self.detail)
+    }
+
+    fn mark_open_chat(&mut self) {
+        let Some(id) = self.chat_id.clone() else {
+            return;
+        };
+        let Some(count) = self.chat_count.get(&id).copied() else {
+            return;
+        };
+        if self.seen_count.get(&id).copied() == Some(count) {
+            return;
+        }
+        self.seen_count.insert(id, count);
+        self.persist_seen();
+    }
+
+    fn persist_seen(&mut self) {
+        let rows: Vec<(String, usize)> = self
+            .seen_count
+            .iter()
+            .map(|(id, count)| (id.clone(), *count))
+            .collect();
+        if let Err(err) = profile::store_seen(&self.dir, &rows) {
+            self.message = err;
         }
     }
 
@@ -2357,7 +2760,8 @@ impl App {
         }
         if self.selected.as_deref() != Some(id) {
             self.remember_unsaved();
-            self.clear_history();
+            self.find_at = usize::MAX;
+            self.swap_history(id);
         }
         let stash = self
             .unsaved
@@ -2402,7 +2806,8 @@ impl App {
         self.send_open = false;
         self.confirm_delete = false;
         self.remember_unsaved();
-        self.clear_history();
+        self.find_at = usize::MAX;
+        self.swap_history("");
         self.save_token = self.save_token.wrapping_add(1);
         let stash = self
             .unsaved
@@ -2661,6 +3066,8 @@ impl App {
         if self.editing_note() {
             bar = bar.push(Self::format_bar()).push(hairline());
         }
+        let tasks_name = self.tasks_tab();
+        let chat_name = self.chat_tab();
         let mut nav = row![
             segment(
                 "Notes",
@@ -2668,12 +3075,12 @@ impl App {
                 Message::ShowNotes,
             ),
             segment(
-                "Tasks",
+                &tasks_name,
                 self.screen == Screen::Tasks && self.sheet == Sheet::None,
                 Message::ShowTasks,
             ),
             segment(
-                "Chat",
+                &chat_name,
                 self.screen == Screen::Chat && self.sheet == Sheet::None,
                 Message::ShowChat,
             ),
@@ -2753,6 +3160,7 @@ impl App {
                 &time,
                 &chat.id,
                 selected,
+                self.chat_is_new(&chat.id),
             ));
         }
         side.into()
@@ -3004,6 +3412,133 @@ impl App {
         self.history.clear();
     }
 
+    /// Keeps the steps with the note that just left. Memory only, and not the log.
+    fn swap_history(&mut self, next: &str) {
+        if self.history_key == next {
+            return;
+        }
+        let leaving = std::mem::take(&mut self.history);
+        let key = self.history_key.clone();
+        if leaving.undo.is_empty() && leaving.redo.is_empty() {
+            self.histories.remove(&key);
+            self.history_order.retain(|id| id != &key);
+        } else {
+            self.histories.insert(key.clone(), leaving);
+            self.history_order.retain(|id| id != &key);
+            self.history_order.push(key);
+        }
+        while self.history_order.len() > 8 {
+            let oldest = self.history_order.remove(0);
+            self.histories.remove(&oldest);
+        }
+        self.history = self.histories.remove(next).unwrap_or_default();
+        self.history_order.retain(|id| id != next);
+        next.clone_into(&mut self.history_key);
+    }
+
+    fn try_open_at(&mut self, byte: usize) -> bool {
+        let Some(link) = markdown::opened_at(&self.body.text(), byte) else {
+            return false;
+        };
+        match link {
+            markdown::OpenLink::Url(url) => {
+                if let Err(err) = files::open_url(&url) {
+                    self.message = err;
+                }
+            }
+            markdown::OpenLink::Note(name) => {
+                let id = self
+                    .catalog
+                    .iter()
+                    .find(|note| !note.title.is_empty() && note.title.eq_ignore_ascii_case(&name))
+                    .map(|note| note.id.clone());
+                match id {
+                    Some(id) if self.selected.as_deref() == Some(id.as_str()) => {}
+                    Some(id) => self.show_note(&id),
+                    None => self.say("No note with that name."),
+                }
+            }
+        }
+        true
+    }
+
+    fn find_bar(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let hits = markdown::find_bytes(&self.body.text(), &self.find_query);
+        let place = if self.find_query.trim().is_empty() {
+            String::new()
+        } else if hits.is_empty() {
+            "None".to_owned()
+        } else if self.find_at == usize::MAX || self.find_at >= hits.len() {
+            format!("{} found", hits.len())
+        } else {
+            format!("{} of {}", self.find_at.saturating_add(1), hits.len())
+        };
+        let mut bar = row![
+            text_input("Find in this note", &self.find_query)
+                .on_input(Message::FindQuery)
+                .on_submit(Message::FindNext)
+                .padding(8)
+                .width(Fill)
+                .style(field_style),
+            ghost_label("Previous", Message::FindPrev),
+            ghost_label("Next", Message::FindNext),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        if !place.is_empty() {
+            bar = bar.push(text(place).size(13).color(ink.muted));
+        }
+        bar.into()
+    }
+
+    fn seek_find(&mut self, forward: bool) {
+        let query = self.find_query.trim().to_owned();
+        if query.is_empty() {
+            self.say("Type what to find.");
+            return;
+        }
+        let hits = markdown::find_bytes(&self.body.text(), &query);
+        if hits.is_empty() {
+            self.find_at = usize::MAX;
+            self.say("Not in this note.");
+            return;
+        }
+        let next = if self.find_at == usize::MAX || self.find_at >= hits.len() {
+            if forward {
+                0
+            } else {
+                hits.len().saturating_sub(1)
+            }
+        } else if forward {
+            self.find_at.saturating_add(1) % hits.len()
+        } else if self.find_at == 0 {
+            hits.len().saturating_sub(1)
+        } else {
+            self.find_at.saturating_sub(1)
+        };
+        self.find_at = next;
+        let Some(&start) = hits.get(next) else {
+            self.find_at = usize::MAX;
+            return;
+        };
+        let end = start.saturating_add(query.len());
+        self.body.select_between(start, end);
+        self.body.end_select();
+        self.message.clear();
+    }
+
+    fn note_reveal(&mut self) -> Task<Message> {
+        let y = (self.body.reveal() - 72.0).max(0.0);
+        Task::batch([
+            iced::widget::operation::focus(iced::widget::Id::new("note-body")),
+            iced::widget::operation::scroll_to(
+                iced::widget::Id::new("note-scroll"),
+                iced::widget::operation::AbsoluteOffset { x: 0.0, y },
+            ),
+        ])
+    }
+
     fn arm_press(&mut self, byte: usize) {
         let text = self.body.text();
         if let Some((when, previous)) = self.last_press
@@ -3216,7 +3751,7 @@ impl App {
     }
 
     fn send_chat(&mut self) {
-        let mut text = self.draft_chat.trim().to_owned();
+        let mut text = self.draft_editor.text().trim().to_owned();
         let Some(id) = self.chat_id.clone() else {
             self.say("Invite someone before sending.");
             return;
@@ -3244,7 +3779,7 @@ impl App {
         }
         match ambient_cli::send_chat_in(&self.dir, &id, &text) {
             Ok(()) => {
-                self.draft_chat.clear();
+                self.draft_editor = text_editor::Content::new();
                 self.screen = Screen::Chat;
                 self.detail = true;
                 self.say("Saved here. The words sync while a relay is on. A file stays on this computer.");
@@ -3252,7 +3787,7 @@ impl App {
                 self.mark_pending();
             }
             Err(err) => {
-                self.draft_chat = text;
+                self.draft_editor = text_editor::Content::with_text(&text);
                 self.message = err.to_string();
             }
         }
@@ -3491,7 +4026,12 @@ impl App {
                 self.note_writer.clear();
                 self.edited_at = None;
                 self.save_token = self.save_token.wrapping_add(1);
-                self.clear_history();
+                self.histories.remove(&id);
+                self.history_order.retain(|key| key != &id);
+                if self.history_key == id {
+                    self.history.clear();
+                }
+                self.swap_history("");
                 self.writes = self.writes.saturating_add(1);
                 self.pending = true;
                 self.reload();
@@ -3510,7 +4050,11 @@ impl App {
         self.edited_at = None;
         self.confirm_delete = false;
         self.save_token = self.save_token.wrapping_add(1);
-        self.clear_history();
+        self.histories.remove("");
+        self.history_order.retain(|key| !key.is_empty());
+        if self.history_key.is_empty() {
+            self.clear_history();
+        }
     }
 
     fn write_note(&mut self, id: &str, title: &str, body: &str) -> Task<Message> {
@@ -3669,6 +4213,9 @@ impl App {
         match result {
             Ok((id, notes)) => {
                 if current && self.selected.is_none() {
+                    if self.history_key.is_empty() {
+                        self.history_key.clone_from(&id);
+                    }
                     self.selected = Some(id);
                 }
                 if current && self.title_text == title && self.body.text() == body {
@@ -3879,7 +4426,7 @@ impl App {
         self.chat.clear();
         self.chat_id = None;
         self.devices.clear();
-        self.draft_chat.clear();
+        self.draft_editor = text_editor::Content::new();
         self.my_card.clear();
         self.their_card.clear();
         self.unsaved.clear();
@@ -3894,6 +4441,16 @@ impl App {
         self.task_rename = None;
         self.task_rename_text.clear();
         self.chat_last.clear();
+        self.chat_count.clear();
+        self.seen_count.clear();
+        self.chat_query.clear();
+        self.hide_done = false;
+        self.confirm_clear = false;
+        self.task_due_text.clear();
+        self.find_open = false;
+        self.find_query.clear();
+        self.find_at = usize::MAX;
+        self.command_down = false;
         self.call_draft.clear();
         self.wipe_draft.clear();
         self.aliases.clear();
@@ -3904,6 +4461,9 @@ impl App {
         self.seen = true;
         self.welcome = None;
         self.clear_history();
+        self.histories.clear();
+        self.history_order.clear();
+        self.history_key.clear();
         self.open_error.clear();
         self.message.clear();
         self.edited_at = None;
@@ -5008,8 +5568,8 @@ fn ghost_label_owned(label: String, message: Message) -> Element<'static, Messag
         .into()
 }
 
-fn segment(label: &str, active: bool, message: Message) -> Element<'_, Message> {
-    button(text(label).size(14).width(Fill))
+fn segment(label: &str, active: bool, message: Message) -> Element<'static, Message> {
+    button(text(label.to_owned()).size(14).width(Fill))
         .width(Fill)
         .padding([8.0, 10.0])
         .on_press(message)
@@ -5023,12 +5583,16 @@ fn chat_row(
     time: &str,
     id: &str,
     selected: bool,
+    fresh: bool,
 ) -> Element<'static, Message> {
     let label = label.to_owned();
     let preview = preview.to_owned();
     let time = time.to_owned();
     let id = id.to_owned();
     let mut head = row![text(label).size(15).width(Fill)].align_y(iced::Alignment::Center);
+    if fresh {
+        head = head.push(text("New").size(12).style(fresh_style));
+    }
     if !time.is_empty() {
         head = head.push(text(time).size(12).style(muted_style));
     }
@@ -5079,6 +5643,13 @@ fn edit_burst(action: &text_editor::Action) -> Option<Burst> {
             | text_editor::Edit::Unindent,
         ) => Some(Burst::Break),
         _ => None,
+    }
+}
+
+fn fresh_style(theme: &Theme) -> iced::widget::text::Style {
+    let ink = ink_of(theme);
+    iced::widget::text::Style {
+        color: Some(ink.accent),
     }
 }
 
@@ -5397,12 +5968,27 @@ fn binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>
             Some(text_editor::Binding::Custom(Message::Redo))
         }
         (Some("z" | "Z"), true, false) => Some(text_editor::Binding::Custom(Message::Undo)),
+        (Some("f" | "F"), true, _) => Some(text_editor::Binding::Custom(Message::FindOpen)),
         (Some("s"), true, _) => Some(text_editor::Binding::Custom(Message::Save)),
         (Some("n"), true, _) => Some(text_editor::Binding::Custom(Message::NewNote)),
         (Some("c"), true, _) => Some(text_editor::Binding::Custom(Message::CopyNote)),
         (Some("x"), true, _) => Some(text_editor::Binding::Custom(Message::CutNote)),
         _ => text_editor::Binding::from_key_press(press),
     }
+}
+
+fn composer_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {
+    let enter = matches!(
+        press.key.as_ref(),
+        Key::Named(iced::keyboard::key::Named::Enter)
+    );
+    if enter && press.modifiers.shift() {
+        return Some(text_editor::Binding::Enter);
+    }
+    if enter && !press.modifiers.command() && !press.modifiers.control() && !press.modifiers.alt() {
+        return Some(text_editor::Binding::Custom(Message::SendChat));
+    }
+    text_editor::Binding::from_key_press(press)
 }
 
 fn generate_qr(data: &str) -> Result<Vec<u8>, String> {

@@ -89,6 +89,28 @@ pub(super) fn store_names(dir: &Path, names: &[(String, String)]) -> Result<(), 
     fs::write(dir.join("names"), text).map_err(|_| "could not write names".to_owned())
 }
 
+/// How far this computer has read each conversation. Not sealed. Not sent.
+pub(super) fn load_seen(dir: &Path) -> Vec<(String, usize)> {
+    let Ok(text) = fs::read_to_string(dir.join("seen")) else {
+        return Vec::new();
+    };
+    parse_seen(&text)
+}
+
+pub(super) fn store_seen(dir: &Path, rows: &[(String, usize)]) -> Result<(), String> {
+    let mut text = String::from("v1\n");
+    for (id, count) in rows {
+        if id.is_empty() {
+            continue;
+        }
+        text.push_str(&one_line(id));
+        text.push('\t');
+        text.push_str(&count.to_string());
+        text.push('\n');
+    }
+    fs::write(dir.join("seen"), text).map_err(|_| "could not write seen".to_owned())
+}
+
 pub(super) fn system_is_dark() -> bool {
     if let Ok(output) = std::process::Command::new("gsettings")
         .args(["get", "org.gnome.desktop.interface", "color-scheme"])
@@ -170,6 +192,27 @@ fn parse_profile(text: &str) -> Profile {
     profile
 }
 
+fn parse_seen(text: &str) -> Vec<(String, usize)> {
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        if line == "v1" || line.is_empty() {
+            continue;
+        }
+        let Some((id, count)) = line.split_once('\t') else {
+            continue;
+        };
+        let id = id.trim();
+        let Ok(count) = count.trim().parse::<usize>() else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
+        rows.push((id.to_owned(), count));
+    }
+    rows
+}
+
 fn parse_names(text: &str) -> Vec<(String, String)> {
     let mut names = Vec::new();
     for line in text.lines() {
@@ -205,7 +248,7 @@ fn file_name(title: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Appearance, parse_names, parse_profile};
+    use super::{Appearance, parse_names, parse_profile, parse_seen};
 
     #[test]
     fn profile_round_trip() {
@@ -227,6 +270,12 @@ mod tests {
         let parsed = parse_profile("v1\nseen=no\n");
         assert!(!parsed.seen);
         assert!(parse_profile("v1\nseen=yes\n").seen);
+    }
+
+    #[test]
+    fn seen_counts_skip_a_broken_line() {
+        let rows = parse_seen("v1\nabc\t3\nnope\n\ndef\t0\n");
+        assert_eq!(rows, vec![("abc".to_owned(), 3), ("def".to_owned(), 0)]);
     }
 
     #[test]

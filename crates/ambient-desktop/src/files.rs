@@ -134,6 +134,35 @@ pub(super) fn choose() -> Result<PathBuf, String> {
     Err("No file chooser is installed. Drop the file onto the window.".to_owned())
 }
 
+pub(super) fn open_url(url: &str) -> Result<(), String> {
+    if !link_allowed(url) {
+        return Err("That link is not opened from here.".to_owned());
+    }
+    for (bin, extra) in [
+        ("xdg-open", None),
+        ("gio", Some("open")),
+        ("kde-open5", None),
+    ] {
+        let mut cmd = std::process::Command::new(bin);
+        if let Some(arg) = extra {
+            cmd.arg(arg);
+        }
+        cmd.arg(url);
+        if cmd.spawn().is_ok() {
+            return Ok(());
+        }
+    }
+    Err("Could not open that link.".to_owned())
+}
+
+fn link_allowed(url: &str) -> bool {
+    if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
+}
+
 pub(super) fn open_with_system(path: &Path) -> Result<(), String> {
     for (bin, extra) in [
         ("xdg-open", None),
