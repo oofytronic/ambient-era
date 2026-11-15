@@ -4,6 +4,12 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-15 — a selection can be formatted where it sits, and a book is a contents note
+
+After the button comes up, a range that is more than a caret shows a pill above those letters. The pill is bold, italic, strike, highlight, link, copy, cut, and paste. Paste replaces the selection. Escape clears it. Heading, list, task, quote, and the block inserts stay on the bar. The pill uses the same actions as the bar.
+
+A book is not a new record. A note with two or more wikilinks is the contents: those names, in that order, are the chapters. The rail opens a chapter, or creates a note with that title when none exists. Each chapter shows its word count, and the rail shows the total. The contents lines are not counted again. Read draws the chapters one after another and does not write a combined note. A fence and an image embed are not chapters.
+
 ## 2026-11-15 — a selection is the letters under the pointer
 
 A drag keeps the page where it is. The line does not reflow while the button is down, and the word editor does not keep a second drag. The highlight is those letters, including the word at the caret. Letting go stops it and opens the word under the caret. A second click selects the word. A third selects the line. Shift extends from the anchor. This supersedes the line that said a selection grows only while the button is down.

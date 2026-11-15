@@ -430,6 +430,24 @@ impl NoteBody {
         y
     }
 
+    /// Top of the selection, and the height of that line. `None` for a bare caret.
+    pub(super) fn selection_origin(&self) -> Option<(f32, f32)> {
+        let (from, _) = self.selection_bounds()?;
+        let text = self.editor.text();
+        let line = byte_pos(&text, from.min(text.len())).line;
+        let mut y = 0.0;
+        let mut height = line_px("");
+        for (index, row) in text.split('\n').enumerate() {
+            let px = line_px(row);
+            if index == line {
+                height = px;
+                break;
+            }
+            y += px + 2.0;
+        }
+        Some((y, height))
+    }
+
     fn sync_live(&mut self) {
         self.park_task_caret();
         self.ensure_cache();
@@ -2023,6 +2041,109 @@ fn wiki_name(line: &str, start: usize) -> Option<(usize, String)> {
         return None;
     }
     Some((end, name.to_owned()))
+}
+
+/// Wikilink targets in reading order. A fence and an image embed are not chapters.
+/// The same name twice is kept once, at its first place.
+pub(super) fn chapter_names(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut fence: Option<bool> = None;
+    for line in split_lines(text) {
+        if let Some(tilde) = fence {
+            if fence_closer(line, tilde) {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some(kind) = fence_open(line) {
+            fence = Some(kind);
+            continue;
+        }
+        let mut index = 0;
+        while index < line.len() {
+            if !line.is_char_boundary(index) {
+                index = index.saturating_add(1);
+                continue;
+            }
+            if line
+                .get(index..)
+                .is_some_and(|rest| rest.starts_with("![["))
+                && let Some((end, _)) = wiki_name(line, index.saturating_add(1))
+            {
+                index = end;
+                continue;
+            }
+            if let Some((end, name)) = wiki_name(line, index) {
+                if !names
+                    .iter()
+                    .any(|have: &String| have.eq_ignore_ascii_case(&name))
+                {
+                    names.push(name);
+                }
+                index = end;
+                continue;
+            }
+            index = index.saturating_add(1);
+        }
+    }
+    names
+}
+
+/// Words in a chapter. Marks that are stuck to a word still count as that word.
+pub(super) fn word_count(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+/// The same page, without a caret. Clicks do not move the open note.
+pub(super) fn reading(text: &str, dark: bool) -> Element<'static, Message> {
+    let cache = cache_lines(text);
+    let mut page = column![].spacing(2).width(Length::Fill);
+    for (index, line) in split_lines(text).into_iter().enumerate() {
+        page = page.push(quiet_line(line, cache.get(index), index == 0, dark));
+    }
+    page.into()
+}
+
+fn quiet_line(
+    line: &str,
+    cached: Option<&LineCache>,
+    at_start: bool,
+    dark: bool,
+) -> Element<'static, Message> {
+    if line.is_empty() {
+        return space().width(Length::Fill).height(line_px(line)).into();
+    }
+    if is_rule(line) {
+        return container(rule::horizontal(1))
+            .width(Length::Fill)
+            .padding(Padding {
+                top: 10.0,
+                right: 0.0,
+                bottom: 10.0,
+                left: 0.0,
+            })
+            .into();
+    }
+    let carry = cached.map_or_else(Carry::default, |row| row.carry);
+    let shown = line_pieces(cached, line, 0, 0..line.len(), carry, at_start, dark);
+    let size = shown
+        .iter()
+        .fold(BODY, |size, piece| size.max(piece.look.size));
+    let drawn = rich_of(&shown, true, false, false);
+    let body = if quote_end(line).is_some() {
+        quote_row(drawn, size, dark)
+    } else {
+        drawn
+    };
+    let Some((_, done)) = lead(line).box_at else {
+        return body;
+    };
+    let mark = if done { "☑" } else { "☐" };
+    row![text(mark).size(size), body]
+        .spacing(8)
+        .align_y(iced::alignment::Vertical::Center)
+        .width(Length::Fill)
+        .into()
 }
 
 fn md_url(line: &str, start: usize) -> Option<(usize, String, usize, usize)> {
@@ -5582,5 +5703,21 @@ mod tests {
             "moving through the page took {elapsed:?}"
         );
         assert!(body.text().len() < note.len());
+    }
+
+    #[test]
+    fn a_contents_note_lists_chapters_in_order() {
+        let names = super::chapter_names(
+            "[[One]]\nsee [[Two|shown]] and [[one]]\n![[picture]]\n```\n[[Hidden]]\n```\n[[Three]]\n",
+        );
+        assert_eq!(names, ["One", "Two", "Three"]);
+        assert_eq!(super::word_count("one  two\nthree"), 3);
+        let mut body = super::NoteBody::new();
+        body.load("alpha\nbeta gamma");
+        body.select_between(0, 5);
+        assert_eq!(
+            body.selection_origin(),
+            Some((0.0, super::line_px("alpha")))
+        );
     }
 }

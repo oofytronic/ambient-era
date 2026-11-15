@@ -185,6 +185,12 @@ struct App {
     histories: BTreeMap<String, NoteHistory>,
     history_order: Vec<String>,
     history_key: String,
+    /// Contents note for the chapter rail. An empty string is the unsaved draft.
+    book_id: Option<String>,
+    /// Linked chapters drawn as one reading, not the editor.
+    reading: bool,
+    /// A missing chapter to create once the open note finishes saving.
+    pending_chapter: Option<String>,
 }
 
 /// Which side of an invite this computer is on. One path, not both.
@@ -264,6 +270,12 @@ enum Message {
     DropPending(usize),
     OpenPath(PathBuf),
     Format(FormatKind),
+    PasteNote,
+    Pasted(Option<String>),
+    ClearSelect,
+    OpenChapter(String),
+    ToggleRead,
+    ChapterMade(Result<MadeChapter, String>),
     TaskDraft(String),
     AddTask,
     AskDelete,
@@ -353,6 +365,27 @@ struct TaskRow {
     line: usize,
     done: bool,
     text: String,
+}
+
+struct Chapter {
+    name: String,
+    id: Option<String>,
+    words: usize,
+    body: String,
+}
+
+#[derive(Clone, Debug)]
+struct SavedDraft {
+    id: String,
+    title: String,
+    body: String,
+}
+
+#[derive(Clone, Debug)]
+struct MadeChapter {
+    notes: Vec<NoteSummary>,
+    id: String,
+    saved: Option<SavedDraft>,
 }
 
 /// One step back. The next save writes whatever the page shows. It does not rewrite the log.
@@ -647,6 +680,9 @@ impl App {
             histories: BTreeMap::new(),
             history_order: Vec::new(),
             history_key: String::new(),
+            book_id: None,
+            reading: false,
+            pending_chapter: None,
         };
         let saved = profile::load_profile(&app.dir);
         app.appearance = saved.appearance;
@@ -703,6 +739,21 @@ impl App {
             _ => None,
         });
         let mut parts = vec![window];
+        if app.editing_note() && !app.pointer_down && app.body.selection_bounds().is_some() {
+            parts.push(iced::event::listen_with(
+                |event, _status, _id| match event {
+                    iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. })
+                        if matches!(
+                            key.as_ref(),
+                            Key::Named(iced::keyboard::key::Named::Escape)
+                        ) =>
+                    {
+                        Some(Message::ClearSelect)
+                    }
+                    _ => None,
+                },
+            ));
+        }
         if app.breeze_on() {
             parts.push(
                 iced::time::every(std::time::Duration::from_millis(32)).map(|_| Message::Breeze),
@@ -755,6 +806,7 @@ impl App {
                         true
                     });
                 }
+                self.track_book();
                 Task::none()
             }
             Message::BodyEdited(action) => {
@@ -1089,6 +1141,35 @@ impl App {
                 self.insert_mark(kind);
                 self.note_follow(true)
             }
+            Message::PasteNote => clipboard::read().map(Message::Pasted),
+            Message::Pasted(Some(text)) if !text.is_empty() => {
+                self.revise(Burst::Break, |app| {
+                    let before = app.body.text();
+                    app.body
+                        .perform(&text_editor::Action::Edit(text_editor::Edit::Paste(
+                            Arc::new(text),
+                        )));
+                    app.body.text() != before
+                });
+                self.note_follow(true)
+            }
+            Message::Pasted(_) => Task::none(),
+            Message::ClearSelect => {
+                let cursor = self.body.cursor();
+                self.body.place(text_editor::Cursor {
+                    position: cursor.position,
+                    selection: None,
+                });
+                Task::none()
+            }
+            Message::OpenChapter(name) => self.open_chapter(&name),
+            Message::ToggleRead => {
+                if !self.chapters(false).is_empty() {
+                    self.reading = !self.reading;
+                }
+                Task::none()
+            }
+            Message::ChapterMade(result) => self.finish_chapter(result),
             Message::TaskDraft(text) => {
                 self.task_draft = text;
                 Task::none()
@@ -2274,30 +2355,7 @@ impl App {
                     .color(ink.muted),
             );
         }
-        body = body.push(
-            text_input("Title", &self.title_text)
-                .on_input(Message::TitleChanged)
-                .font(serif())
-                .size(if self.compact() { 32.0 } else { 36.0 })
-                .padding([2.0, 0.0])
-                .style(title_style),
-        );
-        if self.find_open {
-            body = body.push(self.find_bar());
-        }
-        if !self.compact() {
-            body = body.push(Self::format_bar());
-        }
-        body = body.push(
-            vscroll(markdown::view(
-                &self.body,
-                self.is_dark(),
-                self.pointer_down && self.drag_from.is_some(),
-            ))
-            .id(iced::widget::Id::new("note-scroll"))
-            .height(Fill),
-        );
-        body = body.push(self.note_media());
+        body = body.push(self.note_column());
         if self.send_open {
             body = body.push(text("Which chat?").size(13).color(ink.muted));
             let mut choices = column![].spacing(4).width(Fill);
@@ -2960,6 +3018,8 @@ impl App {
                 self.sheet = Sheet::None;
                 self.detail = true;
                 self.message.clear();
+                self.reading = false;
+                self.track_book();
             }
             Err(err) => self.message = err.to_string(),
         }
@@ -2985,16 +3045,19 @@ impl App {
         self.screen = Screen::Notes;
         self.sheet = Sheet::None;
         self.detail = true;
+        self.reading = false;
         if let Some((title, body)) = stash {
             self.title_text = title;
             self.body.load(&body);
             self.edited_at = Some(Instant::now());
+            self.track_book();
             return;
         }
         self.title_text.clear();
         self.body.load("");
         self.edited_at = None;
         self.message.clear();
+        self.track_book();
     }
 
     fn remember_unsaved(&mut self) {
@@ -3753,7 +3816,409 @@ impl App {
         }
     }
 
+    fn note_column(&self) -> Element<'_, Message> {
+        let chapters = self.chapters(self.reading);
+        let mut page = column![].spacing(14).width(Fill).height(Fill);
+        if self.reading && !chapters.is_empty() {
+            page = page.push(
+                text(self.book_title())
+                    .font(serif())
+                    .size(if self.compact() { 32.0 } else { 36.0 }),
+            );
+            page = page.push(self.read_pages(&chapters));
+        } else {
+            page = page.push(
+                text_input("Title", &self.title_text)
+                    .on_input(Message::TitleChanged)
+                    .font(serif())
+                    .size(if self.compact() { 32.0 } else { 36.0 })
+                    .padding([2.0, 0.0])
+                    .style(title_style),
+            );
+            if self.find_open {
+                page = page.push(self.find_bar());
+            }
+            if !self.compact() {
+                page = page.push(Self::format_bar());
+            }
+            page = page.push(
+                vscroll(self.editor_page())
+                    .id(iced::widget::Id::new("note-scroll"))
+                    .height(Fill),
+            );
+            page = page.push(self.note_media());
+        }
+        let Some(rail) = self.chapter_rail(&chapters) else {
+            return page.into();
+        };
+        if self.compact() {
+            return column![rail, page].spacing(12).height(Fill).into();
+        }
+        row![rail, page].spacing(18).height(Fill).into()
+    }
+
+    fn editor_page(&self) -> Element<'_, Message> {
+        let dragging = self.pointer_down && self.drag_from.is_some();
+        let page = markdown::view(&self.body, self.is_dark(), dragging);
+        let Some((y, height)) = (!dragging).then(|| self.body.selection_origin()).flatten() else {
+            return page;
+        };
+        let lift = if y >= 38.0 {
+            y - 34.0
+        } else {
+            y + height + 4.0
+        };
+        stack![
+            page,
+            container(Self::format_pill()).padding(iced::Padding {
+                top: lift,
+                right: 8.0,
+                bottom: 0.0,
+                left: 0.0,
+            })
+        ]
+        .into()
+    }
+
+    fn format_pill() -> Element<'static, Message> {
+        container(
+            row![
+                pill_button("B", "Bold", Message::Format(FormatKind::Bold)),
+                pill_button("I", "Italic", Message::Format(FormatKind::Italic)),
+                pill_button("S", "Strike", Message::Format(FormatKind::Strike)),
+                pill_button("==", "Highlight", Message::Format(FormatKind::Highlight)),
+                pill_button("Link", "Link", Message::Format(FormatKind::Link)),
+                pill_button("Copy", "Copy", Message::CopyNote),
+                pill_button("Cut", "Cut", Message::CutNote),
+                pill_button("Paste", "Paste", Message::PasteNote),
+            ]
+            .spacing(2)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding([4, 6])
+        .style(pill_style)
+        .into()
+    }
+
+    fn chapter_rail(&self, chapters: &[Chapter]) -> Option<Element<'_, Message>> {
+        if chapters.len() < 2 {
+            return None;
+        }
+        let ink = self.ink();
+        let total: usize = chapters.iter().map(|chapter| chapter.words).sum();
+        let mut list = column![
+            row![
+                text(words_label(total)).size(12).color(ink.muted),
+                space().width(Fill),
+                ghost_label(
+                    if self.reading { "Write" } else { "Read" },
+                    Message::ToggleRead,
+                ),
+            ]
+            .align_y(iced::Alignment::Center)
+        ]
+        .spacing(4)
+        .width(Fill);
+        for chapter in chapters {
+            let here = self.book_id.as_deref() != self.selected.as_deref()
+                && !self.title_text.is_empty()
+                && self.title_text.eq_ignore_ascii_case(&chapter.name);
+            let count = if chapter.id.is_none() {
+                "new".to_owned()
+            } else {
+                chapter.words.to_string()
+            };
+            let name = chapter.name.clone();
+            list = list.push(
+                button(
+                    text(format!("{} · {count}", chapter.name))
+                        .size(14)
+                        .width(Fill),
+                )
+                .width(Fill)
+                .padding([6.0, 8.0])
+                .on_press(Message::OpenChapter(name))
+                .style(list_row(here)),
+            );
+        }
+        let scroll = vscroll(list).width(if self.compact() {
+            Fill
+        } else {
+            iced::Length::Fixed(220.0)
+        });
+        if self.compact() {
+            Some(scroll.height(160).into())
+        } else {
+            Some(scroll.height(Fill).into())
+        }
+    }
+
+    fn read_pages(&self, chapters: &[Chapter]) -> Element<'_, Message> {
+        let ink = self.ink();
+        let mut pages = column![].spacing(22).width(Fill);
+        for chapter in chapters {
+            pages = pages.push(text(chapter.name.clone()).font(serif()).size(24));
+            if chapter.body.trim().is_empty() {
+                pages = pages.push(text("Not written yet.").size(14).color(ink.muted));
+            } else {
+                pages = pages.push(markdown::reading(&chapter.body, self.is_dark()));
+            }
+        }
+        vscroll(pages).height(Fill).into()
+    }
+
+    fn book_title(&self) -> String {
+        let Some(id) = &self.book_id else {
+            return self.title_text.clone();
+        };
+        if id.is_empty() || self.selected.as_deref() == Some(id.as_str()) {
+            return self.title_text.clone();
+        }
+        self.catalog
+            .iter()
+            .find(|note| note.id == *id)
+            .map(|note| note.title.clone())
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "Book".to_owned())
+    }
+
+    /// Chapters of the open manuscript. A note needs two wikilinks before this is a book.
+    fn chapters(&self, with_body: bool) -> Vec<Chapter> {
+        let Some(id) = &self.book_id else {
+            return Vec::new();
+        };
+        let source = self.book_text(id);
+        let names = markdown::chapter_names(&source);
+        if names.len() < 2 {
+            return Vec::new();
+        }
+        let mut rows: Vec<Chapter> = names
+            .into_iter()
+            .map(|name| Chapter {
+                name,
+                id: None,
+                words: 0,
+                body: String::new(),
+            })
+            .collect();
+        let take = |rows: &mut [Chapter], note_id: &str, title: &str, body: &str, force: bool| {
+            let Some(row) = rows
+                .iter_mut()
+                .find(|row| (force || row.id.is_none()) && row.name.eq_ignore_ascii_case(title))
+            else {
+                return;
+            };
+            row.id = Some(note_id.to_owned());
+            row.words = markdown::word_count(body);
+            if with_body {
+                body.clone_into(&mut row.body);
+            }
+        };
+        if let Some(book) = self.notebook.as_ref() {
+            let _ = book.visit_notes(|note_id, title, body, conflict| {
+                if conflict || title.is_empty() {
+                    return;
+                }
+                take(&mut rows, note_id, title, body, false);
+            });
+        }
+        for (key, title, body) in &self.unsaved {
+            if let Some(note_id) = key {
+                take(&mut rows, note_id, title, body, true);
+            }
+        }
+        if let Some(note_id) = &self.selected {
+            take(
+                &mut rows,
+                note_id,
+                &self.title_text,
+                &self.body.text(),
+                true,
+            );
+        }
+        rows
+    }
+
+    fn book_text(&self, id: &str) -> String {
+        if id.is_empty() {
+            if self.selected.is_none() {
+                return self.body.text();
+            }
+            return self
+                .unsaved
+                .iter()
+                .find(|(key, _, _)| key.is_none())
+                .map(|(_, _, body)| body.clone())
+                .unwrap_or_default();
+        }
+        if self.selected.as_deref() == Some(id) {
+            return self.body.text();
+        }
+        if let Some((_, _, body)) = self
+            .unsaved
+            .iter()
+            .find(|(key, _, _)| key.as_deref() == Some(id))
+        {
+            return body.clone();
+        }
+        let mut found = String::new();
+        if let Some(book) = self.notebook.as_ref() {
+            let _ = book.visit_notes(|note_id, _title, body, conflict| {
+                if !conflict && note_id == id {
+                    body.clone_into(&mut found);
+                }
+            });
+        }
+        found
+    }
+
+    fn track_book(&mut self) {
+        let names = markdown::chapter_names(&self.body.text());
+        if names.len() >= 2 {
+            if let Some(id) = self.selected.clone() {
+                if self.book_id.as_ref().is_some_and(|book| book != &id)
+                    && self.linked_from_book(&self.title_text)
+                {
+                    return;
+                }
+                self.book_id = Some(id);
+            } else {
+                let keep = self.book_id.as_ref().is_some_and(|book| !book.is_empty());
+                if keep && self.linked_from_book(&self.title_text) {
+                    return;
+                }
+                self.book_id = Some(String::new());
+            }
+            return;
+        }
+        if self.book_id.is_none() || self.linked_from_book(&self.title_text) {
+            return;
+        }
+        let looking_at_book = match (&self.book_id, &self.selected) {
+            (Some(book), Some(id)) => book == id,
+            (Some(book), None) => book.is_empty(),
+            _ => false,
+        };
+        if !looking_at_book {
+            self.book_id = None;
+            self.reading = false;
+        }
+    }
+
+    fn linked_from_book(&self, title: &str) -> bool {
+        if title.is_empty() {
+            return false;
+        }
+        let Some(id) = self.book_id.clone() else {
+            return false;
+        };
+        markdown::chapter_names(&self.book_text(&id))
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(title))
+    }
+
+    fn find_title(&self, name: &str) -> Option<String> {
+        if name.is_empty() {
+            return None;
+        }
+        if self.title_text.eq_ignore_ascii_case(name)
+            && let Some(id) = &self.selected
+        {
+            return Some(id.clone());
+        }
+        for (key, title, _) in &self.unsaved {
+            if title.eq_ignore_ascii_case(name)
+                && let Some(id) = key
+            {
+                return Some(id.clone());
+            }
+        }
+        self.catalog
+            .iter()
+            .find(|note| !note.title.is_empty() && note.title.eq_ignore_ascii_case(name))
+            .map(|note| note.id.clone())
+    }
+
+    fn open_chapter(&mut self, name: &str) -> Task<Message> {
+        let name = name.trim().to_owned();
+        if name.is_empty() {
+            return Task::none();
+        }
+        if let Some(id) = self.find_title(&name) {
+            self.reading = false;
+            self.show_note(&id);
+            return Task::none();
+        }
+        if self.saving {
+            self.pending_chapter = Some(name);
+            return Task::none();
+        }
+        self.saving = true;
+        let dir = self.dir.clone();
+        let current = if self.editor_dirty() {
+            Some((
+                self.selected.clone(),
+                self.title_text.clone(),
+                self.body.text(),
+            ))
+        } else {
+            None
+        };
+        Task::perform(
+            async move {
+                let (sender, receiver) = iced::futures::channel::oneshot::channel();
+                std::thread::spawn(move || {
+                    let result = write_chapter(&dir, current.as_ref(), &name);
+                    let _ = sender.send(result);
+                });
+                receiver
+                    .await
+                    .unwrap_or_else(|_| Err("Could not add that chapter.".to_owned()))
+            },
+            Message::ChapterMade,
+        )
+    }
+
+    fn finish_chapter(&mut self, result: Result<MadeChapter, String>) -> Task<Message> {
+        self.saving = false;
+        let made = match result {
+            Ok(made) => made,
+            Err(err) => {
+                self.message = err;
+                return self.take_pending_chapter();
+            }
+        };
+        if let Some(saved) = made.saved {
+            if self.title_text == saved.title && self.body.text() == saved.body {
+                self.disk_title = saved.title;
+                self.disk_body = saved.body;
+                self.edited_at = None;
+            }
+            if self.selected.is_none() {
+                if self.history_key.is_empty() {
+                    self.history_key.clone_from(&saved.id);
+                }
+                self.selected = Some(saved.id.clone());
+            }
+            if self.book_id.as_deref() == Some("") {
+                self.book_id = Some(saved.id);
+            }
+        }
+        self.take_notes(made.notes);
+        self.reading = false;
+        self.show_note(&made.id);
+        self.take_pending_chapter()
+    }
+
+    fn take_pending_chapter(&mut self) -> Task<Message> {
+        let Some(name) = self.pending_chapter.take() else {
+            return Task::none();
+        };
+        self.open_chapter(&name)
+    }
+
     fn note_follow(&mut self, scroll: bool) -> Task<Message> {
+        self.track_book();
         let jump = if scroll { self.body.follow() } else { None };
         let focus = iced::widget::operation::focus(iced::widget::Id::new("note-body"));
         if let Some(top) = jump {
@@ -4225,6 +4690,10 @@ impl App {
                 self.save_token = self.save_token.wrapping_add(1);
                 self.histories.remove(&id);
                 self.history_order.retain(|key| key != &id);
+                if self.book_id.as_deref() == Some(id.as_str()) {
+                    self.book_id = None;
+                    self.reading = false;
+                }
                 if self.history_key == id {
                     self.history.clear();
                 }
@@ -4240,6 +4709,10 @@ impl App {
 
     fn discard_draft(&mut self) {
         self.unsaved.retain(|(key, _, _)| key.is_some());
+        if self.book_id.as_deref() == Some("") {
+            self.book_id = None;
+            self.reading = false;
+        }
         self.title_text.clear();
         self.body.load("");
         self.disk_title.clear();
@@ -4413,6 +4886,9 @@ impl App {
                     if self.history_key.is_empty() {
                         self.history_key.clone_from(&id);
                     }
+                    if self.book_id.as_deref() == Some("") {
+                        self.book_id = Some(id.clone());
+                    }
                     self.selected = Some(id);
                 }
                 if current && self.title_text == title && self.body.text() == body {
@@ -4444,7 +4920,7 @@ impl App {
                 self.save_again = false;
             }
         }
-        Task::none()
+        self.take_pending_chapter()
     }
 
     fn finish_applied(&mut self, result: Result<Vec<NoteSummary>, String>) -> Task<Message> {
@@ -5529,6 +6005,48 @@ fn format_button(
     hover_label(face, hint_text)
 }
 
+fn pill_button(
+    label: &'static str,
+    hint_text: &'static str,
+    message: Message,
+) -> Element<'static, Message> {
+    let face = button(text(label).size(13))
+        .padding([4.0, 8.0])
+        .on_press(message)
+        .style(ghost_style);
+    tooltip(
+        face,
+        container(text(hint_text).size(12))
+            .padding([4, 8])
+            .style(card_style),
+        tooltip::Position::Bottom,
+    )
+    .gap(6)
+    .into()
+}
+
+fn pill_style(theme: &Theme) -> container::Style {
+    let ink = ink_of(theme);
+    container::Style {
+        text_color: Some(ink.text),
+        background: Some(iced::Background::Color(ink.surface)),
+        border: iced::Border {
+            radius: 16.0.into(),
+            width: 1.0,
+            color: ink.hairline,
+        },
+        ..Default::default()
+    }
+}
+
+fn words_label(count: usize) -> String {
+    if count == 1 {
+        "1 word".to_owned()
+    } else {
+        format!("{count} words")
+    }
+}
+
 fn format_caption(label: &'static str) -> Element<'static, Message> {
     text(label).size(11).into()
 }
@@ -6279,6 +6797,37 @@ fn write_snapshot(
     };
     let notes = book.list().map_err(|err| err.to_string())?;
     Ok((saved, notes))
+}
+
+fn write_chapter(
+    dir: &Path,
+    current: Option<&(Option<String>, String, String)>,
+    title: &str,
+) -> Result<MadeChapter, String> {
+    let _guard = io_lock();
+    let book = Notebook::open(dir).map_err(|err| err.to_string())?;
+    let saved = if let Some((id, note_title, note_body)) = current {
+        let id = match id {
+            Some(id) => {
+                book.edit(id, note_title, note_body)
+                    .map_err(|err| err.to_string())?;
+                id.clone()
+            }
+            None => book
+                .add(note_title, note_body)
+                .map_err(|err| err.to_string())?,
+        };
+        Some(SavedDraft {
+            id,
+            title: note_title.clone(),
+            body: note_body.clone(),
+        })
+    } else {
+        None
+    };
+    let id = book.add(title, "").map_err(|err| err.to_string())?;
+    let notes = book.list().map_err(|err| err.to_string())?;
+    Ok(MadeChapter { notes, id, saved })
 }
 
 fn choice_button(label: &str, active: bool, message: Message) -> Element<'_, Message> {
