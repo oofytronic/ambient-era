@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-15 — a selection is the letters under the pointer
+
+A drag keeps the page where it is. The line does not reflow while the button is down, and the word editor does not keep a second drag. The highlight is those letters, including the word at the caret. Letting go stops it and opens the word under the caret. A second click selects the word. A third selects the line. Shift extends from the anchor. This supersedes the line that said a selection grows only while the button is down.
+
 ## 2026-11-14 — a drag ends with the button, and an invite is one path
 
 A selection grows only while the mouse button is down. Letting go, or the pointer leaving the window, ends it. A click still lands on the letter.

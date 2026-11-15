@@ -147,8 +147,8 @@ struct App {
     breeze_frame: u32,
     /// Byte where the current drag started. Empty when the mouse is up.
     drag_from: Option<usize>,
-    /// Previous press, so a second click on the same word selects it.
-    last_press: Option<(Instant, usize)>,
+    /// Previous press: when, byte, and how many clicks landed on that line.
+    last_press: Option<(Instant, usize, u8)>,
     /// Steps for the note that is open. Not written into the log.
     history: NoteHistory,
     /// Set after a new folder is created, until the welcome is finished.
@@ -174,6 +174,7 @@ struct App {
     /// Index of the current find hit. `usize::MAX` means the next jump starts at the first.
     find_at: usize,
     command_down: bool,
+    shift_down: bool,
     /// True only while the button that started a selection is still down.
     pointer_down: bool,
     note_search: bool,
@@ -322,7 +323,10 @@ enum Message {
     FindQuery(String),
     FindNext,
     FindPrev,
-    Mods(bool),
+    Mods {
+        command: bool,
+        shift: bool,
+    },
     PickInvite(InvitePick),
     ToggleNoteSearch,
     ToggleTaskSearch,
@@ -634,6 +638,7 @@ impl App {
             find_query: String::new(),
             find_at: usize::MAX,
             command_down: false,
+            shift_down: false,
             pointer_down: false,
             note_search: false,
             task_search: false,
@@ -675,7 +680,10 @@ impl App {
                 Some(Message::FileDropped(path))
             }
             iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) => {
-                Some(Message::Mods(mods.control() || mods.command()))
+                Some(Message::Mods {
+                    command: mods.control() || mods.command(),
+                    shift: mods.shift(),
+                })
             }
             iced::Event::Mouse(
                 iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)
@@ -750,13 +758,12 @@ impl App {
                 Task::none()
             }
             Message::BodyEdited(action) => {
-                if matches!(action, text_editor::Action::Drag(_)) && !self.pointer_down {
-                    return Task::none();
-                }
-                let pointer = matches!(
+                if matches!(
                     action,
                     text_editor::Action::Click(_) | text_editor::Action::Drag(_)
-                );
+                ) {
+                    return Task::none();
+                }
                 let structured = match &action {
                     text_editor::Action::Edit(text_editor::Edit::Enter) => {
                         markdown::continue_enter(&self.body.text(), self.body.cursor())
@@ -777,23 +784,6 @@ impl App {
                 }
                 if self.body.edit(&action) {
                     self.edited_at = Some(Instant::now());
-                }
-                if let text_editor::Action::Click(_) = action {
-                    let byte = self.body.caret_byte();
-                    self.arm_press(byte);
-                    return Task::none();
-                }
-                if pointer {
-                    return Task::none();
-                }
-                if matches!(
-                    action,
-                    text_editor::Action::SelectWord | text_editor::Action::SelectLine
-                ) && let Some((from, _)) = self.body.selection_bounds()
-                {
-                    self.pointer_down = true;
-                    self.drag_from = Some(from);
-                    return Task::none();
                 }
                 self.note_follow(true)
             }
@@ -817,11 +807,16 @@ impl App {
                 Task::none()
             }
             Message::SelectStop => {
+                let was_down = self.pointer_down;
                 self.pointer_down = false;
                 if self.drag_from.take().is_some() {
                     self.body.end_select();
                 }
-                Task::none()
+                if was_down {
+                    self.note_follow(false)
+                } else {
+                    Task::none()
+                }
             }
             Message::SetOpenTask { line, done } => {
                 if let Some(id) = self.selected.clone() {
@@ -1266,8 +1261,9 @@ impl App {
                 self.seek_find(false);
                 self.note_reveal()
             }
-            Message::Mods(down) => {
-                self.command_down = down;
+            Message::Mods { command, shift } => {
+                self.command_down = command;
+                self.shift_down = shift;
                 Task::none()
             }
             Message::PickInvite(pick) => {
@@ -3709,19 +3705,52 @@ impl App {
     fn arm_press(&mut self, byte: usize) {
         self.pointer_down = true;
         let text = self.body.text();
-        if let Some((when, previous)) = self.last_press
-            && when.elapsed() < Duration::from_millis(400)
-            && markdown::same_word(&text, previous, byte)
-        {
-            let (from, to) = markdown::word_bounds(&text, byte);
+        if self.shift_down {
+            let anchor = self
+                .body
+                .anchor_byte()
+                .unwrap_or_else(|| self.body.caret_byte());
+            self.drag_from = Some(anchor);
+            self.body.select_between(anchor, byte);
+            self.last_press = None;
+            return;
+        }
+        let repeat = self.last_press.is_some_and(|(when, previous, _)| {
+            when.elapsed() < Duration::from_millis(400)
+                && markdown::same_line(&text, previous, byte)
+        });
+        let count = if repeat {
+            self.last_press
+                .map_or(1, |(_, _, count)| count.saturating_add(1))
+        } else {
+            1
+        };
+        if count >= 3 {
+            let (from, to) = markdown::line_bounds(&text, byte);
             self.body.select_between(from, to);
             self.drag_from = Some(from);
             self.last_press = None;
             return;
         }
-        self.last_press = Some((Instant::now(), byte));
+        if count == 2
+            && self
+                .last_press
+                .is_some_and(|(_, previous, _)| markdown::same_word(&text, previous, byte))
+        {
+            let (from, to) = markdown::word_bounds(&text, byte);
+            self.body.select_between(from, to);
+            self.drag_from = Some(from);
+            self.last_press = Some((Instant::now(), byte, 2));
+            return;
+        }
+        self.last_press = Some((Instant::now(), byte, 1));
         self.drag_from = Some(byte);
-        self.body.place_byte(byte);
+        if markdown::line_index(&text, byte) == self.body.open_line() {
+            self.body.place_byte(byte);
+        } else {
+            // Opening that line now would reflow the page under the pointer.
+            self.body.place_byte_soft(byte);
+        }
     }
 
     fn note_follow(&mut self, scroll: bool) -> Task<Message> {
@@ -4619,7 +4648,10 @@ impl App {
         self.find_query.clear();
         self.find_at = usize::MAX;
         self.command_down = false;
+        self.shift_down = false;
         self.pointer_down = false;
+        self.drag_from = None;
+        self.last_press = None;
         self.note_search = false;
         self.task_search = false;
         self.chat_search = false;

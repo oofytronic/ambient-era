@@ -8,10 +8,11 @@
 
 use std::ops::Range;
 
+use iced::advanced::Renderer as _;
 use iced::advanced::text::Paragraph as _;
 use iced::advanced::text::highlighter::{self, Highlighter};
 use iced::widget::text_editor::{self, Action};
-use iced::widget::{checkbox, column, container, mouse_area, row, rule, space, text};
+use iced::widget::{checkbox, column, container, row, rule, space, text};
 use iced::{Background, Color, Element, Font, Length, Padding, Size, Theme};
 
 use super::{Message, binding, editor_style, sans, serif};
@@ -294,7 +295,9 @@ impl NoteBody {
         });
         self.shown_line = position.line;
         if let Some((start, end)) = self.live_at {
-            let local = local_cursor(&text, &self.editor.cursor(), start, end);
+            let mut local = local_cursor(&text, &self.editor.cursor(), start, end);
+            // The page paints the highlight. A second range here does not match it.
+            local.selection = None;
             self.live.move_to(local);
         }
     }
@@ -341,6 +344,31 @@ impl NoteBody {
         });
         self.shown_line = position.line;
         self.sync_live();
+    }
+
+    /// Moves the caret without opening that word. A drag keeps the page still.
+    pub(super) fn place_byte_soft(&mut self, byte: usize) {
+        let text = self.editor.text();
+        let position = byte_pos(&text, byte.min(text.len()));
+        self.editor.move_to(text_editor::Cursor {
+            position,
+            selection: None,
+        });
+        self.shown_line = position.line;
+    }
+
+    /// The line whose word is open. Not the caret, while a drag is on another line.
+    pub(super) fn open_line(&self) -> usize {
+        let text = self.editor.text();
+        let start = self.live_at.map_or(0, |(start, _)| start);
+        byte_pos(&text, start.min(text.len())).line
+    }
+
+    /// The anchor of a selection, if the caret is holding a range.
+    pub(super) fn anchor_byte(&self) -> Option<usize> {
+        let cursor = self.editor.cursor();
+        let anchor = cursor.selection?;
+        Some(pos_byte(&self.editor.text(), anchor))
     }
 
     /// Scroll target for a find hit. Always the caret line, even if it just moved.
@@ -409,7 +437,8 @@ impl NoteBody {
         let cursor = self.editor.cursor();
         let (start, end) = window_bytes(&text, &cursor, &self.cache);
         let slice = text.get(start..end).unwrap_or("");
-        let local = local_cursor(&text, &cursor, start, end);
+        let mut local = local_cursor(&text, &cursor, start, end);
+        local.selection = None;
         let same = self.live_at == Some((start, end)) && self.live.text() == slice;
         if !same {
             self.live = text_editor::Content::with_text(slice);
@@ -520,7 +549,7 @@ pub(super) fn view(body: &NoteBody, dark: bool, dragging: bool) -> Element<'_, M
             ));
         }
     }
-    page = page.push(space().height(48));
+    page = page.push(press_at(space().height(48).into(), text.len(), dragging));
     Release { child: page.into() }.into()
 }
 
@@ -2701,6 +2730,19 @@ pub(super) fn same_word(text: &str, left: usize, right: usize) -> bool {
     start == other_start && end == other_end
 }
 
+pub(super) fn line_index(text: &str, byte: usize) -> usize {
+    byte_pos(text, byte.min(text.len())).line
+}
+
+pub(super) fn line_bounds(text: &str, at: usize) -> (usize, usize) {
+    let line = line_index(text, at);
+    (line_start(text, line), line_end(text, line))
+}
+
+pub(super) fn same_line(text: &str, left: usize, right: usize) -> bool {
+    line_index(text, left) == line_index(text, right)
+}
+
 fn is_word(char: char) -> bool {
     char.is_alphanumeric() || char == '_' || char == '\''
 }
@@ -3512,29 +3554,34 @@ impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for PageText
         if !self.listen {
             return;
         }
-        let over = cursor.position_in(layout.bounds());
+        let bounds = layout.bounds();
         match event {
             iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left))
-                if over.is_some() =>
+                if cursor
+                    .position()
+                    .is_some_and(|point| bounds.contains(point)) =>
             {
                 let byte = hit_byte(
                     &self.pieces,
                     self.fill,
-                    layout.bounds().size(),
-                    over.unwrap_or_default(),
+                    bounds.size(),
+                    point_in(bounds, cursor.position().unwrap_or_default()),
                 );
                 shell.publish(Message::SelectFrom(byte));
                 shell.capture_event();
                 return;
             }
             iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. })
-                if self.dragging && over.is_some() =>
+                if self.dragging && landed(cursor).is_some_and(|point| in_band(bounds, point)) =>
             {
+                let Some(point) = landed(cursor) else {
+                    return;
+                };
                 let byte = hit_byte(
                     &self.pieces,
                     self.fill,
-                    layout.bounds().size(),
-                    over.unwrap_or_default(),
+                    bounds.size(),
+                    point_in(bounds, point),
                 );
                 shell.publish(Message::ExtendTo(byte));
                 return;
@@ -3713,11 +3760,23 @@ fn active_line<'a>(
     let edited: Element<'a, Message> = if placeholder {
         editor.into()
     } else {
-        Fitted {
+        MarkedWord {
             sample: sample.clone(),
             font: look.font,
             size: look.size,
-            child: editor.into(),
+            span: covered(
+                selected,
+                base.saturating_add(win.start),
+                base.saturating_add(win.end),
+            ),
+            paint,
+            child: Fitted {
+                sample: sample.clone(),
+                font: look.font,
+                size: look.size,
+                child: editor.into(),
+            }
+            .into(),
         }
         .into()
     };
@@ -3847,12 +3906,326 @@ fn line_pieces(
     }
 }
 
+const LINE_GAP: f32 = 2.0;
+
+fn landed(cursor: iced::advanced::mouse::Cursor) -> Option<iced::Point> {
+    cursor.land().position()
+}
+
+fn in_band(bounds: iced::Rectangle, point: iced::Point) -> bool {
+    point.y >= bounds.y && point.y < bounds.y + bounds.height + LINE_GAP
+}
+
+fn point_in(bounds: iced::Rectangle, point: iced::Point) -> iced::Point {
+    iced::Point::new(
+        (point.x - bounds.x).clamp(0.0, (bounds.width - 0.01).max(0.0)),
+        (point.y - bounds.y).clamp(0.0, (bounds.height - 0.01).max(0.0)),
+    )
+}
+
+/// The part of `start..end` that the selection covers, as offsets into that slice.
+fn covered(selected: Option<(usize, usize)>, start: usize, end: usize) -> Option<(usize, usize)> {
+    let (from, to) = selected?;
+    let lo = from.max(start);
+    let hi = to.min(end);
+    (lo < hi).then_some((lo.saturating_sub(start), hi.saturating_sub(start)))
+}
+
 fn press_at(content: Element<'_, Message>, byte: usize, dragging: bool) -> Element<'_, Message> {
-    let mut area = mouse_area(content).on_press(Message::SelectFrom(byte));
-    if dragging {
-        area = area.on_move(move |_| Message::ExtendTo(byte));
+    ByteBand {
+        byte,
+        dragging,
+        child: content,
     }
-    area.into()
+    .into()
+}
+
+struct ByteBand<'a> {
+    byte: usize,
+    dragging: bool,
+    child: Element<'a, Message>,
+}
+
+impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for ByteBand<'_> {
+    fn size(&self) -> Size<Length> {
+        self.child.as_widget().size()
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        vec![iced::advanced::widget::Tree::new(&self.child)]
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        tree.diff_children(&[self.child.as_widget()]);
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        let Some(child) = tree.children.first_mut() else {
+            return iced::advanced::layout::Node::new(Size::ZERO);
+        };
+        self.child.as_widget_mut().layout(child, renderer, limits)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+        viewport: &iced::Rectangle,
+    ) {
+        let bounds = layout.bounds();
+        match event {
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left))
+                if cursor
+                    .position()
+                    .is_some_and(|point| bounds.contains(point)) =>
+            {
+                shell.publish(Message::SelectFrom(self.byte));
+                shell.capture_event();
+                return;
+            }
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. })
+                if self.dragging && landed(cursor).is_some_and(|point| in_band(bounds, point)) =>
+            {
+                shell.publish(Message::ExtendTo(self.byte));
+                return;
+            }
+            _ => {}
+        }
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        self.child.as_widget_mut().update(
+            child, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        let Some(child) = tree.children.first() else {
+            return;
+        };
+        self.child
+            .as_widget()
+            .draw(child, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+        renderer: &iced::Renderer,
+    ) -> iced::advanced::mouse::Interaction {
+        let Some(child) = tree.children.first() else {
+            return iced::advanced::mouse::Interaction::None;
+        };
+        self.child
+            .as_widget()
+            .mouse_interaction(child, layout, cursor, viewport, renderer)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        self.child
+            .as_widget_mut()
+            .operate(child, layout, renderer, operation);
+    }
+}
+
+impl<'a> From<ByteBand<'a>> for Element<'a, Message> {
+    fn from(band: ByteBand<'a>) -> Self {
+        Element::new(band)
+    }
+}
+
+struct MarkedWord<'a> {
+    sample: String,
+    font: Font,
+    size: f32,
+    span: Option<(usize, usize)>,
+    paint: Color,
+    child: Element<'a, Message>,
+}
+
+impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for MarkedWord<'_> {
+    fn size(&self) -> Size<Length> {
+        self.child.as_widget().size()
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        vec![iced::advanced::widget::Tree::new(&self.child)]
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        tree.diff_children(&[self.child.as_widget()]);
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        let Some(child) = tree.children.first_mut() else {
+            return iced::advanced::layout::Node::new(Size::ZERO);
+        };
+        self.child.as_widget_mut().layout(child, renderer, limits)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+        viewport: &iced::Rectangle,
+    ) {
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        self.child.as_widget_mut().update(
+            child, event, layout, cursor, renderer, clipboard, shell, viewport,
+        );
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        if let Some((from, to)) = self.span {
+            let bounds = layout.bounds();
+            let x0 = text_width(self.sample.get(..from).unwrap_or(""), self.font, self.size);
+            let x1 = text_width(self.sample.get(..to).unwrap_or(""), self.font, self.size);
+            let width = (x1 - x0).max(0.0);
+            if width > 0.0 {
+                renderer.fill_quad(
+                    iced::advanced::renderer::Quad {
+                        bounds: iced::Rectangle {
+                            x: bounds.x + x0,
+                            y: bounds.y,
+                            width,
+                            height: bounds.height,
+                        },
+                        ..iced::advanced::renderer::Quad::default()
+                    },
+                    Background::Color(self.paint),
+                );
+            }
+        }
+        let Some(child) = tree.children.first() else {
+            return;
+        };
+        self.child
+            .as_widget()
+            .draw(child, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+        renderer: &iced::Renderer,
+    ) -> iced::advanced::mouse::Interaction {
+        let Some(child) = tree.children.first() else {
+            return iced::advanced::mouse::Interaction::None;
+        };
+        self.child
+            .as_widget()
+            .mouse_interaction(child, layout, cursor, viewport, renderer)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        self.child
+            .as_widget_mut()
+            .operate(child, layout, renderer, operation);
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'b>,
+        renderer: &iced::Renderer,
+        viewport: &iced::Rectangle,
+        translation: iced::Vector,
+    ) -> Option<iced::advanced::overlay::Element<'b, Message, Theme, iced::Renderer>> {
+        let child = tree.children.first_mut()?;
+        self.child
+            .as_widget_mut()
+            .overlay(child, layout, renderer, viewport, translation)
+    }
+}
+
+impl<'a> From<MarkedWord<'a>> for Element<'a, Message> {
+    fn from(word: MarkedWord<'a>) -> Self {
+        Element::new(word)
+    }
+}
+
+fn text_width(sample: &str, font: Font, size: f32) -> f32 {
+    if sample.is_empty() {
+        return 0.0;
+    }
+    let paragraph = <iced::Renderer as iced::advanced::text::Renderer>::Paragraph::with_text(
+        iced::advanced::text::Text {
+            content: sample,
+            bounds: Size::new(10_000.0, 10_000.0),
+            size: size.into(),
+            line_height: iced::advanced::text::LineHeight::Relative(LEADING),
+            font,
+            align_x: iced::advanced::text::Alignment::Left,
+            align_y: iced::alignment::Vertical::Top,
+            shaping: iced::advanced::text::Shaping::Advanced,
+            wrapping: iced::advanced::text::Wrapping::None,
+        },
+    );
+    paragraph.min_width()
 }
 
 fn selection_color(dark: bool) -> Color {
@@ -3934,28 +4307,41 @@ impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for ActiveHi
         shell: &mut iced::advanced::Shell<'_, Message>,
         viewport: &iced::Rectangle,
     ) {
-        if let Some(child) = tree.children.first_mut() {
+        let mouse = matches!(event, iced::Event::Mouse(_) | iced::Event::Touch(_));
+        if !mouse && let Some(child) = tree.children.first_mut() {
             self.child.as_widget_mut().update(
                 child, event, layout, cursor, renderer, clipboard, shell, viewport,
             );
         }
-        let Some(absolute) = cursor.position() else {
-            return;
-        };
-        if !layout.bounds().contains(absolute) {
-            return;
-        }
-        let Some(byte) = self.byte_at(layout, absolute) else {
-            return;
-        };
+        let bounds = layout.bounds();
         match event {
-            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
-                if region_at(layout, absolute) != Some(1) {
-                    shell.publish(Message::SelectFrom(byte));
-                }
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left))
+                if cursor
+                    .position()
+                    .is_some_and(|point| bounds.contains(point)) =>
+            {
+                let point = cursor.position().unwrap_or_default();
+                let Some(byte) = self.byte_at(layout, point) else {
+                    return;
+                };
+                shell.publish(Message::SelectFrom(byte));
+                shell.capture_event();
             }
-            iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) if self.dragging => {
-                shell.publish(Message::ExtendTo(byte));
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. })
+                if self.dragging && landed(cursor).is_some_and(|point| in_band(bounds, point)) =>
+            {
+                let Some(point) = landed(cursor) else {
+                    return;
+                };
+                let clamped = iced::Point::new(
+                    point.x.clamp(bounds.x, bounds.x + bounds.width.max(1.0)),
+                    point
+                        .y
+                        .clamp(bounds.y, bounds.y + (bounds.height - 0.5).max(0.0)),
+                );
+                if let Some(byte) = self.byte_at(layout, clamped) {
+                    shell.publish(Message::ExtendTo(byte));
+                }
             }
             _ => {}
         }
@@ -5122,6 +5508,32 @@ mod tests {
 
         let toggled = applied("say **hello** there", caret(0, 8), super::FormatKind::Bold);
         assert_eq!(toggled, "say hello there");
+    }
+
+    #[test]
+    fn a_highlight_covers_the_letters_not_the_whole_word() {
+        let pieces = super::pieces_between("hello", 0, 0..5, Carry::default(), true, true);
+        let paint = iced::Color::from_rgb8(0x66, 0xA5, 0xE1);
+        let shaded = super::shade(pieces, Some((1, 4)), paint);
+        let marked: Vec<_> = shaded
+            .iter()
+            .filter(|piece| piece.look.background.is_some())
+            .map(|piece| piece.text.as_str())
+            .collect();
+        assert_eq!(marked, ["ell"]);
+        assert_eq!(super::line_bounds("one\ntwo", 5), (4, 7));
+        assert_eq!(super::covered(Some((3, 6)), 4, 7), Some((0, 2)));
+        assert_eq!(super::covered(Some((0, 1)), 4, 7), None);
+
+        let mut body = super::NoteBody::new();
+        body.load("alpha beta\ngamma delta");
+        body.place_byte(0);
+        let window = body.live_at;
+        let gamma = body.text().find("gamma").unwrap_or(0);
+        body.place_byte_soft(gamma);
+        assert_eq!(body.live_at, window);
+        assert!(body.caret_byte() > 8);
+        assert_eq!(body.open_line(), 0);
     }
 
     #[test]
