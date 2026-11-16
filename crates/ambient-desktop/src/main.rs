@@ -880,8 +880,8 @@ impl App {
                 };
                 let dx = x - self.press_x;
                 let dy = y - self.press_y;
-                // A click jitters. Do not turn that into a new highlight.
-                if dx * dx + dy * dy < 36.0 {
+                // A click moves a little. A drag has to leave the letter.
+                if dx * dx + dy * dy < 1_024.0 {
                     return Task::none();
                 }
                 self.dragged = true;
@@ -899,6 +899,10 @@ impl App {
                 if self.drag_from.take().is_some() {
                     if dragged || kept {
                         self.body.end_select();
+                        if dragged {
+                            // The next click places the caret. It is not a second click.
+                            self.last_press = None;
+                        }
                     } else {
                         let byte = markdown::snap_caret(&self.body.text(), self.body.caret_byte());
                         self.body.place_byte(byte);

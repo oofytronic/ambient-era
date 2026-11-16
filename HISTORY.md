@@ -6,7 +6,7 @@ When a turn changes direction, scope, or a locked design choice, add an entry he
 
 ## 2026-11-15 — a click leaves a highlight, a drag changes the selection
 
-A click puts the caret down and clears the selection, so the pill goes away. The pointer has to move before that click becomes a range. A click does not land on a hidden mark: the closer is the outside edge, so the highlight stays on the letters it already covers. A second click still selects the word, a third the line, and shift still extends. This supersedes the part of the selection note that treated every press as the start of a range.
+A highlight closes at the next `==` even when a space sits inside it, and the button trims that space instead of leaving the mark open. An open mark was painting every later letter, so a click could not leave it. A click still clears the selection. The pointer has to move a real distance before that click becomes a range, and the click after a drag is not a second click. This supersedes the note that a small movement was enough to start a range.
 
 ## 2026-11-15 — a selection can be formatted where it sits, and a book is a contents note
 

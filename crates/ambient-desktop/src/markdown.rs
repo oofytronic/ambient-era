@@ -1215,7 +1215,7 @@ fn token(line: &str, index: usize, limit: usize, carry: Carry) -> Option<(usize,
     }
     if top(carry) == Some(Open::Highlight)
         && rest.starts_with("==")
-        && can_close(line, index, 2, limit)
+        && highlight_closes(line, index, limit)
     {
         return Some((2, true));
     }
@@ -1669,6 +1669,12 @@ fn can_close(line: &str, index: usize, len: usize, limit: usize) -> bool {
             .and_then(|prefix| prefix.chars().next_back())
             .is_some_and(|char| !char.is_whitespace());
     before && edge_after_limited(line, index.saturating_add(len), limit)
+}
+
+/// A highlight closes at `==` even when the selection left a space inside it.
+/// Otherwise the mark stays open and paints every letter after it.
+fn highlight_closes(line: &str, index: usize, limit: usize) -> bool {
+    edge_after_limited(line, index.saturating_add(2), limit)
 }
 
 fn after_mark(line: &str, index: usize, len: usize, limit: usize) -> bool {
@@ -2411,8 +2417,11 @@ fn wrap(text: &str, cursor: &text_editor::Cursor, left: &str, right: &str) -> Ch
             from = word_from;
             to = word_to;
         }
+    } else {
+        (from, to) = trim_edges(text, from, to);
     }
     (from, to) = expand_pairs(text, from, to, left);
+    (from, to) = trim_edges(text, from, to);
     let inner = text.get(from..to).unwrap_or("");
     if let Some(stripped) = peel(inner, left, right) {
         return rewrite(text, from, to, stripped, stripped.len(), None);
@@ -2433,6 +2442,29 @@ fn wrap(text: &str, cursor: &text_editor::Cursor, left: &str, right: &str) -> Ch
         insert.len()
     };
     rewrite(text, from, to, &insert, cursor_at, None)
+}
+
+fn trim_edges(text: &str, mut from: usize, mut to: usize) -> (usize, usize) {
+    let Some(inner) = text.get(from..to) else {
+        return (from, to);
+    };
+    let lead = inner
+        .chars()
+        .take_while(|char| char.is_whitespace())
+        .map(char::len_utf8)
+        .sum::<usize>();
+    let trail = inner
+        .chars()
+        .rev()
+        .take_while(|char| char.is_whitespace())
+        .map(char::len_utf8)
+        .sum::<usize>();
+    if lead.saturating_add(trail) >= inner.len() {
+        return (from, to);
+    }
+    from = from.saturating_add(lead);
+    to = to.saturating_sub(trail);
+    (from, to)
 }
 
 /// A mark pair that overlaps the range is part of the selection. Wrapping then
@@ -5694,6 +5726,44 @@ mod tests {
 
         let toggled = applied("say **hello** there", caret(0, 8), super::FormatKind::Bold);
         assert_eq!(toggled, "say hello there");
+    }
+
+    #[test]
+    fn a_highlight_closes_even_when_a_space_got_inside() {
+        let line = "==sun == more";
+        let (spans, carry) = paint(line, Carry::default());
+        assert_eq!(carry.len, 0);
+        assert!(spans.iter().any(|(range, mark)| {
+            mark.flags & super::HIGH != 0
+                && line
+                    .get(range.start..range.end)
+                    .is_some_and(|text| text.contains("sun"))
+        }));
+        assert!(spans.iter().all(|(range, mark)| {
+            let text = line.get(range.start..range.end).unwrap_or("");
+            !text.contains("more") || mark.flags & super::HIGH == 0
+        }));
+
+        let across = paint("more==", paint("==sun", Carry::default()).1);
+        assert_eq!(across.1.len, 0);
+        assert!(hit(
+            &across.0,
+            "more==",
+            "more",
+            Mark {
+                face: Face::Text,
+                flags: super::HIGH,
+            }
+        ));
+
+        let sloppy = super::text_editor::Cursor {
+            position: super::text_editor::Position { line: 0, column: 4 },
+            selection: Some(super::text_editor::Position { line: 0, column: 0 }),
+        };
+        assert_eq!(
+            applied("sun more", sloppy, super::FormatKind::Highlight),
+            "==sun== more"
+        );
     }
 
     #[test]
