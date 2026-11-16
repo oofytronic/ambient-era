@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-16 — a new note starts in the title
+
+A new note starts in the title. The paragraph caret goes away while the title is being written, so a key does not land in both and jump down. Clicking the paragraph brings that caret back.
+
 ## 2026-11-15 — a click leaves a highlight, a drag changes the selection
 
 A click moves the caret and drops the selection anchor. The caret move was leaving that anchor behind, so the range followed the pointer and a highlight could not be left. This supersedes the note that treated the open mark as the cause.

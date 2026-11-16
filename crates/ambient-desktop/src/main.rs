@@ -816,7 +816,7 @@ impl App {
             }
             Message::NewNote => {
                 self.clear_editor();
-                Task::none()
+                iced::widget::operation::focus(iced::widget::Id::new("note-title"))
             }
             Message::TitleChanged(title) => {
                 if title != self.title_text {

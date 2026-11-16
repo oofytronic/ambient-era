@@ -4546,12 +4546,25 @@ impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for ActiveHi
         viewport: &iced::Rectangle,
     ) {
         let mouse = matches!(event, iced::Event::Mouse(_) | iced::Event::Touch(_));
-        if !mouse && let Some(child) = tree.children.first_mut() {
+        let bounds = layout.bounds();
+        let inside = cursor
+            .position()
+            .is_some_and(|point| bounds.contains(point));
+        // A press on the title never reaches this editor, so its caret stayed
+        // on and the next key went to both lines. Hand that press through.
+        let press_outside = !inside
+            && matches!(
+                event,
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left))
+                    | iced::Event::Touch(iced::touch::Event::FingerPressed { .. })
+            );
+        if (!mouse || press_outside)
+            && let Some(child) = tree.children.first_mut()
+        {
             self.child.as_widget_mut().update(
                 child, event, layout, cursor, renderer, clipboard, shell, viewport,
             );
         }
-        let bounds = layout.bounds();
         match event {
             iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left))
                 if cursor
