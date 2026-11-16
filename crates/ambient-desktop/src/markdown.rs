@@ -293,6 +293,11 @@ impl NoteBody {
             position,
             selection,
         });
+        if selection.is_none() {
+            // Moving the caret does not drop the anchor. Clear it or the
+            // range follows the click.
+            self.quench();
+        }
         self.shown_line = position.line;
         if let Some((start, end)) = self.live_at {
             let mut local = local_cursor(&text, &self.editor.cursor(), start, end);
@@ -321,7 +326,11 @@ impl NoteBody {
     /// Puts the caret back after `load` replaced the document.
     pub(super) fn place(&mut self, cursor: text_editor::Cursor) {
         self.shown_line = cursor.position.line;
+        let clear = cursor.selection.is_none();
         self.editor.move_to(cursor);
+        if clear {
+            self.quench();
+        }
         self.sync_live();
     }
 
@@ -342,6 +351,7 @@ impl NoteBody {
             position,
             selection: None,
         });
+        self.quench();
         self.shown_line = position.line;
         self.sync_live();
     }
@@ -354,7 +364,25 @@ impl NoteBody {
             position,
             selection: None,
         });
+        self.quench();
         self.shown_line = position.line;
+    }
+
+    /// `move_to` leaves a selection in place when the new cursor has none.
+    /// A left motion is the only public way to drop that anchor, and parking
+    /// both ends on the caret keeps it from stepping backward.
+    fn quench(&mut self) {
+        let cursor = self.editor.cursor();
+        if cursor.selection.is_none() {
+            return;
+        }
+        let position = cursor.position;
+        self.editor.move_to(text_editor::Cursor {
+            position,
+            selection: Some(position),
+        });
+        self.editor
+            .perform(text_editor::Action::Move(text_editor::Motion::Left));
     }
 
     /// The line whose word is open. Not the caret, while a drag is on another line.
@@ -5703,6 +5731,16 @@ mod tests {
     fn a_drag_selects_words_for_delete_and_bold() {
         let mut body = super::NoteBody::new();
         body.load("one two three");
+        body.select_between(4, 13);
+        assert_eq!(body.selection().as_deref(), Some("two three"));
+        body.place_byte(0);
+        assert!(body.selection().is_none());
+        assert_eq!(body.caret_byte(), 0);
+        body.select_between(4, 13);
+        body.place_byte_soft(8);
+        assert!(body.selection().is_none());
+        assert_eq!(body.caret_byte(), 8);
+
         body.select_between(4, 13);
         assert_eq!(body.selection().as_deref(), Some("two three"));
         assert!(body.edit(&super::text_editor::Action::Edit(

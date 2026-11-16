@@ -6,7 +6,7 @@ When a turn changes direction, scope, or a locked design choice, add an entry he
 
 ## 2026-11-15 — a click leaves a highlight, a drag changes the selection
 
-A highlight closes at the next `==` even when a space sits inside it, and the button trims that space instead of leaving the mark open. An open mark was painting every later letter, so a click could not leave it. A click still clears the selection. The pointer has to move a real distance before that click becomes a range, and the click after a drag is not a second click. This supersedes the note that a small movement was enough to start a range.
+A click moves the caret and drops the selection anchor. The caret move was leaving that anchor behind, so the range followed the pointer and a highlight could not be left. This supersedes the note that treated the open mark as the cause.
 
 ## 2026-11-15 — a selection can be formatted where it sits, and a book is a contents note
 
