@@ -198,6 +198,12 @@ struct App {
     reading: bool,
     /// A missing chapter to create once the open note finishes saving.
     pending_chapter: Option<String>,
+    /// The note list on the left. Memory only.
+    show_list: bool,
+    /// The chapter panel on the right. Memory only.
+    show_context: bool,
+    /// The chapter panel was closed by hand, so a book does not open it again.
+    context_shut: bool,
 }
 
 /// Which side of an invite this computer is on. One path, not both.
@@ -239,6 +245,8 @@ enum Message {
     ShowNotes,
     ShowTasks,
     ShowChat,
+    ToggleList,
+    ToggleContext,
     AutoSync,
     ToggleSyncPop,
     ToggleRelay,
@@ -702,6 +710,9 @@ impl App {
             book_id: None,
             reading: false,
             pending_chapter: None,
+            show_list: true,
+            show_context: false,
+            context_shut: false,
         };
         let saved = profile::load_profile(&app.dir);
         app.appearance = saved.appearance;
@@ -992,6 +1003,15 @@ impl App {
                     }
                     self.reload_chat();
                 }
+                Task::none()
+            }
+            Message::ToggleList => {
+                self.show_list = !self.show_list;
+                Task::none()
+            }
+            Message::ToggleContext => {
+                self.show_context = !self.show_context;
+                self.context_shut = !self.show_context;
                 Task::none()
             }
             Message::AutoSync => self.begin_sync(),
@@ -1439,13 +1459,21 @@ impl App {
             .height(Fill)
             .into();
         }
-        column![
-            self.toolbar(),
-            hairline(),
-            row![self.sidebar(), hairline_v(), self.main()].height(Fill)
-        ]
-        .height(Fill)
-        .into()
+        let mut body = row![].height(Fill);
+        if self.show_list {
+            body = body.push(self.sidebar()).push(hairline_v());
+        }
+        body = body.push(self.edge_toggle(true));
+        body = body.push(self.main());
+        if self.context_room() {
+            body = body.push(self.edge_toggle(false));
+            if self.show_context {
+                body = body.push(hairline_v()).push(self.context_pane());
+            }
+        }
+        column![self.toolbar(), hairline(), body]
+            .height(Fill)
+            .into()
     }
 
     fn toolbar(&self) -> Element<'_, Message> {
@@ -2374,6 +2402,19 @@ impl App {
     fn notes_pane(&self) -> Element<'_, Message> {
         let ink = self.ink();
         let mut body = column![].spacing(14).height(Fill);
+        if self.compact() && self.detail {
+            body = body.push(
+                row![
+                    ghost_label("‹", Message::ShowNotes),
+                    space().width(Fill),
+                    ghost_label(
+                        if self.show_context { "›" } else { "‹" },
+                        Message::ToggleContext,
+                    ),
+                ]
+                .align_y(iced::Alignment::Center),
+            );
+        }
         if !self.open_error.is_empty() {
             body = body.push(text(format!(
                 "Could not open this folder. {}",
@@ -3288,7 +3329,12 @@ impl App {
         let chrome = if self.compact() {
             self.gutter_x() * 2.0
         } else {
-            self.side_width() + self.gutter_x() * 2.0 + 1.0
+            let side = if self.show_list {
+                self.side_width() + 1.0
+            } else {
+                0.0
+            };
+            side + self.gutter_x() * 2.0
         };
         (self.size.width - chrome).max(120.0)
     }
@@ -3878,6 +3924,7 @@ impl App {
         } else {
             page = page.push(
                 text_input("Title", &self.title_text)
+                    .id(iced::widget::Id::new("note-title"))
                     .on_input(Message::TitleChanged)
                     .font(serif())
                     .size(if self.compact() { 32.0 } else { 36.0 })
@@ -3897,13 +3944,13 @@ impl App {
             );
             page = page.push(self.note_media());
         }
-        let Some(rail) = self.chapter_rail(&chapters) else {
-            return page.into();
-        };
-        if self.compact() {
+        if self.compact()
+            && self.show_context
+            && let Some(rail) = self.chapter_rail(&chapters)
+        {
             return column![rail, page].spacing(12).height(Fill).into();
         }
-        row![rail, page].spacing(18).height(Fill).into()
+        page.into()
     }
 
     fn editor_page(&self) -> Element<'_, Message> {
@@ -3990,16 +4037,76 @@ impl App {
                 .style(list_row(here)),
             );
         }
-        let scroll = vscroll(list).width(if self.compact() {
-            Fill
-        } else {
-            iced::Length::Fixed(220.0)
-        });
+        let scroll = vscroll(list).width(Fill);
         if self.compact() {
             Some(scroll.height(160).into())
         } else {
             Some(scroll.height(Fill).into())
         }
+    }
+
+    fn context_room(&self) -> bool {
+        self.sheet == Sheet::None && self.screen == Screen::Notes
+    }
+
+    fn context_pane(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let chapters = self.chapters(self.reading);
+        let mut block = column![text("Chapters").font(serif()).size(18)]
+            .spacing(10)
+            .padding(16)
+            .width(Fill)
+            .height(Fill);
+        if let Some(rail) = self.chapter_rail(&chapters) {
+            block = block.push(rail);
+        } else {
+            block = block.push(
+                text("Two links in a note make a book. The chapters land here.")
+                    .size(13)
+                    .color(ink.muted),
+            );
+        }
+        container(block)
+            .width(240)
+            .height(Fill)
+            .style(surface_pane)
+            .into()
+    }
+
+    fn edge_toggle(&self, list: bool) -> Element<'_, Message> {
+        let open = if list {
+            self.show_list
+        } else {
+            self.show_context
+        };
+        let mark = match (list, open) {
+            (true, true) | (false, false) => "‹",
+            _ => "›",
+        };
+        let hint = match (list, open) {
+            (true, true) => "Hide the list",
+            (true, false) => "Show the list",
+            (false, true) => "Hide chapters",
+            (false, false) => "Show chapters",
+        };
+        let message = if list {
+            Message::ToggleList
+        } else {
+            Message::ToggleContext
+        };
+        let face = button(
+            container(text(mark).size(18))
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(iced::alignment::Vertical::Center),
+        )
+        .width(28)
+        .height(Fill)
+        .padding(0)
+        .on_press(message)
+        .style(icon_style);
+        hover_label(face, hint)
     }
 
     fn read_pages(&self, chapters: &[Chapter]) -> Element<'_, Message> {
@@ -4123,6 +4230,9 @@ impl App {
 
     fn track_book(&mut self) {
         let names = markdown::chapter_names(&self.body.text());
+        if names.len() >= 2 && !self.context_shut {
+            self.show_context = true;
+        }
         if names.len() >= 2 {
             if let Some(id) = self.selected.clone() {
                 if self.book_id.as_ref().is_some_and(|book| book != &id)

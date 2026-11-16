@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-16 — chapters sit in a panel on the right
+
+The chapter list is a panel on the right, with the word count and Read or Write. It is not beside the title. A book opens that panel. Closing it keeps it closed. The list on the left hides the same way. Each edge has one button. On a narrow window the same button shows the chapters above the page, and the other returns to the list.
+
 ## 2026-11-16 — a new note starts in the title
 
 A new note starts in the title. The paragraph caret goes away while the title is being written, so a key does not land in both and jump down. Clicking the paragraph brings that caret back.
