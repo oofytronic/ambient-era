@@ -2937,6 +2937,42 @@ fn heading_px(level: u8) -> f32 {
     }
 }
 
+/// A click on a hidden mark lands beside it, not on the mark.
+///
+/// The closer is the outside edge, so typing there does not keep the highlight
+/// going. The opener is the inside edge.
+pub(super) fn snap_caret(text: &str, byte: usize) -> usize {
+    let byte = byte.min(text.len());
+    let start = byte.saturating_sub(2);
+    let end = byte.saturating_add(2).min(text.len());
+    let window = text.as_bytes().get(start..end).unwrap_or(b"");
+    if !window
+        .iter()
+        .any(|byte| matches!(byte, b'=' | b'*' | b'_' | b'~' | b'`'))
+    {
+        return byte;
+    }
+    let carries = line_carries(text);
+    let line_no = byte_pos(text, byte).line;
+    let ls = line_start(text, line_no);
+    let le = line_end(text, line_no);
+    let line = text.get(ls..le).unwrap_or("");
+    let local = byte.saturating_sub(ls).min(line.len());
+    let carry = carries.get(line_no).copied().unwrap_or_default();
+    let (pairs, _) = scan_pairs(line, carry);
+    for pair in pairs {
+        let open_end = pair.start.saturating_add(pair.open_len);
+        let close_at = pair.end.saturating_sub(pair.close_len);
+        if pair.local_open && pair.start <= local && local < open_end {
+            return ls.saturating_add(open_end.min(line.len()));
+        }
+        if local >= close_at && local < pair.end {
+            return ls.saturating_add(pair.end.min(line.len()));
+        }
+    }
+    byte
+}
+
 fn line_carries(text: &str) -> Vec<Carry> {
     cache_lines(text).into_iter().map(|row| row.carry).collect()
 }
@@ -3682,13 +3718,18 @@ impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for PageText
                     .position()
                     .is_some_and(|point| bounds.contains(point)) =>
             {
+                let point = cursor.position().unwrap_or_default();
                 let byte = hit_byte(
                     &self.pieces,
                     self.fill,
                     bounds.size(),
-                    point_in(bounds, cursor.position().unwrap_or_default()),
+                    point_in(bounds, point),
                 );
-                shell.publish(Message::SelectFrom(byte));
+                shell.publish(Message::SelectFrom {
+                    byte,
+                    x: point.x,
+                    y: point.y,
+                });
                 shell.capture_event();
                 return;
             }
@@ -3704,7 +3745,11 @@ impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for PageText
                     bounds.size(),
                     point_in(bounds, point),
                 );
-                shell.publish(Message::ExtendTo(byte));
+                shell.publish(Message::ExtendTo {
+                    byte,
+                    x: point.x,
+                    y: point.y,
+                });
                 return;
             }
             _ => {}
@@ -4110,14 +4155,26 @@ impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for ByteBand
                     .position()
                     .is_some_and(|point| bounds.contains(point)) =>
             {
-                shell.publish(Message::SelectFrom(self.byte));
+                let point = cursor.position().unwrap_or_default();
+                shell.publish(Message::SelectFrom {
+                    byte: self.byte,
+                    x: point.x,
+                    y: point.y,
+                });
                 shell.capture_event();
                 return;
             }
             iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. })
                 if self.dragging && landed(cursor).is_some_and(|point| in_band(bounds, point)) =>
             {
-                shell.publish(Message::ExtendTo(self.byte));
+                let Some(point) = landed(cursor) else {
+                    return;
+                };
+                shell.publish(Message::ExtendTo {
+                    byte: self.byte,
+                    x: point.x,
+                    y: point.y,
+                });
                 return;
             }
             _ => {}
@@ -4445,7 +4502,11 @@ impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for ActiveHi
                 let Some(byte) = self.byte_at(layout, point) else {
                     return;
                 };
-                shell.publish(Message::SelectFrom(byte));
+                shell.publish(Message::SelectFrom {
+                    byte,
+                    x: point.x,
+                    y: point.y,
+                });
                 shell.capture_event();
             }
             iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. })
@@ -4461,7 +4522,11 @@ impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for ActiveHi
                         .clamp(bounds.y, bounds.y + (bounds.height - 0.5).max(0.0)),
                 );
                 if let Some(byte) = self.byte_at(layout, clamped) {
-                    shell.publish(Message::ExtendTo(byte));
+                    shell.publish(Message::ExtendTo {
+                        byte,
+                        x: point.x,
+                        y: point.y,
+                    });
                 }
             }
             _ => {}
@@ -5629,6 +5694,21 @@ mod tests {
 
         let toggled = applied("say **hello** there", caret(0, 8), super::FormatKind::Bold);
         assert_eq!(toggled, "say hello there");
+    }
+
+    #[test]
+    fn a_click_beside_a_highlight_does_not_land_on_the_mark() {
+        let text = "see ==sun== now";
+        assert_eq!(super::snap_caret(text, 6), 6);
+        assert_eq!(super::snap_caret(text, 4), 6);
+        assert_eq!(super::snap_caret(text, 9), 11);
+        assert_eq!(super::snap_caret(text, 10), 11);
+        assert_eq!(super::snap_caret(text, 12), 12);
+
+        let marked = applied("see sun now", caret(0, 4), super::FormatKind::Highlight);
+        assert_eq!(marked, "see ==sun== now");
+        let off = applied(marked.as_str(), caret(0, 7), super::FormatKind::Highlight);
+        assert_eq!(off, "see sun now");
     }
 
     #[test]

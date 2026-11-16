@@ -177,6 +177,13 @@ struct App {
     shift_down: bool,
     /// True only while the button that started a selection is still down.
     pointer_down: bool,
+    /// Where that press landed. A small move is still a click.
+    press_x: f32,
+    press_y: f32,
+    /// The pointer moved far enough to be a drag, not a click.
+    dragged: bool,
+    /// This press already chose a word, a line, or a shift range.
+    kept_click: bool,
     note_search: bool,
     task_search: bool,
     chat_search: bool,
@@ -208,10 +215,18 @@ enum Message {
     NewNote,
     TitleChanged(String),
     BodyEdited(text_editor::Action),
-    /// Press on a letter. Starts a drag and puts the caret there.
-    SelectFrom(usize),
-    /// Drag across letters. The range is the source under the pointer.
-    ExtendTo(usize),
+    /// Press on a letter. A click puts the caret there. A drag starts from there.
+    SelectFrom {
+        byte: usize,
+        x: f32,
+        y: f32,
+    },
+    /// Drag across letters, once the pointer has actually moved.
+    ExtendTo {
+        byte: usize,
+        x: f32,
+        y: f32,
+    },
     /// The mouse button lifted.
     SelectStop,
     SetOpenTask {
@@ -673,6 +688,10 @@ impl App {
             command_down: false,
             shift_down: false,
             pointer_down: false,
+            press_x: 0.0,
+            press_y: 0.0,
+            dragged: false,
+            kept_click: false,
             note_search: false,
             task_search: false,
             chat_search: false,
@@ -839,15 +858,19 @@ impl App {
                 }
                 self.note_follow(true)
             }
-            Message::SelectFrom(byte) => {
+            Message::SelectFrom { byte, x, y } => {
                 if self.command_down && self.try_open_at(byte) {
                     self.drag_from = None;
+                    self.dragged = false;
                     return Task::none();
                 }
+                self.press_x = x;
+                self.press_y = y;
+                self.dragged = false;
                 self.arm_press(byte);
                 self.note_follow(false)
             }
-            Message::ExtendTo(byte) => {
+            Message::ExtendTo { byte, x, y } => {
                 if !self.pointer_down {
                     self.drag_from = None;
                     return Task::none();
@@ -855,14 +878,31 @@ impl App {
                 let Some(anchor) = self.drag_from else {
                     return Task::none();
                 };
+                let dx = x - self.press_x;
+                let dy = y - self.press_y;
+                // A click jitters. Do not turn that into a new highlight.
+                if dx * dx + dy * dy < 36.0 {
+                    return Task::none();
+                }
+                self.dragged = true;
+                let byte = markdown::snap_caret(&self.body.text(), byte);
                 self.body.select_between(anchor, byte);
                 Task::none()
             }
             Message::SelectStop => {
                 let was_down = self.pointer_down;
+                let dragged = self.dragged;
+                let kept = self.kept_click;
                 self.pointer_down = false;
+                self.dragged = false;
+                self.kept_click = false;
                 if self.drag_from.take().is_some() {
-                    self.body.end_select();
+                    if dragged || kept {
+                        self.body.end_select();
+                    } else {
+                        let byte = markdown::snap_caret(&self.body.text(), self.body.caret_byte());
+                        self.body.place_byte(byte);
+                    }
                 }
                 if was_down {
                     self.note_follow(false)
@@ -3767,13 +3807,16 @@ impl App {
 
     fn arm_press(&mut self, byte: usize) {
         self.pointer_down = true;
+        self.kept_click = false;
         let text = self.body.text();
+        let byte = markdown::snap_caret(&text, byte);
         if self.shift_down {
             let anchor = self
                 .body
                 .anchor_byte()
                 .unwrap_or_else(|| self.body.caret_byte());
             self.drag_from = Some(anchor);
+            self.kept_click = true;
             self.body.select_between(anchor, byte);
             self.last_press = None;
             return;
@@ -3792,6 +3835,7 @@ impl App {
             let (from, to) = markdown::line_bounds(&text, byte);
             self.body.select_between(from, to);
             self.drag_from = Some(from);
+            self.kept_click = true;
             self.last_press = None;
             return;
         }
@@ -3803,6 +3847,7 @@ impl App {
             let (from, to) = markdown::word_bounds(&text, byte);
             self.body.select_between(from, to);
             self.drag_from = Some(from);
+            self.kept_click = true;
             self.last_press = Some((Instant::now(), byte, 2));
             return;
         }

@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-15 — a click leaves a highlight, a drag changes the selection
+
+A click puts the caret down and clears the selection, so the pill goes away. The pointer has to move before that click becomes a range. A click does not land on a hidden mark: the closer is the outside edge, so the highlight stays on the letters it already covers. A second click still selects the word, a third the line, and shift still extends. This supersedes the part of the selection note that treated every press as the start of a range.
+
 ## 2026-11-15 — a selection can be formatted where it sits, and a book is a contents note
 
 After the button comes up, a range that is more than a caret shows a pill above those letters. The pill is bold, italic, strike, highlight, link, copy, cut, and paste. Paste replaces the selection. Escape clears it. Heading, list, task, quote, and the block inserts stay on the bar. The pill uses the same actions as the bar.
