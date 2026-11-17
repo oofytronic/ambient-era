@@ -2123,6 +2123,21 @@ pub(super) fn chapter_names(text: &str) -> Vec<String> {
     names
 }
 
+/// The word for the pieces, if the group's first line says `Kind: issues`.
+pub(super) fn group_kind(text: &str) -> Option<String> {
+    let line = text.lines().find(|line| !line.trim().is_empty())?;
+    let line = line.trim();
+    let rest = line
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("kind:"))
+        .then(|| line.get(5..).unwrap_or(""))?;
+    let word = rest.trim();
+    if word.is_empty() || word.chars().count() > 32 {
+        return None;
+    }
+    Some(word.to_owned())
+}
+
 /// Words in a chapter. Marks that are stuck to a word still count as that word.
 pub(super) fn word_count(text: &str) -> usize {
     text.split_whitespace().count()
@@ -5912,6 +5927,11 @@ mod tests {
             "[[One]]\nsee [[Two|shown]] and [[one]]\n![[picture]]\n```\n[[Hidden]]\n```\n[[Three]]\n",
         );
         assert_eq!(names, ["One", "Two", "Three"]);
+        assert_eq!(
+            super::group_kind("Kind: issues\n[[One]]\n[[Two]]"),
+            Some("issues".to_owned())
+        );
+        assert_eq!(super::group_kind("[[One]]\n[[Two]]"), None);
         assert_eq!(super::word_count("one  two\nthree"), 3);
         let mut body = super::NoteBody::new();
         body.load("alpha\nbeta gamma");

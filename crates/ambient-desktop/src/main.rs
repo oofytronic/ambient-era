@@ -202,8 +202,10 @@ struct App {
     show_list: bool,
     /// The chapter panel on the right. Memory only.
     show_context: bool,
-    /// The chapter panel was closed by hand, so a book does not open it again.
+    /// The chapter panel was closed by hand, so a group does not open it again.
     context_shut: bool,
+    /// Title last checked for a group, and that group's id when one names it.
+    group_cache: Option<(String, Option<String>)>,
 }
 
 /// Which side of an invite this computer is on. One path, not both.
@@ -713,6 +715,7 @@ impl App {
             show_list: true,
             show_context: false,
             context_shut: false,
+            group_cache: None,
         };
         let saved = profile::load_profile(&app.dir);
         app.appearance = saved.appearance;
@@ -3362,7 +3365,7 @@ impl App {
                 space().width(14),
                 format_caption("Insert"),
                 format_button("Link", "Link", FormatKind::Link),
-                format_button("[[]]", "Wikilink", FormatKind::Wiki),
+                format_button("[[]]", "Link a note", FormatKind::Wiki),
                 format_button("Image", "Image", FormatKind::Image),
                 format_button("Table", "Table", FormatKind::Table),
                 format_button("—", "Rule", FormatKind::Rule),
@@ -4001,8 +4004,16 @@ impl App {
             return None;
         }
         let ink = self.ink();
+        let source = self.book_text(self.book_id.as_deref().unwrap_or(""));
+        let mut head = column![self.group_heading()].spacing(4).width(Fill);
+        if let Some(kind) = markdown::group_kind(&source) {
+            head = head.push(text(kind).size(12).color(ink.muted));
+        }
+        if !self.on_group_note() && !self.title_text.trim().is_empty() {
+            head = head.push(text(self.title_text.clone()).size(14));
+        }
         let total: usize = chapters.iter().map(|chapter| chapter.words).sum();
-        let mut list = column![
+        head = head.push(
             row![
                 text(words_label(total)).size(12).color(ink.muted),
                 space().width(Fill),
@@ -4011,10 +4022,9 @@ impl App {
                     Message::ToggleRead,
                 ),
             ]
-            .align_y(iced::Alignment::Center)
-        ]
-        .spacing(4)
-        .width(Fill);
+            .align_y(iced::Alignment::Center),
+        );
+        let mut list = column![].spacing(4).width(Fill);
         for chapter in chapters {
             let here = self.book_id.as_deref() != self.selected.as_deref()
                 && !self.title_text.is_empty()
@@ -4038,11 +4048,38 @@ impl App {
             );
         }
         let scroll = vscroll(list).width(Fill);
-        if self.compact() {
-            Some(scroll.height(160).into())
+        let body = if self.compact() {
+            column![head, scroll.height(180)].spacing(8).width(Fill)
         } else {
-            Some(scroll.height(Fill).into())
+            column![head, scroll.height(Fill)]
+                .spacing(8)
+                .width(Fill)
+                .height(Fill)
+        };
+        Some(body.into())
+    }
+
+    fn on_group_note(&self) -> bool {
+        match (&self.book_id, &self.selected) {
+            (Some(book), Some(id)) => book == id,
+            (Some(book), None) => book.is_empty(),
+            _ => false,
         }
+    }
+
+    fn group_heading(&self) -> Element<'_, Message> {
+        let title = self.book_title();
+        if self.on_group_note() {
+            return text(title).font(serif()).size(18).into();
+        }
+        let Some(id) = self.book_id.clone().filter(|id| !id.is_empty()) else {
+            return text(title).font(serif()).size(18).into();
+        };
+        button(text(title).font(serif()).size(18))
+            .padding(0)
+            .on_press(Message::Select(id))
+            .style(ghost_style)
+            .into()
     }
 
     fn context_room(&self) -> bool {
@@ -4051,17 +4088,13 @@ impl App {
 
     fn context_pane(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        let chapters = self.chapters(self.reading);
-        let mut block = column![text("Chapters").font(serif()).size(18)]
-            .spacing(10)
-            .padding(16)
-            .width(Fill)
-            .height(Fill);
+        let chapters = self.chapters(false);
+        let mut block = column![].spacing(10).padding(16).width(Fill).height(Fill);
         if let Some(rail) = self.chapter_rail(&chapters) {
             block = block.push(rail);
         } else {
             block = block.push(
-                text("Two links in a note make a book. The chapters land here.")
+                text("Link two notes and they gather here, under this note's name. A first line Kind: issues names the pieces.")
                     .size(13)
                     .color(ink.muted),
             );
@@ -4086,8 +4119,8 @@ impl App {
         let hint = match (list, open) {
             (true, true) => "Hide the list",
             (true, false) => "Show the list",
-            (false, true) => "Hide chapters",
-            (false, false) => "Show chapters",
+            (false, true) => "Hide the group",
+            (false, false) => "Show the group",
         };
         let message = if list {
             Message::ToggleList
@@ -4111,14 +4144,22 @@ impl App {
 
     fn read_pages(&self, chapters: &[Chapter]) -> Element<'_, Message> {
         let ink = self.ink();
-        let mut pages = column![].spacing(22).width(Fill);
-        for chapter in chapters {
-            pages = pages.push(text(chapter.name.clone()).font(serif()).size(24));
-            if chapter.body.trim().is_empty() {
-                pages = pages.push(text("Not written yet.").size(14).color(ink.muted));
-            } else {
-                pages = pages.push(markdown::reading(&chapter.body, self.is_dark()));
+        let mut pages = column![].spacing(0).width(Fill);
+        for (index, chapter) in chapters.iter().enumerate() {
+            if index > 0 {
+                pages = pages.push(space().height(36));
+                pages = pages.push(hairline());
+                pages = pages.push(space().height(36));
             }
+            let mut part = column![text(chapter.name.clone()).font(serif()).size(24)]
+                .spacing(16)
+                .width(Fill);
+            if chapter.body.trim().is_empty() {
+                part = part.push(text("Not written yet.").size(14).color(ink.muted));
+            } else {
+                part = part.push(markdown::reading(&chapter.body, self.is_dark()));
+            }
+            pages = pages.push(part);
         }
         vscroll(pages).height(Fill).into()
     }
@@ -4135,10 +4176,10 @@ impl App {
             .find(|note| note.id == *id)
             .map(|note| note.title.clone())
             .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| "Book".to_owned())
+            .unwrap_or_else(|| "Untitled".to_owned())
     }
 
-    /// Chapters of the open manuscript. A note needs two wikilinks before this is a book.
+    /// Pieces of the open group. A note needs two note links before it gathers them.
     fn chapters(&self, with_body: bool) -> Vec<Chapter> {
         let Some(id) = &self.book_id else {
             return Vec::new();
@@ -4234,6 +4275,7 @@ impl App {
             self.show_context = true;
         }
         if names.len() >= 2 {
+            self.group_cache = None;
             if let Some(id) = self.selected.clone() {
                 if self.book_id.as_ref().is_some_and(|book| book != &id)
                     && self.linked_from_book(&self.title_text)
@@ -4250,18 +4292,84 @@ impl App {
             }
             return;
         }
-        if self.book_id.is_none() || self.linked_from_book(&self.title_text) {
+        if self.on_group_note() || self.linked_from_book(&self.title_text) {
             return;
         }
-        let looking_at_book = match (&self.book_id, &self.selected) {
-            (Some(book), Some(id)) => book == id,
-            (Some(book), None) => book.is_empty(),
-            _ => false,
-        };
-        if !looking_at_book {
+        self.remember_group();
+    }
+
+    /// A piece opened from the list still belongs to the note that links it.
+    fn remember_group(&mut self) {
+        if self
+            .group_cache
+            .as_ref()
+            .is_some_and(|(title, _)| title == &self.title_text)
+        {
+            if let Some((_, Some(id))) = &self.group_cache {
+                let id = id.clone();
+                if !self.context_shut {
+                    self.show_context = true;
+                }
+                self.book_id = Some(id);
+            } else {
+                self.book_id = None;
+                self.reading = false;
+            }
+            return;
+        }
+        let found = self.group_for(&self.title_text);
+        self.group_cache = Some((self.title_text.clone(), found.clone()));
+        if let Some(id) = found {
+            if !self.context_shut {
+                self.show_context = true;
+            }
+            self.book_id = Some(id);
+        } else if !self.on_group_note() {
             self.book_id = None;
             self.reading = false;
         }
+    }
+
+    fn group_for(&self, title: &str) -> Option<String> {
+        let title = title.trim();
+        if title.is_empty() {
+            return None;
+        }
+        if let Some(id) = &self.book_id {
+            let listed = markdown::chapter_names(&self.book_text(id))
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(title));
+            if listed {
+                return Some(id.clone());
+            }
+        }
+        for (key, _, body) in &self.unsaved {
+            let Some(id) = key else { continue };
+            if self.selected.as_deref() == Some(id.as_str()) {
+                continue;
+            }
+            let listed = markdown::chapter_names(body)
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(title));
+            if listed {
+                return Some(id.clone());
+            }
+        }
+        let mut found = None;
+        if let Some(book) = self.notebook.as_ref() {
+            let _ = book.visit_notes(|id, _title, body, conflict| {
+                if conflict || found.is_some() || self.selected.as_deref() == Some(id) {
+                    return;
+                }
+                let listed = markdown::chapter_names(body)
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(title));
+                if listed {
+                    found = Some(id.to_owned());
+                }
+            });
+        }
+        found
     }
 
     fn linked_from_book(&self, title: &str) -> bool {
