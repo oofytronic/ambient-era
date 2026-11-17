@@ -82,10 +82,11 @@ fn a_tag_in_the_body_files_the_note() -> Result<(), String> {
     let book = ambient_cli::Notebook::create(&dir).map_err(|err| err.to_string())?;
     book.add(
         "Hours",
-        "# Clinic\n\nWaiting #clinic\nAlso #clinic and #follow-up\n`#nope`\n```\n#hidden\n```\n",
+        "Waiting #clinic\nAlso #follow-up in the writing\n%%ambient-tags: clinic, follow-up%%\n",
     )
     .map_err(|err| err.to_string())?;
-    book.add("Plain", "no tag").map_err(|err| err.to_string())?;
+    book.add("Plain", "no tag, but #nope is just text")
+        .map_err(|err| err.to_string())?;
     let notes = book.list().map_err(|err| err.to_string())?;
     let hours = notes
         .iter()
@@ -100,6 +101,11 @@ fn a_tag_in_the_body_files_the_note() -> Result<(), String> {
         .ok_or("missing Plain")?;
     if !plain.tags.is_empty() {
         return Err(format!("plain note was filed as {:?}", plain.tags));
+    }
+    let (prose, tags) =
+        ambient_cli::split_note_tags("Waiting #clinic\n%%ambient-tags: clinic, follow-up%%");
+    if prose != "Waiting #clinic" || tags != ["clinic", "follow-up"] {
+        return Err(format!("split was {prose:?} {tags:?}"));
     }
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())

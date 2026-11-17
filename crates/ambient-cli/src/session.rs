@@ -42,7 +42,8 @@ pub struct NoteSummary {
     pub writer: String,
     /// More than one head is a conflict. The window must not pick a winner.
     pub conflict: bool,
-    /// Tags written in the body as `#name`. A view, not a separate record.
+    /// Tags from the note's tag line. A view, not a separate record.
+    /// A `#name` in the writing is not a tag.
     pub tags: Vec<String>,
 }
 
@@ -739,102 +740,67 @@ fn notes_stamp(view: &ambient_spaces::Projection) -> u64 {
 fn note_tags(heads: &[ambient_spaces::NoteHead]) -> Vec<String> {
     let mut tags = BTreeSet::new();
     for head in heads {
-        for tag in tags_in(&head.body) {
+        for tag in split_note_tags(&head.body).1 {
             tags.insert(tag);
         }
     }
     tags.into_iter().collect()
 }
 
-/// Tags in `text`. A heading (`# Title`) is not a tag. Fenced and inline code are skipped.
-fn tags_in(text: &str) -> Vec<String> {
-    let mut tags = BTreeSet::new();
-    let mut fence: Option<bool> = None;
-    for line in text.split('\n') {
-        if fence_line(line, &mut fence) {
-            continue;
-        }
-        collect_tags(line, &mut tags);
-    }
-    tags.into_iter().collect()
-}
-
-fn fence_line(line: &str, fence: &mut Option<bool>) -> bool {
-    let spaces = line.bytes().take_while(|byte| *byte == b' ').count();
-    if spaces > 3 {
-        return fence.is_some();
-    }
-    let trimmed_start = line.trim_start();
-    let tilde = if trimmed_start.starts_with("~~~") {
-        true
-    } else if trimmed_start.starts_with("```") {
-        false
-    } else {
-        return fence.is_some();
+/// Split the hidden tag line off a note body.
+///
+/// The line is `%%ambient-tags: clinic, follow-up%%` and only at the end.
+/// Anything else, including a `#name` in the writing, stays in the prose.
+#[must_use]
+pub fn split_note_tags(body: &str) -> (String, Vec<String>) {
+    let trimmed_end = body.trim_end_matches(['\n', '\r']);
+    let (head, line) = match trimmed_end.rsplit_once('\n') {
+        Some((head, line)) => (Some(head), line.trim()),
+        None => (None, trimmed_end.trim()),
     };
-    let marker = line.trim();
-    let want = if tilde { '~' } else { '`' };
-    let closer = marker.len() >= 3 && marker.chars().all(|char| char == want);
-    match *fence {
-        Some(open) if open == tilde && closer => *fence = None,
-        None => *fence = Some(tilde),
-        Some(_) => {}
-    }
-    true
+    let Some(tags) = parse_tag_line(line) else {
+        return (body.to_owned(), Vec::new());
+    };
+    (head.unwrap_or("").to_owned(), tags)
 }
 
-fn collect_tags(line: &str, tags: &mut BTreeSet<String>) {
-    let mut index = 0;
-    let mut code = false;
-    while index < line.len() {
-        let Some(char) = line[index..].chars().next() else {
-            break;
-        };
-        if char == '`' {
-            code = !code;
-            index = index.saturating_add(char.len_utf8());
+/// Put `tags` back on the end of `prose`. An empty list leaves the prose alone.
+#[must_use]
+pub fn join_note_tags(prose: &str, tags: &[String]) -> String {
+    let (prose, _) = split_note_tags(prose);
+    let prose = prose.trim_end_matches(['\n', '\r']);
+    if tags.is_empty() {
+        return prose.to_owned();
+    }
+    let line = format!("%%ambient-tags: {}%%", tags.join(", "));
+    if prose.is_empty() {
+        line
+    } else {
+        format!("{prose}\n{line}")
+    }
+}
+
+fn parse_tag_line(line: &str) -> Option<Vec<String>> {
+    let rest = line.strip_prefix("%%ambient-tags:")?;
+    let rest = rest.strip_suffix("%%")?.trim();
+    let mut tags = Vec::new();
+    if rest.is_empty() {
+        return Some(tags);
+    }
+    for part in rest.split(',') {
+        let tag = part.trim().trim_start_matches('#').trim();
+        if tag.is_empty() || tag.len() > 40 || tag.contains(['%', ',', '\n', '|']) {
             continue;
         }
-        if !code && char == '#' {
-            if let Some(end) = tag_end_at(line, index) {
-                if let Some(name) = line.get(index.saturating_add(1)..end) {
-                    tags.insert(name.to_owned());
-                }
-                index = end;
-                continue;
-            }
+        if tags
+            .iter()
+            .any(|have: &String| have.eq_ignore_ascii_case(tag))
+        {
+            continue;
         }
-        index = index.saturating_add(char.len_utf8());
+        tags.push(tag.to_owned());
     }
-}
-
-fn tag_end_at(line: &str, index: usize) -> Option<usize> {
-    if index > 0 {
-        let prev = line.get(..index)?.chars().next_back()?;
-        if prev.is_ascii_alphanumeric() {
-            return None;
-        }
-    }
-    let rest = line.get(index..)?;
-    if !rest.starts_with('#') || rest.starts_with("##") {
-        return None;
-    }
-    let mut end = index.saturating_add(1);
-    let mut saw = false;
-    while end < line.len() {
-        let char = line.get(end..)?.chars().next()?;
-        if char.is_ascii_alphanumeric() || matches!(char, '_' | '-' | '/') {
-            saw = true;
-            end = end.saturating_add(char.len_utf8());
-        } else {
-            break;
-        }
-    }
-    while end > index.saturating_add(1) && line.as_bytes().get(end.saturating_sub(1)) == Some(&b'/')
-    {
-        end = end.saturating_sub(1);
-    }
-    (saw && end > index.saturating_add(1)).then_some(end)
+    Some(tags)
 }
 
 fn identity_wires<'a>(local: &Local, wires: &'a [Vec<u8>]) -> Result<Vec<&'a [u8]>, CliError> {

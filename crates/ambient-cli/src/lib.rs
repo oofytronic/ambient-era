@@ -20,7 +20,8 @@ mod sync;
 pub use draft::{Draft, Shortcut, shortcut};
 pub use notes::{CliError, run};
 pub use session::{
-    DELETED_BODY, DeviceLine, NoteSummary, Notebook, ShownHead, ShownNote, note_is_deleted,
+    DELETED_BODY, DeviceLine, NoteSummary, Notebook, ShownHead, ShownNote, join_note_tags,
+    note_is_deleted, split_note_tags,
 };
 
 pub use sync::{INTRODUCTION, NetMode, NetSetting, check_relay_url};

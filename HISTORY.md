@@ -4,6 +4,16 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-17 — tags, the list, the pause, and note links
+
+A tag is a chip under the title. A `#` in the writing is not a tag. The chips are a hidden line at the end of the note, so they sync with the note and do not need a new record. Older notes that used `#name` in the writing are not filed until the chip is added.
+
+The left list shows a group and notes that belong to no group. Pieces sit under the group. Search still finds a piece.
+
+A keystroke changes the caret and the letters. The word count, the group, and the notes that link here update after a short pause.
+
+A note link can store the note's id and show its title. `[[` offers notes. A link that does not resolve is drawn quieter. Command-click still opens it. A plain click still places the caret.
+
 ## 2026-11-16 — a group keeps its name
 
 `[[]]` is a note link, not a wikilink. Two note links make a group, and the note's name is the group's name. A first line `Kind: issues` names the pieces, and is optional. The panel shows that name and the same list on a piece as on the group note. The group's name opens the group note. Read draws a line and a gap between pieces.

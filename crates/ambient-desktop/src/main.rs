@@ -5,7 +5,7 @@
 //! Sync, pairing, and chat call `ambient-cli`. This file does not seal events.
 //! The relay it can start is cleartext on `127.0.0.1` only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -206,6 +206,17 @@ struct App {
     context_shut: bool,
     /// Title last checked for a group, and that group's id when one names it.
     group_cache: Option<(String, Option<String>)>,
+    /// Tags on the open note. Not words in the writing.
+    tags: Vec<String>,
+    tag_draft: String,
+    /// Group note id and the link targets under it.
+    groups: Vec<(String, Vec<String>)>,
+    /// Notes that sit under a group, so the list does not repeat them.
+    pieces: BTreeSet<String>,
+    cached_chapters: Vec<Chapter>,
+    cached_backlinks: Vec<(String, String)>,
+    /// Ids and lowercase titles a note link can open. Empty until the list is read.
+    known_links: Option<Arc<BTreeSet<String>>>,
 }
 
 /// Which side of an invite this computer is on. One path, not both.
@@ -249,6 +260,10 @@ enum Message {
     ShowChat,
     ToggleList,
     ToggleContext,
+    TagDraft(String),
+    AddTag,
+    RemoveTag(String),
+    CompleteLink(String),
     AutoSync,
     ToggleSyncPop,
     ToggleRelay,
@@ -394,6 +409,8 @@ struct TaskRow {
 
 struct Chapter {
     name: String,
+    /// The link as written: a note id, or a title on an older link.
+    target: String,
     id: Option<String>,
     words: usize,
     body: String,
@@ -716,6 +733,13 @@ impl App {
             show_context: false,
             context_shut: false,
             group_cache: None,
+            tags: Vec::new(),
+            tag_draft: String::new(),
+            groups: Vec::new(),
+            pieces: BTreeSet::new(),
+            cached_chapters: Vec::new(),
+            cached_backlinks: Vec::new(),
+            known_links: None,
         };
         let saved = profile::load_profile(&app.dir);
         app.appearance = saved.appearance;
@@ -839,7 +863,6 @@ impl App {
                         true
                     });
                 }
-                self.track_book();
                 Task::none()
             }
             Message::BodyEdited(action) => {
@@ -1017,6 +1040,19 @@ impl App {
                 self.context_shut = !self.show_context;
                 Task::none()
             }
+            Message::TagDraft(text) => {
+                self.tag_draft = text;
+                Task::none()
+            }
+            Message::AddTag => {
+                self.add_tag();
+                Task::none()
+            }
+            Message::RemoveTag(tag) => {
+                self.remove_tag(&tag);
+                Task::none()
+            }
+            Message::CompleteLink(id) => self.complete_link(&id),
             Message::AutoSync => self.begin_sync(),
             Message::ToggleSyncPop => {
                 self.sync_open = !self.sync_open;
@@ -1231,8 +1267,9 @@ impl App {
             }
             Message::OpenChapter(name) => self.open_chapter(&name),
             Message::ToggleRead => {
-                if !self.chapters(false).is_empty() {
+                if self.cached_chapters.len() >= 2 {
                     self.reading = !self.reading;
+                    self.cached_chapters = self.chapters(self.reading);
                 }
                 Task::none()
             }
@@ -1772,13 +1809,31 @@ impl App {
             }
         } else if !self.catalog.is_empty() {
             list = list.push(
-                text("A #tag in a note files it here.")
+                text("Tags are added on the note.")
                     .size(12)
                     .color(ink.muted),
             );
         }
-        for note in &self.notes {
-            list = list.push(self.note_row(note));
+        if self.query.trim().is_empty() && self.tag.is_none() {
+            for note in &self.notes {
+                if self.pieces.contains(&note.id) {
+                    continue;
+                }
+                list = list.push(self.note_row(note, 0.0));
+                if let Some((_, targets)) = self.groups.iter().find(|(id, _)| id == &note.id) {
+                    for target in targets {
+                        if let Some(piece) =
+                            self.notes.iter().find(|item| Self::target_is(target, item))
+                        {
+                            list = list.push(self.note_row(piece, 16.0));
+                        }
+                    }
+                }
+            }
+        } else {
+            for note in &self.notes {
+                list = list.push(self.note_row(note, 0.0));
+            }
         }
         block.push(vscroll(list).height(Fill).width(Fill)).into()
     }
@@ -1786,7 +1841,7 @@ impl App {
     fn tag_row(&self, tag: Option<&str>, count: usize) -> Element<'_, Message> {
         let ink = self.ink();
         let active = self.tag.as_deref() == tag;
-        let label = tag.map_or_else(|| "All".to_owned(), |name| format!("#{name}"));
+        let label = tag.map_or_else(|| "All".to_owned(), ToOwned::to_owned);
         let chosen = tag.map(str::to_owned);
         button(
             row![
@@ -1803,7 +1858,7 @@ impl App {
         .into()
     }
 
-    fn note_row(&self, note: &NoteSummary) -> Element<'_, Message> {
+    fn note_row(&self, note: &NoteSummary, indent: f32) -> Element<'_, Message> {
         let ink = self.ink();
         let selected = self.selected.as_deref() == Some(note.id.as_str());
         let title = if note.title.is_empty() {
@@ -1827,7 +1882,6 @@ impl App {
                 if index > 0 {
                     meta.push(' ');
                 }
-                meta.push('#');
                 meta.push_str(tag);
             }
         }
@@ -1836,7 +1890,12 @@ impl App {
         }
         button(lines)
             .width(Fill)
-            .padding([8.0, 10.0])
+            .padding(iced::Padding {
+                top: 8.0,
+                right: 10.0,
+                bottom: 8.0,
+                left: 10.0 + indent,
+            })
             .on_press(Message::Select(note.id.clone()))
             .style(list_row(selected))
             .into()
@@ -3088,11 +3147,11 @@ impl App {
                 self.disk_body.clone_from(&draft.body);
                 if let Some((title, body)) = stash {
                     self.title_text = title;
-                    self.body.load(&body);
+                    self.load_sealed(&body);
                     self.edited_at = Some(Instant::now());
                 } else {
                     self.title_text.clone_from(&draft.title);
-                    self.body.load(&draft.body);
+                    self.load_sealed(&draft.body);
                     self.edited_at = None;
                 }
                 self.conflicts = draft.conflicts;
@@ -3107,7 +3166,7 @@ impl App {
                 self.detail = true;
                 self.message.clear();
                 self.reading = false;
-                self.track_book();
+                self.settle_side();
             }
             Err(err) => self.message = err.to_string(),
         }
@@ -3136,16 +3195,18 @@ impl App {
         self.reading = false;
         if let Some((title, body)) = stash {
             self.title_text = title;
-            self.body.load(&body);
+            self.load_sealed(&body);
             self.edited_at = Some(Instant::now());
-            self.track_book();
+            self.settle_side();
             return;
         }
         self.title_text.clear();
+        self.tags.clear();
+        self.tag_draft.clear();
         self.body.load("");
         self.edited_at = None;
         self.message.clear();
-        self.track_book();
+        self.settle_side();
     }
 
     fn remember_unsaved(&mut self) {
@@ -3155,11 +3216,294 @@ impl App {
         let key = self.selected.clone();
         self.unsaved.retain(|(id, _, _)| id != &key);
         self.unsaved
-            .push((key, self.title_text.clone(), self.body.text()));
+            .push((key, self.title_text.clone(), self.stored_body()));
+    }
+
+    fn stored_body(&self) -> String {
+        ambient_cli::join_note_tags(&self.body.text(), &self.tags)
+    }
+
+    fn load_sealed(&mut self, sealed: &str) {
+        let (prose, tags) = ambient_cli::split_note_tags(sealed);
+        self.tags = tags;
+        self.tag_draft.clear();
+        self.body.load(&prose);
     }
 
     fn editor_dirty(&self) -> bool {
-        self.title_text != self.disk_title || self.body.text() != self.disk_body
+        self.title_text != self.disk_title || self.stored_body() != self.disk_body
+    }
+
+    fn add_tag(&mut self) {
+        let Some(tag) = clean_tag(&self.tag_draft) else {
+            return;
+        };
+        if self.tags.iter().any(|have| have.eq_ignore_ascii_case(&tag)) {
+            self.tag_draft.clear();
+            return;
+        }
+        self.tags.push(tag);
+        self.tag_draft.clear();
+        self.edited_at = Some(Instant::now());
+    }
+
+    fn remove_tag(&mut self, tag: &str) {
+        let before = self.tags.len();
+        self.tags.retain(|have| !have.eq_ignore_ascii_case(tag));
+        if self.tags.len() != before {
+            self.edited_at = Some(Instant::now());
+        }
+    }
+
+    fn tag_chips(&self) -> Element<'_, Message> {
+        let mut chips = row![].spacing(6).align_y(iced::Alignment::Center);
+        for tag in &self.tags {
+            let label = tag.clone();
+            chips = chips.push(
+                button(text(format!("{label}  ×")).size(12))
+                    .padding([4, 8])
+                    .on_press(Message::RemoveTag(label))
+                    .style(ghost_style),
+            );
+        }
+        chips = chips.push(
+            text_input("Add a tag", &self.tag_draft)
+                .id(iced::widget::Id::new("note-tag"))
+                .on_input(Message::TagDraft)
+                .on_submit(Message::AddTag)
+                .padding([4, 8])
+                .size(13)
+                .width(140)
+                .style(field_style),
+        );
+        chips.into()
+    }
+
+    /// Word counts, groups, and backlinks. Not called from a keystroke.
+    fn settle_side(&mut self) {
+        self.track_book();
+        self.refresh_outline();
+        self.cached_chapters = self.chapters(self.reading);
+        self.cached_backlinks = self.backlinks_now();
+        self.rebuild_known();
+    }
+
+    fn rebuild_known(&mut self) {
+        let mut known = BTreeSet::new();
+        for note in &self.catalog {
+            known.insert(note.id.clone());
+            if !note.title.is_empty() {
+                known.insert(note.title.to_lowercase());
+            }
+        }
+        self.known_links = Some(Arc::new(known));
+        markdown::set_known_links(self.known_links.clone());
+    }
+
+    fn refresh_outline(&mut self) {
+        let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+        let mut see = |id: &str, body: &str| {
+            let (prose, _) = ambient_cli::split_note_tags(body);
+            let names = markdown::chapter_names(&prose);
+            if names.len() >= 2 {
+                if let Some(slot) = groups.iter_mut().find(|(have, _)| have == id) {
+                    slot.1 = names;
+                } else {
+                    groups.push((id.to_owned(), names));
+                }
+            }
+        };
+        if let Some(book) = self.notebook.as_ref() {
+            let _ = book.visit_notes(|id, _title, body, conflict| {
+                if !conflict {
+                    see(id, body);
+                }
+            });
+        }
+        for (key, _, body) in &self.unsaved {
+            if let Some(id) = key {
+                see(id, body);
+            }
+        }
+        if let Some(id) = &self.selected {
+            see(id, &self.stored_body());
+        }
+        let mut pieces = BTreeSet::new();
+        for note in &self.catalog {
+            if groups.iter().any(|(id, _)| id == &note.id) {
+                continue;
+            }
+            let linked = groups
+                .iter()
+                .any(|(_, targets)| targets.iter().any(|target| Self::target_is(target, note)));
+            if linked {
+                pieces.insert(note.id.clone());
+            }
+        }
+        self.groups = groups;
+        self.pieces = pieces;
+    }
+
+    fn target_is(target: &str, note: &NoteSummary) -> bool {
+        target == note.id || (!note.title.is_empty() && target.eq_ignore_ascii_case(&note.title))
+    }
+
+    fn names_piece(&self, target: &str, title: &str) -> bool {
+        if title.is_empty() {
+            return false;
+        }
+        if target.eq_ignore_ascii_case(title) {
+            return true;
+        }
+        self.catalog
+            .iter()
+            .any(|note| note.id == target && note.title.eq_ignore_ascii_case(title))
+    }
+
+    fn link_title(&self, target: &str) -> String {
+        if let Some(note) = self.resolve_note(target) {
+            if note.title.is_empty() {
+                "Untitled".to_owned()
+            } else {
+                note.title.clone()
+            }
+        } else if markdown::is_note_id(target) {
+            "Missing".to_owned()
+        } else {
+            target.to_owned()
+        }
+    }
+
+    fn resolve_note(&self, target: &str) -> Option<&NoteSummary> {
+        if markdown::is_note_id(target) {
+            return self.catalog.iter().find(|note| note.id == target);
+        }
+        self.catalog
+            .iter()
+            .find(|note| !note.title.is_empty() && note.title.eq_ignore_ascii_case(target))
+    }
+
+    fn backlinks_now(&self) -> Vec<(String, String)> {
+        let Some(id) = self.selected.clone() else {
+            return Vec::new();
+        };
+        let title = self.title_text.clone();
+        let mut out = Vec::new();
+        let mut push = |note_id: &str, note_title: &str, body: &str| {
+            if note_id == id {
+                return;
+            }
+            let (prose, _) = ambient_cli::split_note_tags(body);
+            let hit = markdown::chapter_names(&prose).iter().any(|target| {
+                target == &id || (!title.is_empty() && target.eq_ignore_ascii_case(&title))
+            });
+            if hit && !out.iter().any(|(have, _)| have == note_id) {
+                let label = if note_title.is_empty() {
+                    "Untitled".to_owned()
+                } else {
+                    note_title.to_owned()
+                };
+                out.push((note_id.to_owned(), label));
+            }
+        };
+        if let Some(book) = self.notebook.as_ref() {
+            let _ = book.visit_notes(|note_id, note_title, body, conflict| {
+                if !conflict {
+                    push(note_id, note_title, body);
+                }
+            });
+        }
+        for (key, note_title, body) in &self.unsaved {
+            if let Some(note_id) = key {
+                push(note_id, note_title, body);
+            }
+        }
+        out
+    }
+
+    fn note_named(&self, title: &str) -> Option<(String, String)> {
+        let title = title.trim();
+        if title.is_empty() || markdown::is_note_id(title) {
+            return None;
+        }
+        self.catalog.iter().find_map(|note| {
+            note.title
+                .eq_ignore_ascii_case(title)
+                .then(|| (note.id.clone(), note.title.clone()))
+        })
+    }
+
+    fn complete_link(&mut self, id: &str) -> Task<Message> {
+        let Some(title) = self
+            .catalog
+            .iter()
+            .find(|note| note.id == id)
+            .map(|note| note.title.clone())
+        else {
+            return Task::none();
+        };
+        let text = self.body.text();
+        let caret = self.body.caret_byte();
+        let Some((start, _)) = markdown::open_wiki(&text, caret) else {
+            return Task::none();
+        };
+        let label = title.replace(['|', '[', ']'], "");
+        let insert = format!("[[{id}|{label}]]");
+        let mut next = String::new();
+        next.push_str(text.get(..start).unwrap_or(""));
+        next.push_str(&insert);
+        next.push_str(text.get(caret..).unwrap_or(""));
+        let at = start.saturating_add(insert.len());
+        self.revise(Burst::Break, |app| {
+            app.body.load(&next);
+            app.body.place_byte(at);
+            true
+        });
+        self.note_follow(false)
+    }
+
+    fn link_menu(&self, query: &str) -> Element<'_, Message> {
+        let ink = self.ink();
+        let needle = query.trim().to_lowercase();
+        let mut matches: Vec<&NoteSummary> = self
+            .catalog
+            .iter()
+            .filter(|note| {
+                !note.title.is_empty()
+                    && (needle.is_empty() || note.title.to_lowercase().contains(&needle))
+                    && self.selected.as_deref() != Some(note.id.as_str())
+            })
+            .take(6)
+            .collect();
+        matches.sort_by(|left, right| {
+            let left_rank = left.title.to_lowercase().starts_with(&needle);
+            let right_rank = right.title.to_lowercase().starts_with(&needle);
+            right_rank
+                .cmp(&left_rank)
+                .then_with(|| left.title.cmp(&right.title))
+        });
+        if matches.is_empty() {
+            return text("No note with that name yet. Close the link and it stays unresolved.")
+                .size(12)
+                .color(ink.muted)
+                .into();
+        }
+        let mut list = column![].spacing(2).width(Fill);
+        for note in matches {
+            let id = note.id.clone();
+            list = list.push(
+                button(text(note.title.clone()).size(14).width(Fill))
+                    .width(Fill)
+                    .padding([4, 8])
+                    .on_press(Message::CompleteLink(id))
+                    .style(list_row(false)),
+            );
+        }
+        container(list)
+            .padding(6)
+            .width(280)
+            .style(card_style)
+            .into()
     }
 
     fn ink(&self) -> Ink {
@@ -3189,6 +3533,7 @@ impl App {
         {
             return Task::none();
         }
+        self.settle_side();
         self.saving = true;
         self.save_again = false;
         let token = self.save_token;
@@ -3196,7 +3541,7 @@ impl App {
             self.dir.clone(),
             self.selected.clone(),
             self.title_text.clone(),
-            self.body.text(),
+            self.stored_body(),
             token,
         )
     }
@@ -3205,11 +3550,10 @@ impl App {
         if self.notebook.is_none() {
             return Task::none();
         }
-        if self.editor_dirty()
-            && self
-                .edited_at
-                .is_some_and(|at| at.elapsed() >= Duration::from_millis(700))
-        {
+        let paused = self
+            .edited_at
+            .is_none_or(|at| at.elapsed() >= Duration::from_millis(700));
+        if self.editor_dirty() && paused {
             return self.start_save(false);
         }
         if self.saving
@@ -3292,8 +3636,9 @@ impl App {
         self.disk_title.clone_from(&draft.title);
         self.disk_body.clone_from(&draft.body);
         self.title_text.clone_from(&draft.title);
-        self.body.load(&draft.body);
+        self.load_sealed(&draft.body);
         self.edited_at = None;
+        self.settle_side();
     }
 
     fn compact(&self) -> bool {
@@ -3649,6 +3994,18 @@ impl App {
 
     fn insert_mark(&mut self, kind: FormatKind) {
         let change = markdown::format_change(&self.body.text(), self.body.cursor(), kind);
+        if kind == FormatKind::Wiki
+            && let Some(inner) = change
+                .insert
+                .strip_prefix("[[")
+                .and_then(|rest| rest.strip_suffix("]]"))
+            && let Some((id, title)) = self.note_named(inner)
+        {
+            let change =
+                markdown::note_link_change(&self.body.text(), &self.body.cursor(), &id, &title);
+            self.apply_change(change);
+            return;
+        }
         self.apply_change(change);
     }
 
@@ -3766,14 +4123,23 @@ impl App {
                 }
             }
             markdown::OpenLink::Note(name) => {
-                let id = self
-                    .catalog
-                    .iter()
-                    .find(|note| !note.title.is_empty() && note.title.eq_ignore_ascii_case(&name))
-                    .map(|note| note.id.clone());
+                let id = if markdown::is_note_id(&name) {
+                    self.catalog
+                        .iter()
+                        .find(|note| note.id == name)
+                        .map(|note| note.id.clone())
+                } else {
+                    self.catalog
+                        .iter()
+                        .find(|note| {
+                            !note.title.is_empty() && note.title.eq_ignore_ascii_case(&name)
+                        })
+                        .map(|note| note.id.clone())
+                };
                 match id {
                     Some(id) if self.selected.as_deref() == Some(id.as_str()) => {}
                     Some(id) => self.show_note(&id),
+                    None if markdown::is_note_id(&name) => self.say("That note is gone."),
                     None => self.say("No note with that name."),
                 }
             }
@@ -3915,7 +4281,7 @@ impl App {
     }
 
     fn note_column(&self) -> Element<'_, Message> {
-        let chapters = self.chapters(self.reading);
+        let chapters = &self.cached_chapters;
         let mut page = column![].spacing(14).width(Fill).height(Fill);
         if self.reading && !chapters.is_empty() {
             page = page.push(
@@ -3923,7 +4289,7 @@ impl App {
                     .font(serif())
                     .size(if self.compact() { 32.0 } else { 36.0 }),
             );
-            page = page.push(self.read_pages(&chapters));
+            page = page.push(self.read_pages(chapters));
         } else {
             page = page.push(
                 text_input("Title", &self.title_text)
@@ -3934,11 +4300,16 @@ impl App {
                     .padding([2.0, 0.0])
                     .style(title_style),
             );
+            page = page.push(self.tag_chips());
             if self.find_open {
                 page = page.push(self.find_bar());
             }
             if !self.compact() {
                 page = page.push(Self::format_bar());
+            }
+            if let Some((_, query)) = markdown::open_wiki(&self.body.text(), self.body.caret_byte())
+            {
+                page = page.push(self.link_menu(&query));
             }
             page = page.push(
                 vscroll(self.editor_page())
@@ -3949,7 +4320,7 @@ impl App {
         }
         if self.compact()
             && self.show_context
-            && let Some(rail) = self.chapter_rail(&chapters)
+            && let Some(rail) = self.chapter_rail(chapters)
         {
             return column![rail, page].spacing(12).height(Fill).into();
         }
@@ -3957,6 +4328,7 @@ impl App {
     }
 
     fn editor_page(&self) -> Element<'_, Message> {
+        markdown::set_known_links(self.known_links.clone());
         let dragging = self.pointer_down && self.drag_from.is_some();
         let page = markdown::view(&self.body, self.is_dark(), dragging);
         let Some((y, height)) = (!dragging).then(|| self.body.selection_origin()).flatten() else {
@@ -4026,15 +4398,18 @@ impl App {
         );
         let mut list = column![].spacing(4).width(Fill);
         for chapter in chapters {
-            let here = self.book_id.as_deref() != self.selected.as_deref()
-                && !self.title_text.is_empty()
-                && self.title_text.eq_ignore_ascii_case(&chapter.name);
-            let count = if chapter.id.is_none() {
-                "new".to_owned()
-            } else {
+            let here = self.selected.as_deref() == chapter.id.as_deref()
+                || self.selected.as_deref() == Some(chapter.target.as_str())
+                || (!self.on_group_note()
+                    && !self.title_text.is_empty()
+                    && self.title_text.eq_ignore_ascii_case(&chapter.name));
+            let count = if chapter.id.is_some() {
                 chapter.words.to_string()
+            } else if markdown::is_note_id(&chapter.target) {
+                "missing".to_owned()
+            } else {
+                "new".to_owned()
             };
-            let name = chapter.name.clone();
             list = list.push(
                 button(
                     text(format!("{} · {count}", chapter.name))
@@ -4043,7 +4418,7 @@ impl App {
                 )
                 .width(Fill)
                 .padding([6.0, 8.0])
-                .on_press(Message::OpenChapter(name))
+                .on_press(Message::OpenChapter(chapter.target.clone()))
                 .style(list_row(here)),
             );
         }
@@ -4088,16 +4463,29 @@ impl App {
 
     fn context_pane(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        let chapters = self.chapters(false);
+        let chapters = &self.cached_chapters;
         let mut block = column![].spacing(10).padding(16).width(Fill).height(Fill);
-        if let Some(rail) = self.chapter_rail(&chapters) {
+        if let Some(rail) = self.chapter_rail(chapters) {
             block = block.push(rail);
-        } else {
+        } else if self.cached_backlinks.is_empty() {
             block = block.push(
-                text("Link two notes and they gather here, under this note's name. A first line Kind: issues names the pieces.")
+                text("Link two notes and they gather here, under this note's name. A first line Kind: issues names the pieces. Tags are added under the title.")
                     .size(13)
                     .color(ink.muted),
             );
+        }
+        if !self.cached_backlinks.is_empty() {
+            block = block.push(text("Linked from").size(12).color(ink.muted));
+            for (id, title) in &self.cached_backlinks {
+                let id = id.clone();
+                block = block.push(
+                    button(text(title.clone()).size(14).width(Fill))
+                        .width(Fill)
+                        .padding([4, 8])
+                        .on_press(Message::Select(id))
+                        .style(list_row(false)),
+                );
+            }
         }
         container(block)
             .width(240)
@@ -4143,6 +4531,7 @@ impl App {
     }
 
     fn read_pages(&self, chapters: &[Chapter]) -> Element<'_, Message> {
+        markdown::set_known_links(self.known_links.clone());
         let ink = self.ink();
         let mut pages = column![].spacing(0).width(Fill);
         for (index, chapter) in chapters.iter().enumerate() {
@@ -4191,24 +4580,32 @@ impl App {
         }
         let mut rows: Vec<Chapter> = names
             .into_iter()
-            .map(|name| Chapter {
-                name,
+            .map(|target| Chapter {
+                name: self.link_title(&target),
+                target,
                 id: None,
                 words: 0,
                 body: String::new(),
             })
             .collect();
         let take = |rows: &mut [Chapter], note_id: &str, title: &str, body: &str, force: bool| {
-            let Some(row) = rows
-                .iter_mut()
-                .find(|row| (force || row.id.is_none()) && row.name.eq_ignore_ascii_case(title))
-            else {
+            let (prose, _) = ambient_cli::split_note_tags(body);
+            let Some(row) = rows.iter_mut().find(|row| {
+                (force || row.id.is_none())
+                    && (row.target == note_id
+                        || (!title.is_empty()
+                            && (row.target.eq_ignore_ascii_case(title)
+                                || row.name.eq_ignore_ascii_case(title))))
+            }) else {
                 return;
             };
             row.id = Some(note_id.to_owned());
-            row.words = markdown::word_count(body);
+            if (row.name == row.target || row.name == "Missing") && !title.is_empty() {
+                title.clone_into(&mut row.name);
+            }
+            row.words = markdown::word_count(&prose);
             if with_body {
-                body.clone_into(&mut row.body);
+                prose.clone_into(&mut row.body);
             }
         };
         if let Some(book) = self.notebook.as_ref() {
@@ -4338,7 +4735,7 @@ impl App {
         if let Some(id) = &self.book_id {
             let listed = markdown::chapter_names(&self.book_text(id))
                 .iter()
-                .any(|name| name.eq_ignore_ascii_case(title));
+                .any(|name| self.names_piece(name, title));
             if listed {
                 return Some(id.clone());
             }
@@ -4350,7 +4747,7 @@ impl App {
             }
             let listed = markdown::chapter_names(body)
                 .iter()
-                .any(|name| name.eq_ignore_ascii_case(title));
+                .any(|name| self.names_piece(name, title));
             if listed {
                 return Some(id.clone());
             }
@@ -4363,7 +4760,7 @@ impl App {
                 }
                 let listed = markdown::chapter_names(body)
                     .iter()
-                    .any(|name| name.eq_ignore_ascii_case(title));
+                    .any(|name| self.names_piece(name, title));
                 if listed {
                     found = Some(id.to_owned());
                 }
@@ -4381,7 +4778,7 @@ impl App {
         };
         markdown::chapter_names(&self.book_text(&id))
             .iter()
-            .any(|name| name.eq_ignore_ascii_case(title))
+            .any(|target| self.names_piece(target, title))
     }
 
     fn find_title(&self, name: &str) -> Option<String> {
@@ -4411,6 +4808,15 @@ impl App {
         if name.is_empty() {
             return Task::none();
         }
+        if markdown::is_note_id(&name) {
+            if self.catalog.iter().any(|note| note.id == name) {
+                self.reading = false;
+                self.show_note(&name);
+            } else {
+                self.say("That note is gone.");
+            }
+            return Task::none();
+        }
         if let Some(id) = self.find_title(&name) {
             self.reading = false;
             self.show_note(&id);
@@ -4426,7 +4832,7 @@ impl App {
             Some((
                 self.selected.clone(),
                 self.title_text.clone(),
-                self.body.text(),
+                self.stored_body(),
             ))
         } else {
             None
@@ -4456,7 +4862,7 @@ impl App {
             }
         };
         if let Some(saved) = made.saved {
-            if self.title_text == saved.title && self.body.text() == saved.body {
+            if self.title_text == saved.title && self.stored_body() == saved.body {
                 self.disk_title = saved.title;
                 self.disk_body = saved.body;
                 self.edited_at = None;
@@ -4485,7 +4891,6 @@ impl App {
     }
 
     fn note_follow(&mut self, scroll: bool) -> Task<Message> {
-        self.track_book();
         let jump = if scroll { self.body.follow() } else { None };
         let focus = iced::widget::operation::focus(iced::widget::Id::new("note-body"));
         if let Some(top) = jump {
@@ -4948,6 +5353,8 @@ impl App {
                     .retain(|(key, _, _)| key.as_deref() != Some(id.as_str()));
                 self.selected = None;
                 self.title_text.clear();
+                self.tags.clear();
+                self.tag_draft.clear();
                 self.body.load("");
                 self.disk_title.clear();
                 self.disk_body.clear();
@@ -4981,6 +5388,8 @@ impl App {
             self.reading = false;
         }
         self.title_text.clear();
+        self.tags.clear();
+        self.tag_draft.clear();
         self.body.load("");
         self.disk_title.clear();
         self.disk_body.clear();
@@ -5158,7 +5567,7 @@ impl App {
                     }
                     self.selected = Some(id);
                 }
-                if current && self.title_text == title && self.body.text() == body {
+                if current && self.title_text == title && self.stored_body() == body {
                     self.disk_title = title;
                     self.disk_body = body;
                     self.edited_at = None;
@@ -5212,6 +5621,8 @@ impl App {
         }
         self.catalog = notes;
         self.refresh_shown();
+        self.rebuild_known();
+        self.refresh_outline();
         if self.screen == Screen::Tasks {
             self.rebuild_tasks();
         }
@@ -5310,13 +5721,13 @@ impl App {
             if let Some(id) = &self.selected {
                 if let Some(slot) = notes.iter_mut().find(|(note_id, _, _)| note_id == id) {
                     slot.1.clone_from(&self.title_text);
-                    slot.2 = self.body.text();
+                    slot.2 = self.stored_body();
                 }
-            } else if !self.title_text.is_empty() || !self.body.text().is_empty() {
+            } else if !self.title_text.is_empty() || !self.stored_body().is_empty() {
                 notes.push((
                     "unsaved".to_owned(),
                     self.title_text.clone(),
-                    self.body.text(),
+                    self.stored_body(),
                 ));
             }
         }
@@ -5357,6 +5768,8 @@ impl App {
         self.tag = None;
         self.selected = None;
         self.title_text.clear();
+        self.tags.clear();
+        self.tag_draft.clear();
         self.body.load("");
         self.disk_title.clear();
         self.disk_body.clear();
@@ -6304,6 +6717,14 @@ fn pill_style(theme: &Theme) -> container::Style {
         },
         ..Default::default()
     }
+}
+
+fn clean_tag(raw: &str) -> Option<String> {
+    let tag = raw.trim().trim_start_matches('#').trim();
+    if tag.is_empty() || tag.len() > 40 || tag.contains(['%', ',', '\n', '|']) {
+        return None;
+    }
+    Some(tag.to_owned())
 }
 
 fn words_label(count: usize) -> String {

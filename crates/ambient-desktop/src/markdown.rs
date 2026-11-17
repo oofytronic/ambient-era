@@ -6,7 +6,10 @@
 //! the next line until a blank line. The marks stay in the saved text. This is not
 //! a second pane.
 
+use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::ops::Range;
+use std::sync::Arc;
 
 use iced::advanced::Renderer as _;
 use iced::advanced::text::Paragraph as _;
@@ -86,7 +89,6 @@ enum Face {
     Check,
     Checked,
     Wiki,
-    Tag,
     Math,
     Meta,
     Callout(u8),
@@ -96,6 +98,7 @@ const STRONG: u8 = 1;
 const EM: u8 = 2;
 const STRIKE: u8 = 4;
 const HIGH: u8 = 8;
+const MISSING: u8 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Mark {
@@ -644,9 +647,12 @@ fn mark_format(mark: &Mark, theme: &Theme) -> highlighter::Format<Font> {
     }
     let mut color = match mark.face {
         Face::Marker | Face::Meta => Some(marker),
-        Face::Tag | Face::Link | Face::Wiki | Face::Image | Face::Check | Face::Quote => {
-            Some(accent)
-        }
+        Face::Link | Face::Image | Face::Check | Face::Quote => Some(accent),
+        Face::Wiki => Some(if mark.flags & MISSING == 0 {
+            accent
+        } else {
+            marker
+        }),
         Face::Text | Face::Heading(_) => None,
         Face::Checked => Some(done),
         Face::Callout(kind) => Some(callout_color(kind, dark)),
@@ -967,19 +973,6 @@ fn paint_inline(
                 index = end;
                 continue;
             }
-            if let Some(end) = tag_end(line, index, limit) {
-                push_span(
-                    &mut spans,
-                    index,
-                    end,
-                    Mark {
-                        face: Face::Tag,
-                        flags: 0,
-                    },
-                );
-                index = end;
-                continue;
-            }
         }
         if let Some((len, close)) = token(line, index, limit, carry) {
             let end = index.saturating_add(len);
@@ -1004,7 +997,6 @@ fn paint_inline(
             && bare_url(line, index, limit).is_none()
             && footnote_end(line, index, limit).is_none()
             && math_end(line, index, limit).is_none()
-            && tag_end(line, index, limit).is_none()
             && token(line, index, limit, carry).is_none()
         {
             index = index.saturating_add(char_len_at(line, index, limit).max(1));
@@ -1067,7 +1059,11 @@ fn paint_wiki(spans: &mut Vec<(Range<usize>, Mark)>, line: &str, start: usize, e
         label_at.saturating_add(label.len()),
         Mark {
             face: if bang == 1 { Face::Image } else { Face::Wiki },
-            flags: 0,
+            flags: if bang == 0 && wiki_missing(line, start, end) {
+                MISSING
+            } else {
+                0
+            },
         },
     );
     push_span(spans, end.saturating_sub(2), end, marker());
@@ -1729,32 +1725,6 @@ fn math_end(line: &str, index: usize, limit: usize) -> Option<usize> {
         return None;
     }
     Some(index.saturating_add(close).saturating_add(2))
-}
-
-fn tag_end(line: &str, index: usize, limit: usize) -> Option<usize> {
-    if !edge_before(line, index) {
-        return None;
-    }
-    let rest = line.get(index..limit)?;
-    if !rest.starts_with('#') || rest.starts_with("##") {
-        return None;
-    }
-    let mut end = index.saturating_add(1);
-    let mut saw = false;
-    while end < limit {
-        let char = line.get(end..limit)?.chars().next()?;
-        if char.is_ascii_alphanumeric() || matches!(char, '_' | '-' | '/') {
-            saw = true;
-            end = end.saturating_add(char.len_utf8());
-        } else {
-            break;
-        }
-    }
-    while end > index.saturating_add(1) && line.as_bytes().get(end.saturating_sub(1)) == Some(&b'/')
-    {
-        end = end.saturating_sub(1);
-    }
-    (saw && end > index.saturating_add(1)).then_some(end)
 }
 
 fn callout_end(rest: &str) -> Option<usize> {
@@ -2602,6 +2572,65 @@ fn wiki_insert(text: &str, cursor: &text_editor::Cursor) -> Change {
     rewrite(text, from, to, &insert, at, None)
 }
 
+/// A note link that stores the note id and shows `title`.
+pub(super) fn note_link_change(
+    text: &str,
+    cursor: &text_editor::Cursor,
+    id: &str,
+    title: &str,
+) -> Change {
+    let (from, to, _) = label_range(text, cursor);
+    let label = title.replace(['|', '[', ']'], "");
+    let insert = format!("[[{id}|{label}]]");
+    rewrite(text, from, to, &insert, insert.len(), None)
+}
+
+/// The unclosed `[[` before the caret, and the text typed after it.
+pub(super) fn open_wiki(text: &str, caret: usize) -> Option<(usize, String)> {
+    let caret = caret.min(text.len());
+    let before = text.get(..caret)?;
+    let start = before.rfind("[[")?;
+    let query = before.get(start.saturating_add(2)..)?;
+    if query.contains('\n') || query.contains(']') || query.contains('|') {
+        return None;
+    }
+    Some((start, query.to_owned()))
+}
+
+/// A note id is 32 bytes of hex.
+pub(super) fn is_note_id(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+thread_local! {
+    static KNOWN_LINKS: RefCell<Option<Arc<BTreeSet<String>>>> = const { RefCell::new(None) };
+}
+
+/// Ids and lowercase titles a note link can resolve. `None` draws every link as known.
+pub(super) fn set_known_links(known: Option<Arc<BTreeSet<String>>>) {
+    KNOWN_LINKS.with(|slot| *slot.borrow_mut() = known);
+}
+
+fn wiki_missing(line: &str, start: usize, end: usize) -> bool {
+    let Some((_, target)) = wiki_name(line, start) else {
+        return false;
+    };
+    if end < start {
+        return false;
+    }
+    KNOWN_LINKS.with(|slot| {
+        let known = slot.borrow();
+        let Some(known) = known.as_ref() else {
+            return false;
+        };
+        if is_note_id(&target) {
+            !known.contains(&target)
+        } else {
+            !known.contains(&target.to_lowercase())
+        }
+    })
+}
+
 fn image_insert(text: &str, cursor: &text_editor::Cursor) -> Change {
     let (from, to, inner) = label_range(text, cursor);
     let insert = format!("![{inner}]()");
@@ -3291,7 +3320,6 @@ fn skip_atom(line: &str, index: usize, limit: usize, carry: Carry) -> Option<usi
         .or_else(|| bare_url(line, index, limit))
         .or_else(|| footnote_end(line, index, limit))
         .or_else(|| math_end(line, index, limit))
-        .or_else(|| tag_end(line, index, limit))
 }
 
 fn local_cursor(
@@ -3381,9 +3409,12 @@ fn look_of(mark: Mark, dark: bool) -> Look {
     look.color = match mark.face {
         Face::Text => None,
         Face::Marker | Face::Meta => Some(marker),
-        Face::Tag | Face::Link | Face::Wiki | Face::Image | Face::Check | Face::Quote => {
-            Some(accent)
-        }
+        Face::Link | Face::Image | Face::Check | Face::Quote => Some(accent),
+        Face::Wiki => Some(if mark.flags & MISSING == 0 {
+            accent
+        } else {
+            marker
+        }),
         Face::Heading(level) => {
             look.size = heading_px(level);
             None
@@ -5369,17 +5400,6 @@ mod tests {
                 flags: 0
             }
         ));
-        let tag = "see #clinic/today.";
-        let (spans, _) = paint(tag, Carry::default());
-        assert!(hit(
-            &spans,
-            tag,
-            "#clinic/today",
-            Mark {
-                face: Face::Tag,
-                flags: 0
-            }
-        ));
         let custom = "- [?] ask";
         let lines = task_lines(custom);
         assert_eq!(lines.len(), 1);
@@ -5605,15 +5625,6 @@ mod tests {
             "e=mc^2",
             Mark {
                 face: Face::Math,
-                flags: 0,
-            },
-        );
-        expect(
-            &lines,
-            "see #clinic/today.",
-            "#clinic/today",
-            Mark {
-                face: Face::Tag,
                 flags: 0,
             },
         );
