@@ -93,6 +93,29 @@ pub fn sync_notebook(dir: &Path) -> Result<String, CliError> {
     sync::sync_auto(dir)
 }
 
+/// Full sync, except one conversation the window is already pulling.
+///
+/// `skip` is that conversation's Space id. `None` syncs every mailbox.
+/// The note log is still read. Passing a missing id syncs everything.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when no relay answers, or a log cannot be written.
+pub fn sync_notebook_except(dir: &Path, skip: Option<&str>) -> Result<String, CliError> {
+    sync::sync_auto_except(dir, skip)
+}
+
+/// Push and pull one conversation through the relay this folder remembers.
+///
+/// The note log is not read. A failure to reach the relay does not write it.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when that conversation does not exist, no relay answers, or the chat log cannot be written.
+pub fn sync_conversation(dir: &Path, id: &str) -> Result<String, CliError> {
+    sync::sync_chat_auto(dir, id)
+}
+
 /// The folder's relay choice. Missing file means this computer.
 ///
 /// # Errors

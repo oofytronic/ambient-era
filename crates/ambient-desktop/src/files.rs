@@ -28,7 +28,7 @@ pub(super) enum NoteMedia {
     File(PathBuf, String),
 }
 
-pub(super) fn store(root: &Path, conversation: &str, source: &Path) -> Result<String, String> {
+pub(crate) fn store(root: &Path, conversation: &str, source: &Path) -> Result<String, String> {
     if !conversation_ok(conversation) {
         return Err("That conversation cannot hold a file.".to_owned());
     }

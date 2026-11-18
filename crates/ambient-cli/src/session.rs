@@ -181,9 +181,21 @@ impl Notebook {
     /// Returns [`CliError`] when the log cannot be projected.
     pub fn list(&self) -> Result<Vec<NoteSummary>, CliError> {
         self.ensure()?;
+        self.list_held()
+    }
+
+    /// Notes already in memory. Does not stat the log.
+    ///
+    /// The window uses this on a click. A background write hands over a new
+    /// [`Notebook`] when the file has changed, so the caret never re-reads it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when this notebook has not been opened.
+    pub fn list_held(&self) -> Result<Vec<NoteSummary>, CliError> {
         let guard = self.cache.borrow();
         let Some(item) = guard.as_ref() else {
-            return Ok(Vec::new());
+            return Err(CliError::message("folder is not open"));
         };
         let Some(view) = item.projected.view.as_ref() else {
             return Ok(Vec::new());
@@ -203,14 +215,25 @@ impl Notebook {
     /// # Errors
     ///
     /// Returns [`CliError`] when the log cannot be projected.
-    pub fn visit_notes(
+    pub fn visit_notes(&self, visit: impl FnMut(&str, &str, &str, bool)) -> Result<(), CliError> {
+        self.ensure()?;
+        self.visit_held(visit)
+    }
+
+    /// Walk the notes already in memory. Does not stat the log.
+    ///
+    /// The closure must not call back into this notebook.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when this notebook has not been opened.
+    pub fn visit_held(
         &self,
         mut visit: impl FnMut(&str, &str, &str, bool),
     ) -> Result<(), CliError> {
-        self.ensure()?;
         let guard = self.cache.borrow();
         let Some(item) = guard.as_ref() else {
-            return Ok(());
+            return Err(CliError::message("folder is not open"));
         };
         let Some(view) = item.projected.view.as_ref() else {
             return Ok(());
@@ -330,11 +353,21 @@ impl Notebook {
     ///
     /// Returns [`CliError`] when the id is not 64 hex characters or the note does not exist.
     pub fn show(&self, id_hex: &str) -> Result<ShownNote, CliError> {
-        let note_id = parse_hex32(id_hex)?;
         self.ensure()?;
+        self.show_held(id_hex)
+    }
+
+    /// Open one note from memory. Does not stat the log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when the id is not 64 hex characters, the note is
+    /// absent, or this notebook has not been opened.
+    pub fn show_held(&self, id_hex: &str) -> Result<ShownNote, CliError> {
+        let note_id = parse_hex32(id_hex)?;
         let guard = self.cache.borrow();
         let Some(item) = guard.as_ref() else {
-            return Err(CliError::message("no such note"));
+            return Err(CliError::message("folder is not open"));
         };
         let Some(view) = item.projected.view.as_ref() else {
             return Err(CliError::message("no such note"));
@@ -588,11 +621,20 @@ impl Notebook {
     /// Returns [`CliError`] when the identity log does not project.
     pub fn devices(&self) -> Result<Vec<DeviceLine>, CliError> {
         self.ensure()?;
+        self.devices_held()
+    }
+
+    /// Devices already projected. Does not stat the log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when this notebook has not been opened.
+    pub fn devices_held(&self) -> Result<Vec<DeviceLine>, CliError> {
         let guard = self.cache.borrow();
-        Ok(guard
-            .as_ref()
-            .map(|item| item.projected.devices.clone())
-            .unwrap_or_default())
+        let Some(item) = guard.as_ref() else {
+            return Err(CliError::message("folder is not open"));
+        };
+        Ok(item.projected.devices.clone())
     }
 
     /// Revoke a device key. Keeps the notes it already wrote. Stops sealing new events to it.

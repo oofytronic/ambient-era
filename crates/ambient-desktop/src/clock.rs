@@ -5,24 +5,24 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(super) struct When {
+pub(crate) struct When {
     /// Chip above the first message of a local day. Empty when there is no time.
     pub day: String,
     /// `HH:MM` on the bubble. Empty when there is no time.
     pub time: String,
 }
 
-pub(super) fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(0))
 }
 
-pub(super) fn load_tz() -> Vec<u8> {
+pub(crate) fn load_tz() -> Vec<u8> {
     std::fs::read("/etc/localtime").unwrap_or_default()
 }
 
-pub(super) fn when(unix_ms: Option<u64>, tz: &[u8], now: u64) -> When {
+pub(crate) fn when(unix_ms: Option<u64>, tz: &[u8], now: u64) -> When {
     let Some(unix_ms) = unix_ms else {
         return When {
             day: String::new(),

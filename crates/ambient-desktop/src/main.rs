@@ -26,6 +26,7 @@ use qrcode::QrCode;
 
 mod clock;
 mod files;
+mod lane;
 mod markdown;
 mod profile;
 
@@ -81,6 +82,9 @@ fn theme(app: &App) -> Theme {
 struct App {
     dir: PathBuf,
     notebook: Option<Notebook>,
+    /// Generation of `notebook`. An older snapshot is never installed over a newer one.
+    book_gen: u64,
+    search_hits: Option<Vec<NoteSummary>>,
     open_error: String,
     catalog: Vec<NoteSummary>,
     notes: Vec<NoteSummary>,
@@ -217,6 +221,10 @@ struct App {
     cached_backlinks: Vec<(String, String)>,
     /// Ids and lowercase titles a note link can open. Empty until the list is read.
     known_links: Option<Arc<BTreeSet<String>>>,
+    /// Background folder work. The caret's thread only posts a job.
+    lane: std::sync::mpsc::Sender<lane::Job>,
+    /// Every group's pieces, filled off the caret's thread.
+    group_views: Vec<lane::GroupView>,
 }
 
 /// Which side of an invite this computer is on. One path, not both.
@@ -264,6 +272,7 @@ enum Message {
     AddTag,
     RemoveTag(String),
     CompleteLink(String),
+    Lane(lane::Done),
     AutoSync,
     ToggleSyncPop,
     ToggleRelay,
@@ -302,7 +311,6 @@ enum Message {
     },
     Revoke(String),
     ToggleTheme,
-    Synced(SyncOutcome),
     Resized(Size),
     FileDropped(PathBuf),
     PickFile,
@@ -321,6 +329,7 @@ enum Message {
     AskDelete,
     CancelDelete,
     DeleteNote,
+    Deleted(Result<Vec<NoteSummary>, String>),
     ChooseSend(String),
     ConfirmSend,
     CancelSend,
@@ -630,6 +639,8 @@ impl App {
         let mut app = Self {
             dir,
             notebook: None,
+            book_gen: 0,
+            search_hits: None,
             open_error: String::new(),
             catalog: Vec::new(),
             notes: Vec::new(),
@@ -740,6 +751,8 @@ impl App {
             cached_chapters: Vec::new(),
             cached_backlinks: Vec::new(),
             known_links: None,
+            lane: lane::start(),
+            group_views: Vec::new(),
         };
         let saved = profile::load_profile(&app.dir);
         app.appearance = saved.appearance;
@@ -827,6 +840,7 @@ impl App {
                 iced::time::every(std::time::Duration::from_secs(3)).map(|_| Message::AutoSync),
             );
         }
+        parts.push(iced::Subscription::run(lane_messages));
         iced::Subscription::batch(parts)
     }
 
@@ -840,7 +854,13 @@ impl App {
         match message {
             Message::QueryChanged(query) => {
                 self.query = query;
-                self.refresh_shown();
+                self.search_hits = None;
+                if self.query.is_empty() {
+                    self.refresh_shown();
+                } else {
+                    self.post(lane::Job::Search(self.query.clone()));
+                    self.refresh_shown();
+                }
                 Task::none()
             }
             Message::PickTag(tag) => {
@@ -1004,6 +1024,7 @@ impl App {
                         self.detail = false;
                     }
                 }
+                self.sync_watch();
                 Task::none()
             }
             Message::ShowTasks => {
@@ -1011,6 +1032,7 @@ impl App {
                 self.screen = Screen::Tasks;
                 self.sheet = Sheet::None;
                 self.detail = false;
+                self.sync_watch();
                 Task::none()
             }
             Message::ShowChat => {
@@ -1027,7 +1049,8 @@ impl App {
                     if self.compact() {
                         self.detail = false;
                     }
-                    self.reload_chat();
+                    self.sync_watch();
+                    self.post(lane::Job::Pull);
                 }
                 Task::none()
             }
@@ -1053,6 +1076,10 @@ impl App {
                 Task::none()
             }
             Message::CompleteLink(id) => self.complete_link(&id),
+            Message::Lane(done) => {
+                self.apply_lane(done);
+                Task::none()
+            }
             Message::AutoSync => self.begin_sync(),
             Message::ToggleSyncPop => {
                 self.sync_open = !self.sync_open;
@@ -1142,11 +1169,15 @@ impl App {
                 Task::none()
             }
             Message::SelectChat(id) => {
+                if self.chat_id.as_deref() != Some(id.as_str()) {
+                    self.chat.clear();
+                }
                 self.chat_id = Some(id);
                 self.screen = Screen::Chat;
                 self.sheet = Sheet::None;
                 self.detail = true;
-                self.reload_chat();
+                self.sync_watch();
+                self.post(lane::Job::Pull);
                 Task::none()
             }
             Message::SetTask { id, line, done } => {
@@ -1182,7 +1213,7 @@ impl App {
                 self.devices = self
                     .notebook
                     .as_ref()
-                    .and_then(|book| book.devices().ok())
+                    .and_then(|book| book.devices_held().ok())
                     .unwrap_or_default();
                 self.sheet = Sheet::Settings;
                 Task::none()
@@ -1269,7 +1300,6 @@ impl App {
             Message::ToggleRead => {
                 if self.cached_chapters.len() >= 2 {
                     self.reading = !self.reading;
-                    self.cached_chapters = self.chapters(self.reading);
                 }
                 Task::none()
             }
@@ -1296,10 +1326,8 @@ impl App {
                 self.confirm_delete = false;
                 Task::none()
             }
-            Message::DeleteNote => {
-                self.delete_open_note();
-                Task::none()
-            }
+            Message::DeleteNote => self.delete_open_note(),
+            Message::Deleted(result) => self.finish_delete(result),
             Message::ChooseSend(id) => {
                 self.send_choice = Some(id);
                 Task::none()
@@ -1471,7 +1499,6 @@ impl App {
                 self.say("This notebook is on this computer.");
                 Task::none()
             }
-            Message::Synced(outcome) => self.finish_sync(outcome),
         }
     }
 
@@ -2130,7 +2157,7 @@ impl App {
         let unsaved = self.unsaved.clone();
         let mut rows = Vec::new();
         if let Some(book) = self.notebook.as_ref() {
-            let _ = book.visit_notes(|id, title, body, conflict| {
+            let _ = book.visit_held(|id, title, body, conflict| {
                 if selected.as_deref() == Some(id) {
                     return;
                 }
@@ -2186,7 +2213,7 @@ impl App {
         {
             return Some((body.clone(), false, title.clone()));
         }
-        let shown = self.notebook.as_ref()?.show(id).ok()?;
+        let shown = self.notebook.as_ref()?.show_held(id).ok()?;
         let head = shown.heads.first()?;
         Some((head.body.clone(), shown.conflict, head.title.clone()))
     }
@@ -2982,7 +3009,7 @@ impl App {
                 self.notes.clear();
                 return;
             };
-            book.list()
+            book.list_held()
         };
         match found {
             Ok(notes) => self.catalog = notes,
@@ -2997,21 +3024,23 @@ impl App {
             self.tag = None;
         }
         self.refresh_shown();
-        self.rebuild_tasks();
+        if self.screen == Screen::Tasks {
+            self.rebuild_tasks();
+        }
     }
 
     fn refresh_shown(&mut self) {
         let base = if self.query.is_empty() {
             self.catalog.clone()
+        } else if let Some(hits) = &self.search_hits {
+            hits.clone()
         } else {
-            match self.notebook.as_ref().map(|book| book.search(&self.query)) {
-                Some(Ok(notes)) => notes,
-                Some(Err(err)) => {
-                    self.message = err.to_string();
-                    Vec::new()
-                }
-                None => Vec::new(),
-            }
+            let needle = self.query.to_lowercase();
+            self.catalog
+                .iter()
+                .filter(|note| note.title.to_lowercase().contains(&needle))
+                .cloned()
+                .collect()
         };
         self.notes = match &self.tag {
             Some(tag) => base
@@ -3020,73 +3049,6 @@ impl App {
                 .collect(),
             None => base,
         };
-    }
-
-    fn reload_chat(&mut self) {
-        self.chats = ambient_cli::list_conversations(&self.dir).unwrap_or_default();
-        let known = self
-            .chat_id
-            .as_ref()
-            .is_some_and(|id| self.chats.iter().any(|chat| &chat.id == id));
-        if !known {
-            self.chat_id = self.chats.first().map(|chat| chat.id.clone());
-        }
-        self.fill_chat_last();
-        let Some(id) = self.chat_id.clone() else {
-            self.chat.clear();
-            return;
-        };
-        match ambient_cli::chat_messages_in(&self.dir, &id) {
-            Ok(lines) => {
-                let tz = clock::load_tz();
-                let now = clock::now_ms();
-                self.chat = lines
-                    .into_iter()
-                    .map(|line| {
-                        let when = clock::when(line.unix_ms, &tz, now);
-                        ChatBubble {
-                            text: line.text,
-                            time: when.time,
-                            day: when.day,
-                            mine: line.mine,
-                        }
-                    })
-                    .collect();
-            }
-            Err(err) => self.message = err.to_string(),
-        }
-    }
-
-    fn fill_chat_last(&mut self) {
-        let tz = clock::load_tz();
-        let now = clock::now_ms();
-        self.chat_last.clear();
-        let mut learned = false;
-        for chat in &self.chats {
-            let Ok(lines) = ambient_cli::chat_messages_in(&self.dir, &chat.id) else {
-                continue;
-            };
-            let count = lines.len();
-            self.chat_count.insert(chat.id.clone(), count);
-            if let std::collections::btree_map::Entry::Vacant(slot) =
-                self.seen_count.entry(chat.id.clone())
-            {
-                slot.insert(count);
-                learned = true;
-            }
-            let Some(last) = lines.last() else {
-                continue;
-            };
-            let when = clock::when(last.unix_ms, &tz, now);
-            self.chat_last
-                .insert(chat.id.clone(), (chat_preview(&last.text), when.time));
-        }
-        if learned {
-            self.persist_seen();
-        }
-        if self.reading_chat() {
-            self.mark_open_chat();
-        }
     }
 
     fn reading_chat(&self) -> bool {
@@ -3139,7 +3101,7 @@ impl App {
         let Some(book) = self.notebook.as_ref() else {
             return;
         };
-        match book.show(id) {
+        match book.show_held(id) {
             Ok(note) => {
                 let draft = Draft::from_note(&note);
                 self.selected = Some(id.to_owned());
@@ -3166,7 +3128,7 @@ impl App {
                 self.detail = true;
                 self.message.clear();
                 self.reading = false;
-                self.settle_side();
+                self.touch_group();
             }
             Err(err) => self.message = err.to_string(),
         }
@@ -3197,7 +3159,7 @@ impl App {
             self.title_text = title;
             self.load_sealed(&body);
             self.edited_at = Some(Instant::now());
-            self.settle_side();
+            self.touch_group();
             return;
         }
         self.title_text.clear();
@@ -3206,7 +3168,7 @@ impl App {
         self.body.load("");
         self.edited_at = None;
         self.message.clear();
-        self.settle_side();
+        self.touch_group();
     }
 
     fn remember_unsaved(&mut self) {
@@ -3279,69 +3241,195 @@ impl App {
         chips.into()
     }
 
-    /// Word counts, groups, and backlinks. Not called from a keystroke.
-    fn settle_side(&mut self) {
-        self.track_book();
-        self.refresh_outline();
-        self.cached_chapters = self.chapters(self.reading);
-        self.cached_backlinks = self.backlinks_now();
-        self.rebuild_known();
+    fn post(&self, job: lane::Job) {
+        let _ = self.lane.send(job);
     }
 
-    fn rebuild_known(&mut self) {
-        let mut known = BTreeSet::new();
-        for note in &self.catalog {
-            known.insert(note.id.clone());
-            if !note.title.is_empty() {
-                known.insert(note.title.to_lowercase());
-            }
-        }
-        self.known_links = Some(Arc::new(known));
-        markdown::set_known_links(self.known_links.clone());
+    fn post_side(&self) {
+        self.post(lane::Job::Side(lane::OpenSnap {
+            selected: self.selected.clone(),
+            title: self.title_text.clone(),
+            stored: self.stored_body(),
+            unsaved: self.unsaved.clone(),
+        }));
     }
 
-    fn refresh_outline(&mut self) {
-        let mut groups: Vec<(String, Vec<String>)> = Vec::new();
-        let mut see = |id: &str, body: &str| {
-            let (prose, _) = ambient_cli::split_note_tags(body);
-            let names = markdown::chapter_names(&prose);
-            if names.len() >= 2 {
-                if let Some(slot) = groups.iter_mut().find(|(have, _)| have == id) {
-                    slot.1 = names;
-                } else {
-                    groups.push((id.to_owned(), names));
-                }
-            }
+    fn sync_watch(&self) {
+        let id = if self.screen == Screen::Chat {
+            self.chat_id.clone()
+        } else {
+            None
         };
-        if let Some(book) = self.notebook.as_ref() {
-            let _ = book.visit_notes(|id, _title, body, conflict| {
-                if !conflict {
-                    see(id, body);
+        self.post(lane::Job::Watch(id));
+    }
+
+    /// The list already knows the groups. This only points the open note at one.
+    fn touch_group(&mut self) {
+        self.track_book();
+        self.use_cached_chapters();
+        self.post_side();
+    }
+
+    fn use_cached_chapters(&mut self) {
+        self.cached_chapters = self
+            .group_views
+            .iter()
+            .find(|group| self.book_id.as_ref() == Some(&group.id))
+            .map(|group| {
+                group
+                    .chapters
+                    .iter()
+                    .map(|piece| Chapter {
+                        name: piece.name.clone(),
+                        target: piece.target.clone(),
+                        id: piece.id.clone(),
+                        words: piece.words,
+                        body: piece.body.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+
+    fn apply_side(&mut self, side: lane::SideDone) {
+        self.groups = side
+            .groups
+            .iter()
+            .map(|group| (group.id.clone(), group.targets.clone()))
+            .collect();
+        self.pieces = side.pieces;
+        self.group_views = side.groups;
+        self.cached_backlinks = side.backlinks;
+        self.known_links = Some(Arc::new(side.known));
+        markdown::set_known_links(self.known_links.clone());
+        self.track_book();
+        self.use_cached_chapters();
+    }
+
+    fn install_latest(&mut self) -> bool {
+        let Some((generation, book)) = lane::take_latest(self.book_gen) else {
+            return false;
+        };
+        self.book_gen = generation;
+        self.devices = book.devices_held().unwrap_or_default();
+        if let Ok(notes) = book.list_held() {
+            self.catalog = notes;
+            self.refresh_shown();
+        }
+        self.notebook = Some(book);
+        true
+    }
+
+    fn apply_inbox(&mut self, rows: &[lane::ChatRow]) {
+        self.chats = rows
+            .iter()
+            .map(|row| ambient_cli::ConversationSummary {
+                id: row.id.clone(),
+                label: row.label.clone(),
+                other: row.other.clone(),
+            })
+            .collect();
+        let known = self
+            .chat_id
+            .as_ref()
+            .is_some_and(|id| self.chats.iter().any(|chat| &chat.id == id));
+        if !known {
+            self.chat_id = self.chats.first().map(|chat| chat.id.clone());
+            if self.screen == Screen::Chat && self.chat_id.is_some() {
+                self.post(lane::Job::Pull);
+            }
+        }
+        self.chat_last.clear();
+        let mut learned = false;
+        for row in rows {
+            self.chat_count.insert(row.id.clone(), row.count);
+            if let std::collections::btree_map::Entry::Vacant(slot) =
+                self.seen_count.entry(row.id.clone())
+            {
+                slot.insert(row.count);
+                learned = true;
+            }
+            if row.count > 0 {
+                self.chat_last
+                    .insert(row.id.clone(), (row.preview.clone(), row.time.clone()));
+            }
+        }
+        if learned {
+            self.persist_seen();
+        }
+        if self.reading_chat() {
+            self.mark_open_chat();
+        }
+    }
+
+    fn apply_lane(&mut self, done: lane::Done) {
+        match done {
+            lane::Done::Side(side) => self.apply_side(side),
+            lane::Done::Chat { id, messages } => {
+                if self.chat_id.as_deref() == Some(id.as_str()) {
+                    self.chat = bubbles(messages);
+                    if self.reading_chat() {
+                        self.mark_open_chat();
+                    }
                 }
-            });
-        }
-        for (key, _, body) in &self.unsaved {
-            if let Some(id) = key {
-                see(id, body);
+            }
+            lane::Done::Inbox(rows) => self.apply_inbox(&rows),
+            lane::Done::Found { query, notes } => {
+                if self.query == query {
+                    self.search_hits = Some(notes);
+                    self.refresh_shown();
+                }
+            }
+            lane::Done::SendFailed { text, message } => {
+                self.message = message;
+                if self.draft_editor.text().trim().is_empty() {
+                    self.draft_editor = text_editor::Content::with_text(&text);
+                }
+            }
+            lane::Done::Notice(text) => self.message = text,
+            lane::Done::Synced {
+                detail,
+                failed,
+                transport,
+                pending,
+                writes,
+                notes,
+                side,
+            } => {
+                self.syncing = false;
+                if failed {
+                    self.pending = true;
+                    if transport {
+                        self.net_up = false;
+                        if self.net_mode == ambient_cli::NetMode::ThisComputer
+                            && detail.contains("unreachable")
+                            && !self.relay_ours
+                        {
+                            self.relay_ready = false;
+                        }
+                        "No relay answered.".clone_into(&mut self.sync_detail);
+                    } else {
+                        self.sync_detail = detail;
+                    }
+                    return;
+                }
+                self.net_up = true;
+                self.sync_detail = detail.clone();
+                self.pending = pending || self.writes != writes;
+                let installed = self.install_latest();
+                if content_arrived(&detail) {
+                    if !installed {
+                        self.catalog = notes;
+                        self.refresh_shown();
+                    }
+                    if self.screen == Screen::Tasks {
+                        self.rebuild_tasks();
+                    }
+                    self.apply_side(side);
+                    self.refresh_open_note();
+                }
             }
         }
-        if let Some(id) = &self.selected {
-            see(id, &self.stored_body());
-        }
-        let mut pieces = BTreeSet::new();
-        for note in &self.catalog {
-            if groups.iter().any(|(id, _)| id == &note.id) {
-                continue;
-            }
-            let linked = groups
-                .iter()
-                .any(|(_, targets)| targets.iter().any(|target| Self::target_is(target, note)));
-            if linked {
-                pieces.insert(note.id.clone());
-            }
-        }
-        self.groups = groups;
-        self.pieces = pieces;
     }
 
     fn target_is(target: &str, note: &NoteSummary) -> bool {
@@ -3358,67 +3446,6 @@ impl App {
         self.catalog
             .iter()
             .any(|note| note.id == target && note.title.eq_ignore_ascii_case(title))
-    }
-
-    fn link_title(&self, target: &str) -> String {
-        if let Some(note) = self.resolve_note(target) {
-            if note.title.is_empty() {
-                "Untitled".to_owned()
-            } else {
-                note.title.clone()
-            }
-        } else if markdown::is_note_id(target) {
-            "Missing".to_owned()
-        } else {
-            target.to_owned()
-        }
-    }
-
-    fn resolve_note(&self, target: &str) -> Option<&NoteSummary> {
-        if markdown::is_note_id(target) {
-            return self.catalog.iter().find(|note| note.id == target);
-        }
-        self.catalog
-            .iter()
-            .find(|note| !note.title.is_empty() && note.title.eq_ignore_ascii_case(target))
-    }
-
-    fn backlinks_now(&self) -> Vec<(String, String)> {
-        let Some(id) = self.selected.clone() else {
-            return Vec::new();
-        };
-        let title = self.title_text.clone();
-        let mut out = Vec::new();
-        let mut push = |note_id: &str, note_title: &str, body: &str| {
-            if note_id == id {
-                return;
-            }
-            let (prose, _) = ambient_cli::split_note_tags(body);
-            let hit = markdown::chapter_names(&prose).iter().any(|target| {
-                target == &id || (!title.is_empty() && target.eq_ignore_ascii_case(&title))
-            });
-            if hit && !out.iter().any(|(have, _)| have == note_id) {
-                let label = if note_title.is_empty() {
-                    "Untitled".to_owned()
-                } else {
-                    note_title.to_owned()
-                };
-                out.push((note_id.to_owned(), label));
-            }
-        };
-        if let Some(book) = self.notebook.as_ref() {
-            let _ = book.visit_notes(|note_id, note_title, body, conflict| {
-                if !conflict {
-                    push(note_id, note_title, body);
-                }
-            });
-        }
-        for (key, note_title, body) in &self.unsaved {
-            if let Some(note_id) = key {
-                push(note_id, note_title, body);
-            }
-        }
-        out
     }
 
     fn note_named(&self, title: &str) -> Option<(String, String)> {
@@ -3533,7 +3560,7 @@ impl App {
         {
             return Task::none();
         }
-        self.settle_side();
+        self.post_side();
         self.saving = true;
         self.save_again = false;
         let token = self.save_token;
@@ -3553,56 +3580,21 @@ impl App {
         let paused = self
             .edited_at
             .is_none_or(|at| at.elapsed() >= Duration::from_millis(700));
-        if self.editor_dirty() && paused {
-            return self.start_save(false);
-        }
-        if self.saving
-            || self.syncing
+        let save = if self.editor_dirty() && paused {
+            self.start_save(false)
+        } else {
+            Task::none()
+        };
+        if self.syncing
             || (self.net_mode == ambient_cli::NetMode::ThisComputer && !self.relay_ready)
         {
-            return Task::none();
+            return save;
         }
         self.syncing = true;
-        sync_task(self.dir.clone(), self.writes)
-    }
-
-    fn finish_sync(&mut self, outcome: SyncOutcome) -> Task<Message> {
-        self.syncing = false;
-        if outcome.failed {
-            if outcome.transport {
-                self.net_up = false;
-                if self.net_mode == ambient_cli::NetMode::ThisComputer
-                    && outcome.detail.contains("unreachable")
-                    && !self.relay_ours
-                {
-                    self.relay_ready = false;
-                }
-                "No relay answered.".clone_into(&mut self.sync_detail);
-            } else {
-                self.sync_detail = outcome.detail;
-            }
-            self.pending = true;
-            return Task::none();
-        }
-        self.net_up = true;
-        self.sync_detail = outcome.detail;
-        if content_arrived(&self.sync_detail) {
-            let opened = {
-                let _guard = io_lock();
-                Notebook::open(&self.dir)
-            };
-            match opened {
-                Ok(book) => {
-                    self.notebook = Some(book);
-                    self.reload();
-                    self.refresh_open_note();
-                }
-                Err(err) => self.sync_detail = err.to_string(),
-            }
-            self.reload_chat();
-        }
-        self.pending = outcome.pending || self.writes != outcome.writes;
-        Task::none()
+        self.post(lane::Job::Sync {
+            writes: self.writes,
+        });
+        save
     }
 
     fn refresh_open_note(&mut self) {
@@ -3615,7 +3607,7 @@ impl App {
         let Some(book) = self.notebook.as_ref() else {
             return;
         };
-        let Ok(note) = book.show(&id) else {
+        let Ok(note) = book.show_held(&id) else {
             return;
         };
         let draft = Draft::from_note(&note);
@@ -3638,7 +3630,7 @@ impl App {
         self.title_text.clone_from(&draft.title);
         self.load_sealed(&draft.body);
         self.edited_at = None;
-        self.settle_side();
+        self.touch_group();
     }
 
     fn compact(&self) -> bool {
@@ -4376,9 +4368,14 @@ impl App {
             return None;
         }
         let ink = self.ink();
-        let source = self.book_text(self.book_id.as_deref().unwrap_or(""));
+        let kind = self
+            .group_views
+            .iter()
+            .find(|group| self.book_id.as_ref() == Some(&group.id))
+            .map(|group| group.kind.clone())
+            .unwrap_or_default();
         let mut head = column![self.group_heading()].spacing(4).width(Fill);
-        if let Some(kind) = markdown::group_kind(&source) {
+        if !kind.is_empty() {
             head = head.push(text(kind).size(12).color(ink.muted));
         }
         if !self.on_group_note() && !self.title_text.trim().is_empty() {
@@ -4568,104 +4565,6 @@ impl App {
             .unwrap_or_else(|| "Untitled".to_owned())
     }
 
-    /// Pieces of the open group. A note needs two note links before it gathers them.
-    fn chapters(&self, with_body: bool) -> Vec<Chapter> {
-        let Some(id) = &self.book_id else {
-            return Vec::new();
-        };
-        let source = self.book_text(id);
-        let names = markdown::chapter_names(&source);
-        if names.len() < 2 {
-            return Vec::new();
-        }
-        let mut rows: Vec<Chapter> = names
-            .into_iter()
-            .map(|target| Chapter {
-                name: self.link_title(&target),
-                target,
-                id: None,
-                words: 0,
-                body: String::new(),
-            })
-            .collect();
-        let take = |rows: &mut [Chapter], note_id: &str, title: &str, body: &str, force: bool| {
-            let (prose, _) = ambient_cli::split_note_tags(body);
-            let Some(row) = rows.iter_mut().find(|row| {
-                (force || row.id.is_none())
-                    && (row.target == note_id
-                        || (!title.is_empty()
-                            && (row.target.eq_ignore_ascii_case(title)
-                                || row.name.eq_ignore_ascii_case(title))))
-            }) else {
-                return;
-            };
-            row.id = Some(note_id.to_owned());
-            if (row.name == row.target || row.name == "Missing") && !title.is_empty() {
-                title.clone_into(&mut row.name);
-            }
-            row.words = markdown::word_count(&prose);
-            if with_body {
-                prose.clone_into(&mut row.body);
-            }
-        };
-        if let Some(book) = self.notebook.as_ref() {
-            let _ = book.visit_notes(|note_id, title, body, conflict| {
-                if conflict || title.is_empty() {
-                    return;
-                }
-                take(&mut rows, note_id, title, body, false);
-            });
-        }
-        for (key, title, body) in &self.unsaved {
-            if let Some(note_id) = key {
-                take(&mut rows, note_id, title, body, true);
-            }
-        }
-        if let Some(note_id) = &self.selected {
-            take(
-                &mut rows,
-                note_id,
-                &self.title_text,
-                &self.body.text(),
-                true,
-            );
-        }
-        rows
-    }
-
-    fn book_text(&self, id: &str) -> String {
-        if id.is_empty() {
-            if self.selected.is_none() {
-                return self.body.text();
-            }
-            return self
-                .unsaved
-                .iter()
-                .find(|(key, _, _)| key.is_none())
-                .map(|(_, _, body)| body.clone())
-                .unwrap_or_default();
-        }
-        if self.selected.as_deref() == Some(id) {
-            return self.body.text();
-        }
-        if let Some((_, _, body)) = self
-            .unsaved
-            .iter()
-            .find(|(key, _, _)| key.as_deref() == Some(id))
-        {
-            return body.clone();
-        }
-        let mut found = String::new();
-        if let Some(book) = self.notebook.as_ref() {
-            let _ = book.visit_notes(|note_id, _title, body, conflict| {
-                if !conflict && note_id == id {
-                    body.clone_into(&mut found);
-                }
-            });
-        }
-        found
-    }
-
     fn track_book(&mut self) {
         let names = markdown::chapter_names(&self.body.text());
         if names.len() >= 2 && !self.context_shut {
@@ -4732,53 +4631,33 @@ impl App {
         if title.is_empty() {
             return None;
         }
-        if let Some(id) = &self.book_id {
-            let listed = markdown::chapter_names(&self.book_text(id))
+        if let Some(id) = &self.book_id
+            && self
+                .groups
                 .iter()
-                .any(|name| self.names_piece(name, title));
-            if listed {
-                return Some(id.clone());
-            }
+                .any(|(group, targets)| group == id && self.names_in(targets, title))
+        {
+            return Some(id.clone());
         }
-        for (key, _, body) in &self.unsaved {
-            let Some(id) = key else { continue };
-            if self.selected.as_deref() == Some(id.as_str()) {
-                continue;
-            }
-            let listed = markdown::chapter_names(body)
-                .iter()
-                .any(|name| self.names_piece(name, title));
-            if listed {
-                return Some(id.clone());
-            }
-        }
-        let mut found = None;
-        if let Some(book) = self.notebook.as_ref() {
-            let _ = book.visit_notes(|id, _title, body, conflict| {
-                if conflict || found.is_some() || self.selected.as_deref() == Some(id) {
-                    return;
-                }
-                let listed = markdown::chapter_names(body)
-                    .iter()
-                    .any(|name| self.names_piece(name, title));
-                if listed {
-                    found = Some(id.to_owned());
-                }
-            });
-        }
-        found
+        self.groups
+            .iter()
+            .find_map(|(id, targets)| self.names_in(targets, title).then(|| id.clone()))
+    }
+
+    fn names_in(&self, targets: &[String], title: &str) -> bool {
+        targets.iter().any(|target| self.names_piece(target, title))
     }
 
     fn linked_from_book(&self, title: &str) -> bool {
         if title.is_empty() {
             return false;
         }
-        let Some(id) = self.book_id.clone() else {
+        let Some(id) = &self.book_id else {
             return false;
         };
-        markdown::chapter_names(&self.book_text(&id))
+        self.groups
             .iter()
-            .any(|target| self.names_piece(target, title))
+            .any(|(group, targets)| group == id && self.names_in(targets, title))
     }
 
     fn find_title(&self, name: &str) -> Option<String> {
@@ -4877,7 +4756,11 @@ impl App {
                 self.book_id = Some(saved.id);
             }
         }
-        self.take_notes(made.notes);
+        if self.install_latest() {
+            self.post_side();
+        } else {
+            self.take_notes(made.notes);
+        }
         self.reading = false;
         self.show_note(&made.id);
         self.take_pending_chapter()
@@ -5077,7 +4960,8 @@ impl App {
                 self.sheet = Sheet::None;
                 self.their_card.clear();
                 self.say("Conversation saved here. Both windows sync while the relay is on.");
-                self.reload_chat();
+                self.sync_watch();
+                self.post(lane::Job::Inbox);
                 self.mark_pending();
             }
             Err(err) => self.message = err.to_string(),
@@ -5085,46 +4969,21 @@ impl App {
     }
 
     fn send_chat(&mut self) {
-        let mut text = self.draft_editor.text().trim().to_owned();
+        let text = self.draft_editor.text().trim().to_owned();
         let Some(id) = self.chat_id.clone() else {
             self.say("Invite someone before sending.");
             return;
         };
         let files = std::mem::take(&mut self.pending_files);
-        for path in &files {
-            match files::store(&self.dir, &id, path) {
-                Ok(cite) => {
-                    if !text.is_empty() && !text.ends_with('\n') {
-                        text.push('\n');
-                    }
-                    text.push_str(&cite);
-                }
-                Err(err) => {
-                    self.pending_files = files;
-                    self.message = err;
-                    return;
-                }
-            }
-        }
-        if text.is_empty() {
-            self.pending_files = files;
+        if text.is_empty() && files.is_empty() {
             self.say("Write a message, or add a file.");
             return;
         }
-        match ambient_cli::send_chat_in(&self.dir, &id, &text) {
-            Ok(()) => {
-                self.draft_editor = text_editor::Content::new();
-                self.screen = Screen::Chat;
-                self.detail = true;
-                self.say("Saved here. The words sync while a relay is on. A file stays on this computer.");
-                self.reload_chat();
-                self.mark_pending();
-            }
-            Err(err) => {
-                self.draft_editor = text_editor::Content::with_text(&text);
-                self.message = err.to_string();
-            }
-        }
+        self.draft_editor = text_editor::Content::new();
+        self.screen = Screen::Chat;
+        self.detail = true;
+        self.sync_watch();
+        self.post(lane::Job::Send { id, text, files });
     }
 
     fn spawn_at(&mut self, path: &Path, ok_message: &str) {
@@ -5225,7 +5084,6 @@ impl App {
             self.say("Write a note first.");
             return;
         }
-        self.reload_chat();
         if self.chats.is_empty() {
             self.say("Start a conversation before sending a note.");
             return;
@@ -5267,18 +5125,17 @@ impl App {
             .iter()
             .find(|chat| chat.id == id)
             .map_or_else(|| "that chat".to_owned(), |chat| self.chat_name(chat));
-        match ambient_cli::send_chat_in(&self.dir, &id, &text) {
-            Ok(()) => {
-                self.send_open = false;
-                self.chat_id = Some(id);
-                self.say(&format!(
-                    "Sent to {label}. The words sync while a relay is on."
-                ));
-                self.reload_chat();
-                self.mark_pending();
-            }
-            Err(err) => self.message = err.to_string(),
-        }
+        self.send_open = false;
+        self.chat_id = Some(id.clone());
+        self.say(&format!(
+            "Sent to {label}. The words sync while a relay is on."
+        ));
+        self.mark_pending();
+        self.post(lane::Job::Send {
+            id,
+            text,
+            files: Vec::new(),
+        });
     }
 
     fn add_loose_task(&mut self) -> Task<Message> {
@@ -5292,14 +5149,11 @@ impl App {
             return Task::none();
         }
         let line = format!("- [ ] {label}");
-        let existing = self.notebook.as_ref().and_then(|book| {
-            book.list().ok().and_then(|notes| {
-                notes
-                    .into_iter()
-                    .find(|note| note.title == "Tasks" && !note.conflict)
-                    .map(|note| note.id)
-            })
-        });
+        let existing = self
+            .catalog
+            .iter()
+            .find(|note| note.title == "Tasks" && !note.conflict)
+            .map(|note| note.id.clone());
         let Some(id) = existing else {
             self.task_draft.clear();
             self.say("Added to Tasks.");
@@ -5328,57 +5182,84 @@ impl App {
         follow
     }
 
-    fn delete_open_note(&mut self) {
+    fn delete_open_note(&mut self) -> Task<Message> {
         self.confirm_delete = false;
         if self.saving {
             self.say("Still saving. Try delete again in a moment.");
-            return;
+            return Task::none();
         }
         let Some(id) = self.selected.clone() else {
             self.discard_draft();
             self.say("Discarded.");
-            return;
+            return Task::none();
         };
-        let saved = {
-            let _guard = io_lock();
-            let Some(book) = self.notebook.as_ref() else {
-                self.say("Folder is not open.");
-                return;
-            };
-            book.edit(&id, "", ambient_cli::DELETED_BODY)
-        };
-        match saved {
-            Ok(()) => {
-                self.unsaved
-                    .retain(|(key, _, _)| key.as_deref() != Some(id.as_str()));
-                self.selected = None;
-                self.title_text.clear();
-                self.tags.clear();
-                self.tag_draft.clear();
-                self.body.load("");
-                self.disk_title.clear();
-                self.disk_body.clear();
-                self.conflicts.clear();
-                self.note_writer.clear();
-                self.edited_at = None;
-                self.save_token = self.save_token.wrapping_add(1);
-                self.histories.remove(&id);
-                self.history_order.retain(|key| key != &id);
-                if self.book_id.as_deref() == Some(id.as_str()) {
-                    self.book_id = None;
-                    self.reading = false;
-                }
-                if self.history_key == id {
-                    self.history.clear();
-                }
-                self.swap_history("");
+        if self.notebook.is_none() {
+            self.say("Folder is not open.");
+            return Task::none();
+        }
+        self.saving = true;
+        self.save_token = self.save_token.wrapping_add(1);
+        self.unsaved
+            .retain(|(key, _, _)| key.as_deref() != Some(id.as_str()));
+        self.selected = None;
+        self.title_text.clear();
+        self.tags.clear();
+        self.tag_draft.clear();
+        self.body.load("");
+        self.disk_title.clear();
+        self.disk_body.clear();
+        self.conflicts.clear();
+        self.note_writer.clear();
+        self.edited_at = None;
+        self.histories.remove(&id);
+        self.history_order.retain(|key| key != &id);
+        if self.book_id.as_deref() == Some(id.as_str()) {
+            self.book_id = None;
+            self.reading = false;
+        }
+        if self.history_key == id {
+            self.history.clear();
+        }
+        self.swap_history("");
+        self.catalog.retain(|note| note.id != id);
+        self.refresh_shown();
+        self.post_side();
+        self.say("Deleted. It has left the list.");
+        let dir = self.dir.clone();
+        Task::perform(
+            async move {
+                let (sender, receiver) = iced::futures::channel::oneshot::channel();
+                std::thread::spawn(move || {
+                    let result = write_snapshot(&dir, Some(&id), "", ambient_cli::DELETED_BODY)
+                        .map(|(_id, notes)| notes);
+                    let _ = sender.send(result);
+                });
+                receiver
+                    .await
+                    .unwrap_or_else(|_| Err("Delete stopped before it finished.".to_owned()))
+            },
+            Message::Deleted,
+        )
+    }
+
+    fn finish_delete(&mut self, result: Result<Vec<NoteSummary>, String>) -> Task<Message> {
+        self.saving = false;
+        match result {
+            Ok(notes) => {
                 self.writes = self.writes.saturating_add(1);
                 self.pending = true;
-                self.reload();
-                self.say("Deleted. It has left the list.");
+                if !self.install_latest() {
+                    self.take_notes(notes);
+                }
             }
-            Err(err) => self.message = err.to_string(),
+            Err(err) => self.message = err,
         }
+        if self.save_again && self.editor_dirty() {
+            self.save_again = false;
+            return self.start_save(true);
+        }
+        self.save_again = false;
+        Task::none()
     }
 
     fn discard_draft(&mut self) {
@@ -5448,7 +5329,9 @@ impl App {
                         Ok(book) => {
                             self.notebook = Some(book);
                             self.reload();
-                            self.reload_chat();
+                            self.post(lane::Job::Hello(self.dir.clone()));
+                            self.post(lane::Job::Inbox);
+                            self.sync_watch();
                             if let Ok(card) = ambient_cli::contact_card(&self.dir) {
                                 self.my_card = card;
                             }
@@ -5508,7 +5391,14 @@ impl App {
         let paired = !book.holds_root();
         self.notebook = Some(book);
         self.reload();
-        self.reload_chat();
+        if let Some(side) = lane::take_side() {
+            self.apply_side(side);
+        }
+        if let Some(rows) = lane::take_inbox() {
+            self.apply_inbox(&rows);
+        }
+        self.post(lane::Job::Hello(self.dir.clone()));
+        self.sync_watch();
         if let Ok(card) = ambient_cli::contact_card(&self.dir) {
             self.my_card = card;
         }
@@ -5518,7 +5408,7 @@ impl App {
         self.devices = self
             .notebook
             .as_ref()
-            .and_then(|book| book.devices().ok())
+            .and_then(|book| book.devices_held().ok())
             .unwrap_or_default();
         if self.device_draft.is_empty()
             && let Some(label) = self
@@ -5574,7 +5464,14 @@ impl App {
                 }
                 self.writes = self.writes.saturating_add(1);
                 self.pending = true;
-                self.take_notes(notes);
+                if self.install_latest() {
+                    self.post_side();
+                    if self.screen == Screen::Tasks {
+                        self.rebuild_tasks();
+                    }
+                } else {
+                    self.take_notes(notes);
+                }
                 if current
                     && self.editor_dirty()
                     && (self.save_again
@@ -5604,7 +5501,11 @@ impl App {
             Ok(notes) => {
                 self.writes = self.writes.saturating_add(1);
                 self.pending = true;
-                self.take_notes(notes);
+                if self.install_latest() {
+                    self.post_side();
+                } else {
+                    self.take_notes(notes);
+                }
             }
             Err(err) => self.message = err,
         }
@@ -5621,8 +5522,7 @@ impl App {
         }
         self.catalog = notes;
         self.refresh_shown();
-        self.rebuild_known();
-        self.refresh_outline();
+        self.post_side();
         if self.screen == Screen::Tasks {
             self.rebuild_tasks();
         }
@@ -5711,7 +5611,7 @@ impl App {
             return Task::none();
         };
         let mut notes = Vec::new();
-        if let Err(err) = book.visit_notes(|id, title, body, _conflict| {
+        if let Err(err) = book.visit_held(|id, title, body, _conflict| {
             notes.push((id.to_owned(), title.to_owned(), body.to_owned()));
         }) {
             self.message = err.to_string();
@@ -6251,7 +6151,6 @@ struct SyncOutcome {
     pending: bool,
     failed: bool,
     transport: bool,
-    writes: u64,
 }
 
 fn io_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -6259,15 +6158,36 @@ fn io_lock() -> std::sync::MutexGuard<'static, ()> {
     IO.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn run_sync(dir: &Path) -> SyncOutcome {
-    let _guard = io_lock();
-    match ambient_cli::sync_notebook(dir) {
+fn bubbles(lines: Vec<ambient_cli::ChatMessage>) -> Vec<ChatBubble> {
+    let tz = clock::load_tz();
+    let now = clock::now_ms();
+    lines
+        .into_iter()
+        .map(|line| {
+            let when = clock::when(line.unix_ms, &tz, now);
+            ChatBubble {
+                text: line.text,
+                time: when.time,
+                day: when.day,
+                mine: line.mine,
+            }
+        })
+        .collect()
+}
+
+fn lane_messages() -> impl iced::futures::Stream<Item = Message> + Send {
+    use iced::futures::StreamExt;
+    lane::listen().map(Message::Lane)
+}
+
+fn sync_outcome(dir: &Path) -> SyncOutcome {
+    let skip = lane::watched();
+    match ambient_cli::sync_notebook_except(dir, skip.as_deref()) {
         Ok(detail) => SyncOutcome {
             pending: ambient_cli::has_unsent(dir).unwrap_or(true),
             detail,
             failed: false,
             transport: false,
-            writes: 0,
         },
         Err(err) => {
             let detail = err.to_string();
@@ -6288,31 +6208,9 @@ fn run_sync(dir: &Path) -> SyncOutcome {
                 pending: true,
                 failed: true,
                 transport,
-                writes: 0,
             }
         }
     }
-}
-
-fn sync_task(dir: PathBuf, writes: u64) -> Task<Message> {
-    Task::perform(
-        async move {
-            let (sender, receiver) = iced::futures::channel::oneshot::channel();
-            std::thread::spawn(move || {
-                let _ = sender.send(run_sync(&dir));
-            });
-            let mut outcome = receiver.await.unwrap_or_else(|_| SyncOutcome {
-                detail: "Sync stopped before it finished.".to_owned(),
-                pending: true,
-                failed: true,
-                transport: false,
-                writes: 0,
-            });
-            outcome.writes = writes;
-            outcome
-        },
-        Message::Synced,
-    )
 }
 
 fn action_style(theme: &Theme, status: button::Status) -> button::Style {
@@ -7410,6 +7308,9 @@ fn open_task(dir: PathBuf) -> Task<Message> {
                 let result = (|| {
                     let _guard = io_lock();
                     let book = Notebook::open(&dir).map_err(|err| err.to_string())?;
+                    let files = lane::files_of(&book);
+                    lane::park_side(lane::compute(&files, &lane::OpenSnap::default()));
+                    lane::park_inbox(lane::inbox_of(&dir));
                     park_notebook(book);
                     Ok(())
                 })();
@@ -7484,6 +7385,7 @@ fn write_snapshot(
         None => book.add(title, body).map_err(|err| err.to_string())?,
     };
     let notes = book.list().map_err(|err| err.to_string())?;
+    lane::publish_saved(book);
     Ok((saved, notes))
 }
 
@@ -7515,6 +7417,7 @@ fn write_chapter(
     };
     let id = book.add(title, "").map_err(|err| err.to_string())?;
     let notes = book.list().map_err(|err| err.to_string())?;
+    lane::publish_saved(book);
     Ok(MadeChapter { notes, id, saved })
 }
 

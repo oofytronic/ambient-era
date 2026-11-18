@@ -4,6 +4,14 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-17 — the caret only paints
+
+The window's thread paints and takes keys. Folder work runs on two background threads that share one lock. One thread pulls only the conversation on screen, a few times a second, and pushes a line as soon as it is written. The other reads notes, builds the group list, and runs the slower full sync. A full sync leaves the open conversation to that faster pull. The lock is held across a sync so a save cannot be written over, and it is not held while word counts are added up.
+
+A click reads the projection already in memory. A save or a sync hands over a new projection when it finishes. The screen keeps what it drew until that arrives. Search shows title matches at once and fills in the rest when the scan finishes.
+
+The group list is built when the folder opens, in that same background pass, and is on the left before any note is clicked.
+
 ## 2026-11-17 — tags, the list, the pause, and note links
 
 A tag is a chip under the title. A `#` in the writing is not a tag. The chips are a hidden line at the end of the note, so they sync with the note and do not need a new record. Older notes that used `#name` in the writing are not filed until the chip is added.
