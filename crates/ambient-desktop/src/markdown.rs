@@ -28,6 +28,8 @@ pub(super) struct NoteBody {
     live_at: Option<(usize, usize)>,
     /// Last line we scrolled to. Arrowing to a new line reveals it.
     shown_line: usize,
+    /// Vertical offset of that scroll. `NaN` until the next key asks again.
+    shown_top: f32,
     /// Parsed once per text change. A drag must not parse the page again.
     cache: Vec<LineCache>,
     cached: String,
@@ -254,6 +256,7 @@ impl NoteBody {
             live: text_editor::Content::new(),
             live_at: None,
             shown_line: 0,
+            shown_top: f32::NAN,
             cache: Vec::new(),
             cached: String::new(),
         };
@@ -302,6 +305,7 @@ impl NoteBody {
             self.quench();
         }
         self.shown_line = position.line;
+        self.shown_top = f32::NAN;
         if let Some((start, end)) = self.live_at {
             let mut local = local_cursor(&text, &self.editor.cursor(), start, end);
             // The page paints the highlight. A second range here does not match it.
@@ -323,12 +327,14 @@ impl NoteBody {
         }
         self.editor = text_editor::Content::with_text(source);
         self.shown_line = 0;
+        self.shown_top = f32::NAN;
         self.sync_live();
     }
 
     /// Puts the caret back after `load` replaced the document.
     pub(super) fn place(&mut self, cursor: text_editor::Cursor) {
         self.shown_line = cursor.position.line;
+        self.shown_top = f32::NAN;
         let clear = cursor.selection.is_none();
         self.editor.move_to(cursor);
         if clear {
@@ -356,6 +362,7 @@ impl NoteBody {
         });
         self.quench();
         self.shown_line = position.line;
+        self.shown_top = f32::NAN;
         self.sync_live();
     }
 
@@ -369,6 +376,7 @@ impl NoteBody {
         });
         self.quench();
         self.shown_line = position.line;
+        self.shown_top = f32::NAN;
     }
 
     /// `move_to` leaves a selection in place when the new cursor has none.
@@ -403,19 +411,31 @@ impl NoteBody {
     }
 
     /// Scroll target for a find hit. Always the caret line, even if it just moved.
-    pub(super) fn reveal(&mut self) -> f32 {
+    pub(super) fn reveal(&mut self, measure: f32) -> f32 {
         self.shown_line = self.caret_line();
-        self.caret_top()
+        let top = self.caret_top(measure);
+        self.shown_top = top;
+        top
     }
 
-    /// `Some(y)` when the caret moved to another line and the page should scroll there.
-    pub(super) fn follow(&mut self) -> Option<f32> {
+    /// `Some(y)` when the caret moved to another line, or wrapped down the one it is on.
+    pub(super) fn follow(&mut self, measure: f32) -> Option<f32> {
         let line = self.caret_line();
-        if line == self.shown_line {
+        let top = self.caret_top(measure);
+        if line != self.shown_line {
+            self.shown_line = line;
+            self.shown_top = top;
+            return Some(top);
+        }
+        if self.shown_top.is_nan() {
+            self.shown_top = top;
             return None;
         }
-        self.shown_line = line;
-        Some(self.caret_top())
+        if (top - self.shown_top).abs() > 1.0 {
+            self.shown_top = top;
+            return Some(top);
+        }
+        None
     }
 
     pub(super) fn edit(&mut self, action: &Action) -> bool {
@@ -448,35 +468,78 @@ impl NoteBody {
         self.editor.cursor().position.line
     }
 
-    fn caret_top(&self) -> f32 {
-        let text = self.editor.text();
-        let line = self.caret_line();
-        let mut y = 0.0;
-        for (index, row) in text.split('\n').enumerate() {
-            if index == line {
-                break;
-            }
-            y += line_px(row) + 2.0;
-        }
-        y
+    fn caret_top(&self, measure: f32) -> f32 {
+        self.point_at(self.caret_byte(), measure).0
     }
 
-    /// Top of the selection, and the height of that line. `None` for a bare caret.
-    pub(super) fn selection_origin(&self) -> Option<(f32, f32)> {
+    /// Top of the selection, and the height of that visual row. `None` for a bare caret.
+    pub(super) fn selection_origin(&self, measure: f32) -> Option<(f32, f32)> {
         let (from, _) = self.selection_bounds()?;
+        Some(self.point_at(from, measure))
+    }
+
+    /// Y of the visual row that holds `byte`, and the height of that row.
+    fn point_at(&self, byte: usize, measure: f32) -> (f32, f32) {
         let text = self.editor.text();
-        let line = byte_pos(&text, from.min(text.len())).line;
+        let byte = byte.min(text.len());
+        let target = byte_pos(&text, byte).line;
+        let (win_start, win_end) = self.live_at.unwrap_or((0, 0));
+        let active = byte_pos(&text, win_start.min(text.len())).line;
         let mut y = 0.0;
-        let mut height = line_px("");
-        for (index, row) in text.split('\n').enumerate() {
-            let px = line_px(row);
-            if index == line {
-                height = px;
-                break;
+        for (index, line) in split_lines(&text).into_iter().enumerate() {
+            let base = line_start(&text, index);
+            let local_win = if index == active {
+                let start = win_start.saturating_sub(base).min(line.len());
+                let end = win_end.saturating_sub(base).min(line.len()).max(start);
+                start..end
+            } else {
+                0..0
+            };
+            let (font, size) = line_face(line);
+            let width = content_measure(line, measure);
+            let look = if index == active {
+                let probe = if local_win.start < local_win.end {
+                    local_win.end.saturating_sub(1)
+                } else {
+                    local_win.start.min(line.len())
+                };
+                let carry = self
+                    .cache
+                    .get(index)
+                    .map(|row| row.carry)
+                    .unwrap_or_default();
+                look_at(line, probe, carry, index == 0, false)
+            } else {
+                Look {
+                    size,
+                    font,
+                    color: None,
+                    strike: false,
+                    underline: false,
+                    background: None,
+                }
+            };
+            let ranges = wrap_ranges(
+                line,
+                width,
+                font,
+                size,
+                local_win.clone(),
+                look.font,
+                look.size,
+            );
+            let rows = block_rows(line, &ranges, &local_win, width, look.font, look.size);
+            if index == target {
+                let local = byte.saturating_sub(base).min(line.len());
+                let into = rows_before(
+                    line, local, &ranges, &local_win, width, look.font, look.size,
+                );
+                let height = line_px(line);
+                return (y + row_offset(into) * height, height);
             }
-            y += px + 2.0;
+            y += row_offset(rows) * line_px(line) + LINE_GAP;
         }
-        Some((y, height))
+        (y, line_px(""))
     }
 
     fn sync_live(&mut self) {
@@ -547,14 +610,19 @@ impl NoteBody {
     }
 }
 
-pub(super) fn view(body: &NoteBody, dark: bool, dragging: bool) -> Element<'_, Message> {
+pub(super) fn view(
+    body: &NoteBody,
+    dark: bool,
+    dragging: bool,
+    measure: f32,
+) -> Element<'_, Message> {
     let text = body.text();
     let (win_start, win_end) = body.live_at.unwrap_or((0, 0));
     let active = byte_pos(&text, win_start.min(text.len())).line;
     let selected = body.selection_bounds();
     let paint = selection_color(dark);
     let placeholder = text.is_empty();
-    let mut page = column![].spacing(2).width(Length::Fill);
+    let mut page = column![].spacing(LINE_GAP).width(Length::Fill);
     for (index, line) in split_lines(&text).into_iter().enumerate() {
         let incoming = body
             .cache
@@ -563,43 +631,163 @@ pub(super) fn view(body: &NoteBody, dark: bool, dragging: bool) -> Element<'_, M
             .unwrap_or_default();
         let at_start = index == 0;
         let base = line_start(&text, index);
-        if index == active {
-            let ls = base;
-            let le = line_end(&text, index);
-            let start = win_start.max(ls).saturating_sub(ls).min(line.len());
-            let end = win_end.min(le).saturating_sub(ls).min(line.len());
-            let end = end.max(start);
-            page = page.push(active_line(
+        page = page.push(line_block(
+            body,
+            line,
+            index,
+            base,
+            incoming,
+            at_start,
+            dark,
+            placeholder && line.is_empty(),
+            selected,
+            paint,
+            dragging,
+            measure,
+            index == active,
+            win_start,
+            win_end,
+        ));
+    }
+    page = page.push(press_at(space().height(48).into(), text.len(), dragging));
+    Release { child: page.into() }.into()
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::fn_params_excessive_bools
+)]
+fn line_block<'a>(
+    body: &'a NoteBody,
+    line: &str,
+    index: usize,
+    base: usize,
+    carry: Carry,
+    at_start: bool,
+    dark: bool,
+    placeholder: bool,
+    selected: Option<(usize, usize)>,
+    paint: Color,
+    dragging: bool,
+    measure: f32,
+    active: bool,
+    win_start: usize,
+    win_end: usize,
+) -> Element<'a, Message> {
+    let cached = body.cache.get(index);
+    if !active && (line.is_empty() || is_rule(line)) {
+        return settled_line(
+            line,
+            index,
+            base,
+            carry,
+            at_start,
+            dark,
+            selected,
+            paint,
+            dragging,
+            cached,
+            0..line.len(),
+        );
+    }
+    let width = content_measure(line, measure);
+    let (font, size) = line_face(line);
+    let local_win = if active {
+        let start = win_start.saturating_sub(base).min(line.len());
+        let end = win_end.saturating_sub(base).min(line.len()).max(start);
+        start..end
+    } else {
+        0..0
+    };
+    let probe = if local_win.start < local_win.end {
+        local_win.end.saturating_sub(1)
+    } else {
+        local_win.start.min(line.len())
+    };
+    let look = look_at(line, probe, carry, at_start, dark);
+    let ranges = wrap_ranges(
+        line,
+        width,
+        font,
+        size,
+        local_win.clone(),
+        look.font,
+        look.size,
+    );
+    if ranges.len() <= 1 {
+        return if active {
+            active_line(
                 body,
                 line,
                 index,
                 base,
-                start..end,
-                incoming,
+                local_win,
+                0..line.len(),
+                carry,
                 at_start,
                 dark,
-                placeholder && line.is_empty(),
+                placeholder,
                 selected,
                 paint,
                 dragging,
-            ));
+                width,
+            )
         } else {
-            page = page.push(settled_line(
+            settled_line(
                 line,
                 index,
                 base,
-                incoming,
+                carry,
                 at_start,
                 dark,
                 selected,
                 paint,
                 dragging,
-                body.cache.get(index),
+                cached,
+                0..line.len(),
+            )
+        };
+    }
+    let mut rows = column![].spacing(0).width(Length::Fill);
+    for (row_index, range) in ranges.iter().enumerate() {
+        let next = ranges
+            .get(row_index.saturating_add(1))
+            .map(|next| next.start);
+        if active && row_has_editor(range, &local_win, next) {
+            rows = rows.push(active_line(
+                body,
+                line,
+                index,
+                base,
+                local_win.clone(),
+                range.clone(),
+                carry,
+                at_start,
+                dark,
+                placeholder && range.start == 0,
+                selected,
+                paint,
+                dragging,
+                width,
+            ));
+        } else {
+            rows = rows.push(settled_line(
+                line,
+                index,
+                base,
+                carry,
+                at_start,
+                dark,
+                selected,
+                paint,
+                dragging,
+                cached,
+                range.clone(),
             ));
         }
     }
-    page = page.push(press_at(space().height(48).into(), text.len(), dragging));
-    Release { child: page.into() }.into()
+    rows.into()
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -3755,7 +3943,9 @@ fn rich_of<'a>(pieces: &[Piece], fill: bool, listen: bool, dragging: bool) -> El
         .line_height(LEADING)
         .font(sans());
     if fill {
-        rich = rich.width(Length::Fill);
+        rich = rich
+            .width(Length::Fill)
+            .wrapping(iced::advanced::text::Wrapping::Word);
     } else {
         rich = rich.wrapping(iced::advanced::text::Wrapping::None);
     }
@@ -3970,6 +4160,7 @@ fn active_line<'a>(
     index: usize,
     base: usize,
     win: Range<usize>,
+    show: Range<usize>,
     carry: Carry,
     at_start: bool,
     dark: bool,
@@ -3977,26 +4168,47 @@ fn active_line<'a>(
     selected: Option<(usize, usize)>,
     paint: Color,
     dragging: bool,
+    measure: f32,
 ) -> Element<'a, Message> {
     let cached = body.cache.get(index);
-    let prefix = shade(
-        line_pieces(cached, line, base, 0..win.start, carry, at_start, dark),
-        selected,
-        paint,
-    );
-    let suffix = shade(
-        line_pieces(
-            cached,
-            line,
-            base,
-            win.end..line.len(),
-            carry,
-            at_start,
-            dark,
-        ),
-        selected,
-        paint,
-    );
+    let prefix_from = show.start.min(win.start);
+    let prefix_to = win.start.min(show.end);
+    let prefix = if prefix_from < prefix_to {
+        shade(
+            line_pieces(
+                cached,
+                line,
+                base,
+                prefix_from..prefix_to,
+                carry,
+                at_start,
+                dark,
+            ),
+            selected,
+            paint,
+        )
+    } else {
+        Vec::new()
+    };
+    let suffix_from = win.end.max(show.start);
+    let suffix_to = show.end.max(suffix_from).min(line.len());
+    let suffix = if suffix_from < suffix_to {
+        shade(
+            line_pieces(
+                cached,
+                line,
+                base,
+                suffix_from..suffix_to,
+                carry,
+                at_start,
+                dark,
+            ),
+            selected,
+            paint,
+        )
+    } else {
+        Vec::new()
+    };
     let sample = line.get(win.start..win.end).unwrap_or("").to_owned();
     let probe = if win.start < win.end {
         win.end.saturating_sub(1)
@@ -4009,13 +4221,23 @@ fn active_line<'a>(
         // do not pick up a marker, link, or strike color for an empty slot.
         look.color = None;
     }
+    let natural = if sample.is_empty() {
+        0.0
+    } else {
+        text_width(&sample, look.font, look.size)
+    };
+    let wrap_editor = natural > measure;
     let mut editor = text_editor::TextEditor::new(&body.live)
         .id(iced::widget::Id::new("note-body"))
         .padding(Padding::ZERO)
         .size(look.size)
         .line_height(LEADING)
         .font(look.font)
-        .wrapping(iced::advanced::text::Wrapping::None)
+        .wrapping(if wrap_editor {
+            iced::advanced::text::Wrapping::Word
+        } else {
+            iced::advanced::text::Wrapping::None
+        })
         .on_action(Message::BodyEdited)
         .key_binding(binding)
         .style(move |theme, status| {
@@ -4036,16 +4258,21 @@ fn active_line<'a>(
             sample: sample.clone(),
             font: look.font,
             size: look.size,
-            span: covered(
-                selected,
-                base.saturating_add(win.start),
-                base.saturating_add(win.end),
-            ),
+            span: (!wrap_editor)
+                .then(|| {
+                    covered(
+                        selected,
+                        base.saturating_add(win.start),
+                        base.saturating_add(win.end),
+                    )
+                })
+                .flatten(),
             paint,
             child: Fitted {
                 sample: sample.clone(),
                 font: look.font,
                 size: look.size,
+                limit: wrap_editor.then_some(measure),
                 child: editor.into(),
             }
             .into(),
@@ -4076,13 +4303,13 @@ fn active_line<'a>(
     }
     .into();
     let lead = lead(line);
-    let quoted = quote_end(line).is_some() && win.start >= lead.skip;
+    let quoted = quote_end(line).is_some() && (show.start > 0 || win.start >= lead.skip);
     let body_row = if quoted {
         quote_row(hit, look.size, dark)
     } else {
         hit
     };
-    let show_box = lead.box_at.is_some();
+    let show_box = lead.box_at.is_some() && show.start == 0;
     if show_box {
         let done = lead.box_at.is_some_and(|(_, done)| done);
         row![
@@ -4110,6 +4337,7 @@ fn settled_line(
     paint: Color,
     dragging: bool,
     cached: Option<&LineCache>,
+    show: Range<usize>,
 ) -> Element<'static, Message> {
     if line.is_empty() {
         return press_at(
@@ -4134,7 +4362,7 @@ fn settled_line(
         );
     }
     let shown = shade(
-        line_pieces(cached, line, base, 0..line.len(), carry, at_start, dark),
+        line_pieces(cached, line, base, show.clone(), carry, at_start, dark),
         selected,
         paint,
     );
@@ -4149,7 +4377,9 @@ fn settled_line(
     } else {
         text
     };
-    if let Some((_, done)) = lead.box_at {
+    if show.start == 0
+        && let Some((_, done)) = lead.box_at
+    {
         row![
             checkbox(done).on_toggle(move |done| Message::SetOpenTask { line: index, done }),
             body,
@@ -4490,6 +4720,302 @@ impl<'a> From<MarkedWord<'a>> for Element<'a, Message> {
     fn from(word: MarkedWord<'a>) -> Self {
         Element::new(word)
     }
+}
+
+fn row_offset(rows: usize) -> f32 {
+    f32::from(u16::try_from(rows).unwrap_or(u16::MAX))
+}
+
+fn line_face(line: &str) -> (Font, f32) {
+    if let Some((_, level)) = heading_end(line) {
+        let font = if level <= 2 { serif() } else { sans_bold() };
+        return (font, heading_px(level));
+    }
+    (sans(), BODY)
+}
+
+/// Room left for the words after a quote bar or a checkbox.
+fn content_measure(line: &str, measure: f32) -> f32 {
+    let mut chrome = 0.0;
+    if quote_end(line).is_some() {
+        chrome += 11.0;
+    }
+    if lead(line).box_at.is_some() {
+        chrome += 26.0;
+    }
+    (measure - chrome).max(48.0)
+}
+
+fn row_has_editor(range: &Range<usize>, win: &Range<usize>, next_start: Option<usize>) -> bool {
+    if win.end > win.start {
+        return range.start < win.end && win.start < range.end;
+    }
+    let at = win.start;
+    if range.start <= at && at < range.end {
+        return true;
+    }
+    match next_start {
+        Some(start) => range.end <= at && at < start,
+        None => range.end <= at && range.start <= at,
+    }
+}
+
+fn block_rows(
+    line: &str,
+    ranges: &[Range<usize>],
+    atomic: &Range<usize>,
+    measure: f32,
+    font: Font,
+    size: f32,
+) -> usize {
+    let mut rows = ranges.len().max(1);
+    if atomic.end > atomic.start
+        && ranges
+            .iter()
+            .any(|range| range.start == atomic.start && range.end == atomic.end)
+    {
+        let sample = line.get(atomic.clone()).unwrap_or("");
+        let sub = wrap_ranges(sample, measure, font, size, 0..0, font, size);
+        if sub.len() > 1 {
+            rows = rows.saturating_sub(1).saturating_add(sub.len());
+        }
+    }
+    rows
+}
+
+fn rows_before(
+    line: &str,
+    local: usize,
+    ranges: &[Range<usize>],
+    atomic: &Range<usize>,
+    measure: f32,
+    font: Font,
+    size: f32,
+) -> usize {
+    let mut count = 0usize;
+    for (index, range) in ranges.iter().enumerate() {
+        let next = ranges.get(index.saturating_add(1)).map(|next| next.start);
+        let inside_atomic = atomic.end > atomic.start
+            && range.start < atomic.end
+            && atomic.start < range.end
+            && local >= atomic.start
+            && local <= atomic.end;
+        if inside_atomic || row_has_editor(range, &(local..local), next) {
+            if atomic.end > atomic.start
+                && range.start == atomic.start
+                && range.end == atomic.end
+                && local >= atomic.start
+            {
+                let sample = line.get(atomic.clone()).unwrap_or("");
+                let sub = wrap_ranges(sample, measure, font, size, 0..0, font, size);
+                if sub.len() > 1 {
+                    let inner = local.saturating_sub(atomic.start).min(sample.len());
+                    count = count.saturating_add(subrow_index(&sub, inner));
+                }
+            }
+            break;
+        }
+        count = count.saturating_add(1);
+    }
+    count
+}
+
+fn subrow_index(ranges: &[Range<usize>], local: usize) -> usize {
+    for (index, range) in ranges.iter().enumerate() {
+        let last = index.saturating_add(1) == ranges.len();
+        if local < range.end || (last && local <= range.end) {
+            return index;
+        }
+    }
+    0
+}
+
+fn wrap_ranges(
+    line: &str,
+    measure: f32,
+    font: Font,
+    size: f32,
+    atomic: Range<usize>,
+    atomic_font: Font,
+    atomic_size: f32,
+) -> Vec<Range<usize>> {
+    if line.is_empty() {
+        return one_row(0..0);
+    }
+    let measure = measure.max(48.0);
+    // A glyph is not wider than the em. Skip measurement when the line cannot reach the edge.
+    let glyphs = u16::try_from(line.chars().count()).unwrap_or(u16::MAX);
+    if f32::from(glyphs) * size.max(1.0) <= measure {
+        return one_row(0..line.len());
+    }
+    wrap_by(line, measure, atomic, |slice, exact| {
+        if exact {
+            text_width(slice, atomic_font, atomic_size)
+        } else {
+            text_width(slice, font, size)
+        }
+    })
+}
+
+#[allow(clippy::vec_init_then_push)]
+fn one_row(range: Range<usize>) -> Vec<Range<usize>> {
+    let mut rows = Vec::with_capacity(1);
+    rows.push(range);
+    rows
+}
+
+fn wrap_by(
+    line: &str,
+    measure: f32,
+    atomic: Range<usize>,
+    width_of: impl Fn(&str, bool) -> f32,
+) -> Vec<Range<usize>> {
+    let atomic = if atomic.start < atomic.end && atomic.end <= line.len() {
+        atomic
+    } else {
+        0..0
+    };
+    let measure = measure.max(1.0);
+    let mut rows = Vec::new();
+    let mut start = 0usize;
+    while start < line.len() && rows.len() < line.len().saturating_add(1) {
+        if start > 0 {
+            while start < line.len() && is_space_at(line, start) {
+                start = step_char(line, start);
+            }
+        }
+        if start >= line.len() {
+            break;
+        }
+        let row_start = start;
+        let mut cursor = start;
+        let mut row_end = start;
+        let mut pushed_split = false;
+        while cursor < line.len() {
+            if cursor > row_start && is_space_at(line, cursor) {
+                cursor = skip_spaces(line, cursor, &atomic);
+                continue;
+            }
+            let word_end = token_end(line, cursor, &atomic);
+            if word_end <= cursor {
+                break;
+            }
+            let exact = cursor == atomic.start && word_end == atomic.end && row_start == cursor;
+            let width = width_of(line.get(row_start..word_end).unwrap_or(""), exact);
+            if row_end > row_start && width > measure {
+                break;
+            }
+            if row_end == row_start && width > measure {
+                if exact {
+                    rows.push(cursor..word_end);
+                    start = word_end;
+                } else {
+                    let cut = split_to_fit(line, cursor, word_end, measure, &width_of);
+                    rows.push(cursor..cut);
+                    start = cut;
+                }
+                pushed_split = true;
+                break;
+            }
+            row_end = word_end;
+            cursor = word_end;
+        }
+        if pushed_split {
+            continue;
+        }
+        if row_end <= row_start {
+            let cut = step_char(line, row_start).min(line.len());
+            if cut <= row_start {
+                break;
+            }
+            rows.push(row_start..cut);
+            start = cut;
+            continue;
+        }
+        rows.push(row_start..row_end);
+        start = row_end;
+    }
+    if rows.is_empty() {
+        rows.push(0..line.len());
+    }
+    rows
+}
+
+fn split_to_fit(
+    line: &str,
+    start: usize,
+    end: usize,
+    measure: f32,
+    width_of: &impl Fn(&str, bool) -> f32,
+) -> usize {
+    let mut fit = start;
+    let mut cursor = start;
+    while cursor < end {
+        let next = step_char(line, cursor).min(end);
+        if next <= cursor {
+            break;
+        }
+        let width = width_of(line.get(start..next).unwrap_or(""), false);
+        if width > measure && fit > start {
+            return fit;
+        }
+        fit = next;
+        cursor = next;
+        if width > measure {
+            break;
+        }
+    }
+    if fit == start {
+        step_char(line, start).min(end)
+    } else {
+        fit
+    }
+}
+
+fn token_end(line: &str, index: usize, atomic: &Range<usize>) -> usize {
+    if atomic.start < atomic.end && index >= atomic.start && index < atomic.end {
+        return atomic.end;
+    }
+    let mut end = index;
+    while end < line.len() && !is_space_at(line, end) {
+        if atomic.start < atomic.end && end == atomic.start {
+            break;
+        }
+        let next = step_char(line, end);
+        if next <= end {
+            break;
+        }
+        end = next;
+    }
+    end
+}
+
+fn skip_spaces(line: &str, mut index: usize, atomic: &Range<usize>) -> usize {
+    while index < line.len() && is_space_at(line, index) {
+        if atomic.start < atomic.end && index == atomic.start {
+            break;
+        }
+        let next = step_char(line, index);
+        if next <= index {
+            break;
+        }
+        index = next;
+    }
+    index
+}
+
+fn is_space_at(line: &str, index: usize) -> bool {
+    line.get(index..)
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(char::is_whitespace)
+}
+
+fn step_char(line: &str, index: usize) -> usize {
+    index.saturating_add(
+        line.get(index..)
+            .and_then(|rest| rest.chars().next())
+            .map_or(1, char::len_utf8),
+    )
 }
 
 fn text_width(sample: &str, font: Font, size: f32) -> f32 {
@@ -4850,6 +5376,12 @@ fn hit_sample(sample: &str, font: Font, size: f32, bounds: Size, point: iced::Po
     if sample.is_empty() {
         return 0;
     }
+    let natural = text_width(sample, font, size);
+    let wrapping = if natural > bounds.width.max(1.0) {
+        iced::advanced::text::Wrapping::Word
+    } else {
+        iced::advanced::text::Wrapping::None
+    };
     let paragraph = <iced::Renderer as iced::advanced::text::Renderer>::Paragraph::with_text(
         iced::advanced::text::Text {
             content: sample,
@@ -4860,7 +5392,7 @@ fn hit_sample(sample: &str, font: Font, size: f32, bounds: Size, point: iced::Po
             align_x: iced::advanced::text::Alignment::Left,
             align_y: iced::alignment::Vertical::Top,
             shaping: iced::advanced::text::Shaping::Advanced,
-            wrapping: iced::advanced::text::Wrapping::None,
+            wrapping,
         },
     );
     paragraph
@@ -4873,6 +5405,8 @@ struct Fitted<'a> {
     sample: String,
     font: Font,
     size: f32,
+    /// When set, a sample wider than this wraps instead of stretching the page.
+    limit: Option<f32>,
     child: Element<'a, Message>,
 }
 
@@ -4912,10 +5446,14 @@ impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for Fitted<'
             },
         );
         let measured = paragraph.min_width();
-        let width = if self.sample.is_empty() {
+        let natural = if self.sample.is_empty() {
             2.0
         } else {
             measured + 2.0
+        };
+        let width = match self.limit {
+            Some(limit) if natural > limit => limit.max(48.0),
+            _ => natural,
         };
         let limits = limits.width(Length::Fixed(width)).height(Length::Shrink);
         let Some(child) = tree.children.first_mut() else {
@@ -5948,8 +6486,27 @@ mod tests {
         body.load("alpha\nbeta gamma");
         body.select_between(0, 5);
         assert_eq!(
-            body.selection_origin(),
+            body.selection_origin(4_000.0),
             Some((0.0, super::line_px("alpha")))
         );
+    }
+
+    #[test]
+    fn a_paragraph_wraps_before_the_measure() {
+        let rows = super::wrap_by("one two three", 7.0, 0..0, |text, _exact| {
+            text.chars().count() as f32
+        });
+        assert_eq!(rows, vec![0..7, 8..13]);
+        let wide = super::wrap_ranges(
+            "alpha",
+            4_000.0,
+            iced::Font::default(),
+            17.0,
+            0..0,
+            iced::Font::default(),
+            17.0,
+        );
+        assert_eq!(wide.len(), 1);
+        assert_eq!(wide.first().cloned(), Some(0..5));
     }
 }

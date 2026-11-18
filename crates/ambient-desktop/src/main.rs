@@ -1526,7 +1526,7 @@ impl App {
             .height(Fill)
             .into();
         }
-        let mut body = row![].height(Fill);
+        let mut body = row![].width(Fill).height(Fill);
         if self.show_list {
             body = body.push(self.sidebar()).push(hairline_v());
         }
@@ -1539,6 +1539,7 @@ impl App {
             }
         }
         column![self.toolbar(), hairline(), body]
+            .width(Fill)
             .height(Fill)
             .into()
     }
@@ -3645,6 +3646,34 @@ impl App {
         }
     }
 
+    /// Width of the middle pane, inside its padding. The list and the group panel take their share first.
+    fn pane_inner(&self) -> f32 {
+        if self.compact() {
+            return (self.size.width - self.gutter_x() * 2.0).max(160.0);
+        }
+        let mut chrome = self.gutter_x() * 2.0 + 28.0;
+        if self.show_list {
+            chrome += self.side_width() + 1.0;
+        }
+        if self.context_room() {
+            chrome += 28.0;
+            if self.show_context {
+                chrome += 241.0;
+            }
+        }
+        (self.size.width - chrome).max(160.0)
+    }
+
+    /// The writing column. It grows with the middle pane, and stops at a readable measure.
+    fn writing_column(&self) -> f32 {
+        self.pane_inner().min(720.0)
+    }
+
+    /// Where a paragraph wraps. A little inside the column, so the scrollbar is not the margin.
+    fn writing_width(&self) -> f32 {
+        (self.writing_column() - 8.0).max(120.0)
+    }
+
     fn gutter(&self) -> f32 {
         if self.compact() { 12.0 } else { 22.0 }
     }
@@ -4206,7 +4235,7 @@ impl App {
     }
 
     fn note_reveal(&mut self) -> Task<Message> {
-        let y = (self.body.reveal() - 72.0).max(0.0);
+        let y = (self.body.reveal(self.writing_width()) - 72.0).max(0.0);
         Task::batch([
             iced::widget::operation::focus(iced::widget::Id::new("note-body")),
             iced::widget::operation::scroll_to(
@@ -4314,16 +4343,31 @@ impl App {
             && self.show_context
             && let Some(rail) = self.chapter_rail(chapters)
         {
-            return column![rail, page].spacing(12).height(Fill).into();
+            return column![rail, self.writing_frame(page)]
+                .spacing(12)
+                .width(Fill)
+                .height(Fill)
+                .into();
         }
-        page.into()
+        self.writing_frame(page)
+    }
+
+    fn writing_frame<'a>(&self, page: iced::widget::Column<'a, Message>) -> Element<'a, Message> {
+        container(page.max_width(self.writing_column()).clip(true))
+            .width(Fill)
+            .height(Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .into()
     }
 
     fn editor_page(&self) -> Element<'_, Message> {
         markdown::set_known_links(self.known_links.clone());
         let dragging = self.pointer_down && self.drag_from.is_some();
-        let page = markdown::view(&self.body, self.is_dark(), dragging);
-        let Some((y, height)) = (!dragging).then(|| self.body.selection_origin()).flatten() else {
+        let page = markdown::view(&self.body, self.is_dark(), dragging, self.writing_width());
+        let Some((y, height)) = (!dragging)
+            .then(|| self.body.selection_origin(self.writing_width()))
+            .flatten()
+        else {
             return page;
         };
         let lift = if y >= 38.0 {
@@ -4774,7 +4818,11 @@ impl App {
     }
 
     fn note_follow(&mut self, scroll: bool) -> Task<Message> {
-        let jump = if scroll { self.body.follow() } else { None };
+        let jump = if scroll {
+            self.body.follow(self.writing_width())
+        } else {
+            None
+        };
         let focus = iced::widget::operation::focus(iced::widget::Id::new("note-body"));
         if let Some(top) = jump {
             let y = (top - 72.0).max(0.0);

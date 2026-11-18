@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-18 — the writing column wraps
+
+A paragraph wraps inside a readable measure, about the width of a printed page, centered in the middle. The left list, the writing, and the group panel are three columns. Closing one side gives that room to the middle. The writing stays inside the measure and does not run under a panel.
+
 ## 2026-11-17 — the caret only paints
 
 The window's thread paints and takes keys. Folder work runs on two background threads that share one lock. One thread pulls only the conversation on screen, a few times a second, and pushes a line as soon as it is written. The other reads notes, builds the group list, and runs the slower full sync. A full sync leaves the open conversation to that faster pull. The lock is held across a sync so a save cannot be written over, and it is not held while word counts are added up.
