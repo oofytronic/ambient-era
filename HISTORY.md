@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-18 — search, versions, and a citation
+
+After a pause, a misspelled word is underlined and a mark that is still open is one quiet line. Neither check runs on the caret's thread. Search shows the line that matched, in a note or in a conversation. A note link can name one version of a note, `[[id@version|title]]`. The version is the event id. The current head opens the note. An older snapshot opens read-only and is not written back. A task keeps a note link on its line. A chat line cites a note in the existing `msg.put` field. That field is the note id only. It grants no key and no later edits.
+
 ## 2026-11-18 — the writing column wraps
 
 A paragraph wraps inside a readable measure, about the width of a printed page, centered in the middle. The left list, the writing, and the group panel are three columns. Closing one side gives that room to the middle. The writing stays inside the measure and does not run under a panel.

@@ -12,7 +12,7 @@ use ambient_identity::{
     decode_pair_offer_text, device_from_seeds, encode_pair_offer, pair_offer_text,
 };
 use ambient_spaces::{
-    ChatLine, GenesisMember, conversation_genesis_payload, msg_put_payload, open_blob,
+    ChatLine, GenesisMember, conversation_genesis_payload, msg_put_citing, open_blob,
     project_conversation, seal_blob,
 };
 use ambient_store::{read_log, write_log};
@@ -573,6 +573,15 @@ pub(crate) fn say(dir: &Path, text: &str) -> Result<(), CliError> {
 }
 
 pub(crate) fn say_in(dir: &Path, id: &str, text: &str) -> Result<(), CliError> {
+    say_citing(dir, id, text, None)
+}
+
+pub(crate) fn say_citing(
+    dir: &Path,
+    id: &str,
+    text: &str,
+    cite: Option<&str>,
+) -> Result<(), CliError> {
     let local = keys::open(dir)?;
     let mut slots = load_slots(dir, &local.store_key)?;
     let slot = slots
@@ -580,7 +589,12 @@ pub(crate) fn say_in(dir: &Path, id: &str, text: &str) -> Result<(), CliError> {
         .find(|slot| slot.space_id().as_deref() == Some(id))
         .ok_or_else(|| CliError::message("no such conversation"))?;
     let view = conversation(&slot.wires)?;
-    let payload = msg_put_payload(text).map_err(|_| CliError::message("message is too long"))?;
+    let note = match cite {
+        Some(id) => Some(parse_note_id(id)?),
+        None => None,
+    };
+    let payload = msg_put_citing(text, note.as_ref())
+        .map_err(|_| CliError::message("message is too long"))?;
     let prev = view.tip.get(&slot.card.signing_key).copied();
     slot.wires.push(sign_as(
         &slot.card,
@@ -1145,6 +1159,7 @@ fn chat_snap(dir: &Path) -> Result<ChatSnap, CliError> {
                 text: line.text.clone(),
                 unix_ms: line.unix_ms,
                 mine: line.sender == slot.card.signing_key,
+                cite: line.cite.map(|id| hex_id(&id)),
             });
         }
         listed.push((id.clone(), label, other));
@@ -1317,6 +1332,22 @@ fn accept_chat(wires: &mut Vec<Vec<u8>>, arrived: &[Vec<u8>]) {
             }
         }
     }
+}
+
+fn parse_note_id(text: &str) -> Result<[u8; 32], CliError> {
+    if text.len() != 64 {
+        return Err(CliError::message("note id must be 64 hex characters"));
+    }
+    let mut out = [0_u8; 32];
+    for (index, slot) in out.iter_mut().enumerate() {
+        let start = index.saturating_mul(2);
+        let pair = text
+            .get(start..start.saturating_add(2))
+            .ok_or_else(|| CliError::message("note id must be 64 hex characters"))?;
+        *slot = u8::from_str_radix(pair, 16)
+            .map_err(|_| CliError::message("note id must be 64 hex characters"))?;
+    }
+    Ok(out)
 }
 
 fn hex_id(bytes: &[u8]) -> String {

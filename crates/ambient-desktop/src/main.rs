@@ -221,6 +221,26 @@ struct App {
     cached_backlinks: Vec<(String, String)>,
     /// Ids and lowercase titles a note link can open. Empty until the list is read.
     known_links: Option<Arc<BTreeSet<String>>>,
+    /// Body last sent to the proof job. Unchanged text is not sent again.
+    proof_body: String,
+    /// One quiet line. Empty when the marks are closed.
+    proof_warning: String,
+    /// Misspelled words from the last proof. The caret thread only reads this.
+    misspellings: Arc<BTreeSet<String>>,
+    /// Matching line for each note id from the last search.
+    search_lines: BTreeMap<String, String>,
+    /// Conversations whose lines matched the note search.
+    search_chats: Vec<lane::ChatHit>,
+    /// An older snapshot on screen. It is not the editor and it is not saved.
+    older: Option<OlderNote>,
+    /// Note id of a version open that has not arrived yet.
+    version_wait: Option<String>,
+    /// Note cited by the next chat message.
+    chat_cite: Option<(String, String)>,
+    cite_open: bool,
+    /// Note cited by the next task.
+    task_cite: Option<(String, String)>,
+    task_cite_open: bool,
     /// Background folder work. The caret's thread only posts a job.
     lane: std::sync::mpsc::Sender<lane::Job>,
     /// Every group's pieces, filled off the caret's thread.
@@ -272,6 +292,18 @@ enum Message {
     AddTag,
     RemoveTag(String),
     CompleteLink(String),
+    CompleteVersion {
+        id: String,
+        version: String,
+    },
+    CloseVersion,
+    OpenCited(String),
+    ToggleChatCite,
+    PickChatCite(String),
+    ClearChatCite,
+    ToggleTaskCite,
+    PickTaskCite(String),
+    ClearTaskCite,
     Lane(lane::Done),
     AutoSync,
     ToggleSyncPop,
@@ -414,6 +446,12 @@ struct TaskRow {
     line: usize,
     done: bool,
     text: String,
+}
+
+struct OlderNote {
+    id: String,
+    title: String,
+    body: String,
 }
 
 struct Chapter {
@@ -753,6 +791,17 @@ impl App {
             known_links: None,
             lane: lane::start(),
             group_views: Vec::new(),
+            proof_body: String::new(),
+            proof_warning: String::new(),
+            misspellings: Arc::new(BTreeSet::new()),
+            search_lines: BTreeMap::new(),
+            search_chats: Vec::new(),
+            older: None,
+            version_wait: None,
+            chat_cite: None,
+            cite_open: false,
+            task_cite: None,
+            task_cite_open: false,
         };
         let saved = profile::load_profile(&app.dir);
         app.appearance = saved.appearance;
@@ -855,6 +904,8 @@ impl App {
             Message::QueryChanged(query) => {
                 self.query = query;
                 self.search_hits = None;
+                self.search_lines.clear();
+                self.search_chats.clear();
                 if self.query.is_empty() {
                     self.refresh_shown();
                 } else {
@@ -1075,7 +1126,43 @@ impl App {
                 self.remove_tag(&tag);
                 Task::none()
             }
-            Message::CompleteLink(id) => self.complete_link(&id),
+            Message::CompleteLink(id) => self.complete_link(&id, None),
+            Message::CompleteVersion { id, version } => {
+                self.complete_link(&id, Some(version.as_str()))
+            }
+            Message::CloseVersion => {
+                self.close_version();
+                Task::none()
+            }
+            Message::OpenCited(target) => {
+                let (name, version) = markdown::split_version(&target);
+                self.open_note_link(&name, version.as_deref());
+                Task::none()
+            }
+            Message::ToggleChatCite => {
+                self.cite_open = !self.cite_open;
+                Task::none()
+            }
+            Message::PickChatCite(id) => {
+                self.pick_cite(&id, false);
+                Task::none()
+            }
+            Message::ClearChatCite => {
+                self.chat_cite = None;
+                Task::none()
+            }
+            Message::ToggleTaskCite => {
+                self.task_cite_open = !self.task_cite_open;
+                Task::none()
+            }
+            Message::PickTaskCite(id) => {
+                self.pick_cite(&id, true);
+                Task::none()
+            }
+            Message::ClearTaskCite => {
+                self.task_cite = None;
+                Task::none()
+            }
             Message::Lane(done) => {
                 self.apply_lane(done);
                 Task::none()
@@ -1404,7 +1491,7 @@ impl App {
                     .find(|task| task.note_id == id && task.line == line)
                     .map(|task| task.text.clone())
                     .unwrap_or_default();
-                markdown::due_day(&label)
+                markdown::due_day(&markdown::without_cites(&label))
                     .unwrap_or("")
                     .clone_into(&mut self.task_due_text);
                 self.task_rename_text = markdown::task_words(&label);
@@ -1863,6 +1950,12 @@ impl App {
                 list = list.push(self.note_row(note, 0.0));
             }
         }
+        if !self.query.trim().is_empty() && !self.search_chats.is_empty() {
+            list = list.push(text("Conversations").size(12).color(ink.muted).width(Fill));
+            for chat in &self.search_chats {
+                list = list.push(self.chat_hit_row(chat));
+            }
+        }
         block.push(vscroll(list).height(Fill).width(Fill)).into()
     }
 
@@ -1895,6 +1988,14 @@ impl App {
             note.title.clone()
         };
         let mut lines = column![text(title).font(serif()).size(17).width(Fill)].spacing(2);
+        if !self.query.trim().is_empty()
+            && let Some(line) = self
+                .search_lines
+                .get(&note.id)
+                .filter(|line| !line.is_empty())
+        {
+            lines = lines.push(text(line.clone()).size(12).color(ink.muted).width(Fill));
+        }
         let mut meta = note.writer.clone();
         if note.conflict {
             if !meta.is_empty() {
@@ -1929,6 +2030,29 @@ impl App {
             .into()
     }
 
+    fn chat_hit_row(&self, hit: &lane::ChatHit) -> Element<'_, Message> {
+        let ink = self.ink();
+        let label = self
+            .aliases
+            .get(&hit.id)
+            .filter(|name| !name.is_empty())
+            .cloned()
+            .unwrap_or_else(|| hit.label.clone());
+        let id = hit.id.clone();
+        button(
+            column![
+                text(label).size(15).width(Fill),
+                text(hit.line.clone()).size(12).color(ink.muted).width(Fill),
+            ]
+            .spacing(2),
+        )
+        .width(Fill)
+        .padding([8.0, 10.0])
+        .on_press(Message::SelectChat(id))
+        .style(list_row(false))
+        .into()
+    }
+
     fn tasks_pane(&self) -> Element<'_, Message> {
         let ink = self.ink();
         let add = row![
@@ -1939,6 +2063,14 @@ impl App {
                 .width(Fill)
                 .style(field_style),
             action_label("Add", Message::AddTask),
+            ghost_label(
+                if self.task_cite.is_some() {
+                    "Cited"
+                } else {
+                    "Cite"
+                },
+                Message::ToggleTaskCite,
+            ),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center)
@@ -1964,6 +2096,41 @@ impl App {
         if self.tasks.iter().any(|task| task.done) {
             tools = tools.push(ghost_label("Clear done", Message::AskClearDone));
         }
+        let list = self.task_groups(&ink);
+        let mut page = column![add].spacing(12).width(Fill).height(Fill);
+        if let Some((_, title)) = &self.task_cite {
+            page = page.push(
+                row![
+                    text(title.clone()).size(13).width(Fill),
+                    ghost_label("Remove", Message::ClearTaskCite),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        if self.task_cite_open {
+            page = page.push(self.cite_menu(true));
+        }
+        if searching {
+            page = page.push(
+                text_input("Search tasks", &self.task_query)
+                    .id(iced::widget::Id::new("task-search"))
+                    .on_input(Message::TaskQuery)
+                    .padding(10)
+                    .width(Fill)
+                    .style(field_style),
+            );
+        }
+        page = page
+            .push(tools)
+            .push(text("This goes in a note named Tasks. A box in any other note shows up here too. A date at the end, like 2026-11-20, is the due day.").size(13).color(ink.muted));
+        if self.confirm_clear {
+            page = page.push(self.clear_confirm());
+        }
+        page.push(vscroll(list).height(Fill).width(Fill)).into()
+    }
+
+    fn task_groups(&self, ink: &Ink) -> Element<'_, Message> {
         let mut list = column![].spacing(14).width(Fill);
         let open: Vec<&TaskRow> = self
             .tasks
@@ -2003,24 +2170,7 @@ impl App {
                 list = list.push(self.task_row(task));
             }
         }
-        let mut page = column![add].spacing(12).width(Fill).height(Fill);
-        if searching {
-            page = page.push(
-                text_input("Search tasks", &self.task_query)
-                    .id(iced::widget::Id::new("task-search"))
-                    .on_input(Message::TaskQuery)
-                    .padding(10)
-                    .width(Fill)
-                    .style(field_style),
-            );
-        }
-        page = page
-            .push(tools)
-            .push(text("This goes in a note named Tasks. A box in any other note shows up here too. A date at the end, like 2026-11-20, is the due day.").size(13).color(ink.muted));
-        if self.confirm_clear {
-            page = page.push(self.clear_confirm());
-        }
-        page.push(vscroll(list).height(Fill).width(Fill)).into()
+        list.into()
     }
 
     fn task_hit(&self, task: &TaskRow) -> bool {
@@ -2066,6 +2216,7 @@ impl App {
             .align_y(iced::Alignment::Center)
             .into()
         } else {
+            let plain = markdown::without_cites(&task.text);
             let words_text = markdown::task_words(&task.text);
             let label = if words_text.is_empty() {
                 "Empty task".to_owned()
@@ -2075,7 +2226,7 @@ impl App {
             let mut lines = column![text(label).size(16).color(words)]
                 .spacing(2)
                 .width(Fill);
-            if let Some(day) = markdown::due_day(&task.text) {
+            if let Some(day) = markdown::due_day(&plain) {
                 lines = lines.push(text(format!("Due {day}")).size(12).color(ink.muted));
             }
             lines = lines.push(text(title).size(12).color(ink.muted));
@@ -2097,10 +2248,17 @@ impl App {
         .spacing(12)
         .align_y(iced::Alignment::Center)
         .width(Fill);
-        column![line_row, self.task_actions(task, editing)]
-            .spacing(4)
-            .width(Fill)
-            .into()
+        let mut block = column![line_row].spacing(4).width(Fill);
+        for (target, title) in markdown::task_cites(&task.text) {
+            let target = target.clone();
+            block = block.push(
+                button(text(title).size(13))
+                    .padding([2, 0])
+                    .on_press(Message::OpenCited(target))
+                    .style(quiet_style),
+            );
+        }
+        block.push(self.task_actions(task, editing)).into()
     }
 
     fn task_actions(&self, task: &TaskRow, editing: bool) -> Element<'_, Message> {
@@ -2240,6 +2398,12 @@ impl App {
             return Task::none();
         };
         let label = self.task_rename_text.clone();
+        let marks = self
+            .tasks
+            .iter()
+            .find(|task| task.note_id == id && task.line == line)
+            .map(|task| markdown::cite_marks(&task.text))
+            .unwrap_or_default();
         if label.trim().is_empty() && self.task_due_text.trim().is_empty() {
             self.say("Write the task first.");
             return Task::none();
@@ -2249,7 +2413,11 @@ impl App {
             self.say("Use a date like 2026-11-20.");
             return Task::none();
         }
-        let label = markdown::join_due(&label, due);
+        let mut label = markdown::join_due(&label, due);
+        for mark in marks {
+            label.push(' ');
+            label.push_str(&mark);
+        }
         let Some((body, conflict, title)) = self.task_source(&id) else {
             self.say("That note is not here.");
             return Task::none();
@@ -2692,6 +2860,14 @@ impl App {
                 field,
                 row![
                     ghost_label("Add", Message::PickFile),
+                    ghost_label(
+                        if self.chat_cite.is_some() {
+                            "Cited"
+                        } else {
+                            "Cite"
+                        },
+                        Message::ToggleChatCite,
+                    ),
                     space().width(Fill),
                     action_label("Send", Message::SendChat),
                 ]
@@ -2705,6 +2881,14 @@ impl App {
         } else {
             row![
                 ghost_label("Add", Message::PickFile),
+                ghost_label(
+                    if self.chat_cite.is_some() {
+                        "Cited"
+                    } else {
+                        "Cite"
+                    },
+                    Message::ToggleChatCite,
+                ),
                 field,
                 action_label("Send", Message::SendChat),
             ]
@@ -2738,6 +2922,19 @@ impl App {
                 .size(12)
                 .color(ink.muted),
             );
+        }
+        if let Some((_, title)) = &self.chat_cite {
+            composer = composer.push(
+                row![
+                    text(title.clone()).size(13).width(Fill),
+                    ghost_label("Remove", Message::ClearChatCite),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        if self.cite_open {
+            composer = composer.push(self.cite_menu(false));
         }
         composer
             .push(controls)
@@ -3082,6 +3279,8 @@ impl App {
     }
 
     fn show_note(&mut self, id: &str) {
+        self.older = None;
+        self.version_wait = None;
         self.send_open = false;
         self.confirm_delete = false;
         if self.selected.as_deref() == Some(id) && self.editor_dirty() {
@@ -3130,12 +3329,15 @@ impl App {
                 self.message.clear();
                 self.reading = false;
                 self.touch_group();
+                self.reset_proof();
             }
             Err(err) => self.message = err.to_string(),
         }
     }
 
     fn clear_editor(&mut self) {
+        self.older = None;
+        self.version_wait = None;
         self.send_open = false;
         self.confirm_delete = false;
         self.remember_unsaved();
@@ -3160,6 +3362,7 @@ impl App {
             self.title_text = title;
             self.load_sealed(&body);
             self.edited_at = Some(Instant::now());
+            self.reset_proof();
             self.touch_group();
             return;
         }
@@ -3169,6 +3372,7 @@ impl App {
         self.body.load("");
         self.edited_at = None;
         self.message.clear();
+        self.reset_proof();
         self.touch_group();
     }
 
@@ -3375,12 +3579,32 @@ impl App {
                 }
             }
             lane::Done::Inbox(rows) => self.apply_inbox(&rows),
-            lane::Done::Found { query, notes } => {
+            lane::Done::Found {
+                query,
+                notes,
+                chats,
+            } => {
                 if self.query == query {
-                    self.search_hits = Some(notes);
+                    self.search_lines = notes
+                        .iter()
+                        .map(|hit| (hit.note.id.clone(), hit.line.clone()))
+                        .collect();
+                    self.search_chats = chats;
+                    self.search_hits = Some(notes.into_iter().map(|hit| hit.note).collect());
                     self.refresh_shown();
                 }
             }
+            lane::Done::Proof {
+                text,
+                warning,
+                words,
+            } => self.apply_proof(&text, warning, words),
+            lane::Done::Version {
+                id,
+                title,
+                body,
+                current,
+            } => self.apply_version(id, title, body, current),
             lane::Done::SendFailed { text, message } => {
                 self.message = message;
                 if self.draft_editor.text().trim().is_empty() {
@@ -3433,6 +3657,32 @@ impl App {
         }
     }
 
+    fn apply_proof(&mut self, text: &str, warning: Option<String>, words: BTreeSet<String>) {
+        if self.body.text() != text {
+            return;
+        }
+        self.proof_warning = warning.unwrap_or_default();
+        self.misspellings = Arc::new(words);
+        markdown::set_misspellings(Arc::clone(&self.misspellings));
+    }
+
+    fn apply_version(&mut self, id: String, title: String, body: String, current: bool) {
+        if self.version_wait.as_deref() != Some(id.as_str()) {
+            return;
+        }
+        self.version_wait = None;
+        if current {
+            self.older = None;
+            self.show_note(&id);
+            return;
+        }
+        self.older = Some(OlderNote { id, title, body });
+        self.screen = Screen::Notes;
+        self.sheet = Sheet::None;
+        self.detail = true;
+        self.reading = false;
+    }
+
     fn target_is(target: &str, note: &NoteSummary) -> bool {
         target == note.id || (!note.title.is_empty() && target.eq_ignore_ascii_case(&note.title))
     }
@@ -3461,7 +3711,7 @@ impl App {
         })
     }
 
-    fn complete_link(&mut self, id: &str) -> Task<Message> {
+    fn complete_link(&mut self, id: &str, version: Option<&str>) -> Task<Message> {
         let Some(title) = self
             .catalog
             .iter()
@@ -3476,7 +3726,10 @@ impl App {
             return Task::none();
         };
         let label = title.replace(['|', '[', ']'], "");
-        let insert = format!("[[{id}|{label}]]");
+        let insert = match version {
+            Some(version) => format!("[[{id}@{version}|{label}]]"),
+            None => format!("[[{id}|{label}]]"),
+        };
         let mut next = String::new();
         next.push_str(text.get(..start).unwrap_or(""));
         next.push_str(&insert);
@@ -3488,6 +3741,141 @@ impl App {
             true
         });
         self.note_follow(false)
+    }
+
+    fn maybe_proof(&mut self) {
+        if self.reading || self.older.is_some() {
+            return;
+        }
+        let text = self.body.text();
+        if text == self.proof_body {
+            return;
+        }
+        self.proof_body.clone_from(&text);
+        self.post(lane::Job::Proof(text));
+    }
+
+    fn reset_proof(&mut self) {
+        self.proof_body.clear();
+        self.proof_warning.clear();
+        self.misspellings = Arc::new(BTreeSet::new());
+        markdown::set_misspellings(Arc::clone(&self.misspellings));
+    }
+
+    fn close_version(&mut self) {
+        let id = self.older.as_ref().map(|note| note.id.clone());
+        self.older = None;
+        if let Some(id) = id {
+            self.show_note(&id);
+        }
+    }
+
+    fn older_page(&self, older: &OlderNote) -> Element<'_, Message> {
+        let ink = self.ink();
+        let title = if older.title.is_empty() {
+            "Untitled".to_owned()
+        } else {
+            older.title.clone()
+        };
+        let page = column![
+            text("This is an older version.").size(13).color(ink.muted),
+            ghost_label("Current note", Message::CloseVersion),
+            text(title)
+                .font(serif())
+                .size(if self.compact() { 32.0 } else { 36.0 }),
+            vscroll(text(older.body.clone()).size(16)).height(Fill),
+        ]
+        .spacing(12)
+        .width(Fill)
+        .height(Fill);
+        self.writing_frame(page)
+    }
+
+    fn open_note_link(&mut self, name: &str, version: Option<&str>) {
+        let id = if markdown::is_note_id(name) {
+            self.catalog
+                .iter()
+                .find(|note| note.id == name)
+                .map(|note| note.id.clone())
+        } else {
+            self.catalog
+                .iter()
+                .find(|note| !note.title.is_empty() && note.title.eq_ignore_ascii_case(name))
+                .map(|note| note.id.clone())
+        };
+        let Some(id) = id else {
+            if markdown::is_note_id(name) {
+                self.say("That note is gone.");
+            } else {
+                self.say("No note with that name.");
+            }
+            return;
+        };
+        let Some(version) = version else {
+            self.show_note(&id);
+            return;
+        };
+        if self
+            .catalog
+            .iter()
+            .any(|note| note.id == id && note.version == version)
+        {
+            self.show_note(&id);
+            return;
+        }
+        self.post(lane::Job::Version {
+            id: id.clone(),
+            version: version.to_owned(),
+        });
+        self.version_wait = Some(id);
+    }
+
+    fn pick_cite(&mut self, id: &str, task: bool) {
+        let Some(note) = self.catalog.iter().find(|note| note.id == id) else {
+            return;
+        };
+        let chosen = (note.id.clone(), note.title.clone());
+        if task {
+            self.task_cite = Some(chosen);
+            self.task_cite_open = false;
+        } else {
+            self.chat_cite = Some(chosen);
+            self.cite_open = false;
+        }
+    }
+
+    fn cite_menu(&self, task: bool) -> Element<'_, Message> {
+        let ink = self.ink();
+        let mut notes: Vec<_> = self
+            .catalog
+            .iter()
+            .filter(|note| !note.title.is_empty())
+            .collect();
+        notes.sort_by(|left, right| left.title.cmp(&right.title));
+        notes.truncate(8);
+        if notes.is_empty() {
+            return text("No notes to cite.").size(12).color(ink.muted).into();
+        }
+        let mut list = column![].spacing(2).width(Fill);
+        for note in notes {
+            let id = note.id.clone();
+            list = list.push(
+                button(text(note.title.clone()).size(14).width(Fill))
+                    .width(Fill)
+                    .padding([4, 8])
+                    .on_press(if task {
+                        Message::PickTaskCite(id)
+                    } else {
+                        Message::PickChatCite(id)
+                    })
+                    .style(list_row(false)),
+            );
+        }
+        container(list)
+            .padding(6)
+            .width(Fill)
+            .style(card_style)
+            .into()
     }
 
     fn link_menu(&self, query: &str) -> Element<'_, Message> {
@@ -3519,13 +3907,25 @@ impl App {
         let mut list = column![].spacing(2).width(Fill);
         for note in matches {
             let id = note.id.clone();
-            list = list.push(
+            let version = note.version.clone();
+            let mut line = row![
                 button(text(note.title.clone()).size(14).width(Fill))
                     .width(Fill)
                     .padding([4, 8])
-                    .on_press(Message::CompleteLink(id))
-                    .style(list_row(false)),
-            );
+                    .on_press(Message::CompleteLink(id.clone()))
+                    .style(list_row(false))
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center);
+            if !note.conflict && markdown::is_note_id(&version) {
+                line = line.push(
+                    button(text("version").size(12))
+                        .padding([4, 8])
+                        .on_press(Message::CompleteVersion { id, version })
+                        .style(ghost_style),
+                );
+            }
+            list = list.push(line);
         }
         container(list)
             .padding(6)
@@ -3561,6 +3961,7 @@ impl App {
         {
             return Task::none();
         }
+        self.maybe_proof();
         self.post_side();
         self.saving = true;
         self.save_again = false;
@@ -3581,6 +3982,9 @@ impl App {
         let paused = self
             .edited_at
             .is_none_or(|at| at.elapsed() >= Duration::from_millis(700));
+        if paused {
+            self.maybe_proof();
+        }
         let save = if self.editor_dirty() && paused {
             self.start_save(false)
         } else {
@@ -3940,6 +4344,21 @@ impl App {
                 .on_press(Message::CopyChat(copy_text))
                 .style(move |theme, status| copy_style(theme, status, mine)),
         );
+        if let Some(cite) = line.cite.clone() {
+            let label = self
+                .catalog
+                .iter()
+                .find(|note| note.id == cite)
+                .map(|note| note.title.clone())
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| "Note".to_owned());
+            meta = meta.push(
+                button(text(label).size(11))
+                    .padding([0, 2])
+                    .on_press(Message::OpenCited(cite))
+                    .style(move |theme, status| copy_style(theme, status, mine)),
+            );
+        }
         body = body.push(meta);
         let bubble = container(body)
             .padding([8, 12])
@@ -4143,26 +4562,8 @@ impl App {
                     self.message = err;
                 }
             }
-            markdown::OpenLink::Note(name) => {
-                let id = if markdown::is_note_id(&name) {
-                    self.catalog
-                        .iter()
-                        .find(|note| note.id == name)
-                        .map(|note| note.id.clone())
-                } else {
-                    self.catalog
-                        .iter()
-                        .find(|note| {
-                            !note.title.is_empty() && note.title.eq_ignore_ascii_case(&name)
-                        })
-                        .map(|note| note.id.clone())
-                };
-                match id {
-                    Some(id) if self.selected.as_deref() == Some(id.as_str()) => {}
-                    Some(id) => self.show_note(&id),
-                    None if markdown::is_note_id(&name) => self.say("That note is gone."),
-                    None => self.say("No note with that name."),
-                }
+            markdown::OpenLink::Note(target) => {
+                self.open_note_link(&target.name, target.version.as_deref());
             }
         }
         true
@@ -4302,6 +4703,9 @@ impl App {
     }
 
     fn note_column(&self) -> Element<'_, Message> {
+        if let Some(older) = &self.older {
+            return self.older_page(older);
+        }
         let chapters = &self.cached_chapters;
         let mut page = column![].spacing(14).width(Fill).height(Fill);
         if self.reading && !chapters.is_empty() {
@@ -4331,6 +4735,13 @@ impl App {
             if let Some((_, query)) = markdown::open_wiki(&self.body.text(), self.body.caret_byte())
             {
                 page = page.push(self.link_menu(&query));
+            }
+            if !self.proof_warning.is_empty() {
+                page = page.push(
+                    text(self.proof_warning.clone())
+                        .size(12)
+                        .color(self.ink().muted),
+                );
             }
             page = page.push(
                 vscroll(self.editor_page())
@@ -4362,6 +4773,7 @@ impl App {
 
     fn editor_page(&self) -> Element<'_, Message> {
         markdown::set_known_links(self.known_links.clone());
+        markdown::set_misspellings(Arc::clone(&self.misspellings));
         let dragging = self.pointer_down && self.drag_from.is_some();
         let page = markdown::view(&self.body, self.is_dark(), dragging, self.writing_width());
         let Some((y, height)) = (!dragging)
@@ -4573,6 +4985,7 @@ impl App {
 
     fn read_pages(&self, chapters: &[Chapter]) -> Element<'_, Message> {
         markdown::set_known_links(self.known_links.clone());
+        markdown::set_misspellings(Arc::clone(&self.misspellings));
         let ink = self.ink();
         let mut pages = column![].spacing(0).width(Fill);
         for (index, chapter) in chapters.iter().enumerate() {
@@ -5031,7 +5444,14 @@ impl App {
         self.screen = Screen::Chat;
         self.detail = true;
         self.sync_watch();
-        self.post(lane::Job::Send { id, text, files });
+        let cite = self.chat_cite.take().map(|(id, _)| id);
+        self.cite_open = false;
+        self.post(lane::Job::Send {
+            id,
+            text,
+            files,
+            cite,
+        });
     }
 
     fn spawn_at(&mut self, path: &Path, ok_message: &str) {
@@ -5183,14 +5603,19 @@ impl App {
             id,
             text,
             files: Vec::new(),
+            cite: self.selected.clone(),
         });
     }
 
     fn add_loose_task(&mut self) -> Task<Message> {
-        let label = self.task_draft.trim().replace(['\n', '\r'], " ");
+        let mut label = self.task_draft.trim().replace(['\n', '\r'], " ");
         if label.is_empty() {
             self.say("Write the task first.");
             return Task::none();
+        }
+        if let Some((id, title)) = self.task_cite.clone() {
+            let title = title.replace(['|', '[', ']'], "");
+            label = format!("{label} [[{id}|{title}]]");
         }
         if self.notebook.is_none() {
             self.say("Folder is not open.");
@@ -5204,6 +5629,8 @@ impl App {
             .map(|note| note.id.clone());
         let Some(id) = existing else {
             self.task_draft.clear();
+            self.task_cite = None;
+            self.task_cite_open = false;
             self.say("Added to Tasks.");
             return self.apply_note(None, "Tasks".to_owned(), format!("{line}\n"));
         };
@@ -5225,6 +5652,8 @@ impl App {
         let follow = self.write_note(&id, &title, &next);
         if self.message.is_empty() {
             self.task_draft.clear();
+            self.task_cite = None;
+            self.task_cite_open = false;
             self.say("Added to Tasks.");
         }
         follow
@@ -6218,6 +6647,7 @@ fn bubbles(lines: Vec<ambient_cli::ChatMessage>) -> Vec<ChatBubble> {
                 time: when.time,
                 day: when.day,
                 mine: line.mine,
+                cite: line.cite,
             }
         })
         .collect()
@@ -6557,6 +6987,7 @@ struct ChatBubble {
     time: String,
     day: String,
     mine: bool,
+    cite: Option<String>,
 }
 
 fn file_chip(

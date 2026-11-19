@@ -81,6 +81,8 @@ pub struct ChatLine {
     pub sender: [u8; 32],
     /// Message text. A copy, not a grant.
     pub text: String,
+    /// Note id this text was copied from. Not a key and not a later edit.
+    pub cite: Option<[u8; 32]>,
     /// Advisory unix milliseconds from the envelope. Not an order.
     pub unix_ms: Option<u64>,
 }
@@ -404,10 +406,12 @@ fn apply_message(
         skipped.push((item.id, Skip::NotMember));
         return Ok(());
     }
+    let (text, cite) = read_message(&item.payload)?;
     messages.push(ChatLine {
         event_id: item.id,
         sender: item.signer,
-        text: read_message(&item.payload)?,
+        text,
+        cite,
         unix_ms: item.unix_ms,
     });
     Ok(())
@@ -613,13 +617,29 @@ pub fn member_remove_payload(signing: &[u8; 32]) -> Result<Vec<u8>, SpaceError> 
 ///
 /// Returns [`SpaceError::BadPayload`] when the text is longer than 16000 bytes.
 pub fn msg_put_payload(text: &str) -> Result<Vec<u8>, SpaceError> {
+    msg_put_citing(text, None)
+}
+
+/// Payload for `msg.put` that cites a note.
+///
+/// Field 3 is the note id, or null. It grants no key, no membership, and no
+/// later edits. The message text is a copy. A version does not fit in this field.
+///
+/// # Errors
+///
+/// Returns [`SpaceError::BadPayload`] when the text is longer than 16000 bytes.
+pub fn msg_put_citing(text: &str, cite: Option<&[u8; 32]>) -> Result<Vec<u8>, SpaceError> {
     if text.len() > 16000 {
         return Err(SpaceError::BadPayload);
     }
+    let cited = match cite {
+        Some(id) => Cbor::Bytes(id.to_vec()),
+        None => Cbor::Null,
+    };
     encode_cbor(&Cbor::Map(vec![
         (Cbor::Uint(1), Cbor::Text(text.to_owned())),
         (Cbor::Uint(2), Cbor::Null),
-        (Cbor::Uint(3), Cbor::Null),
+        (Cbor::Uint(3), cited),
     ]))
     .map_err(SpaceError::Event)
 }
@@ -719,7 +739,7 @@ fn read_member(value: &Cbor) -> Result<([u8; 32], Member), SpaceError> {
     ))
 }
 
-fn read_message(payload: &[u8]) -> Result<String, SpaceError> {
+fn read_message(payload: &[u8]) -> Result<(String, Option<[u8; 32]>), SpaceError> {
     let map = uint_map(&decode_owned(payload)?)?;
     if map.len() != 3 {
         return Err(SpaceError::BadPayload);
@@ -732,11 +752,23 @@ fn read_message(payload: &[u8]) -> Result<String, SpaceError> {
         Some(Cbor::Null | Cbor::Bytes(_)) => {}
         _ => return Err(SpaceError::BadPayload),
     }
-    match map.get(&3) {
-        Some(Cbor::Null | Cbor::Bytes(_)) => {}
+    let cite = match map.get(&3) {
+        Some(Cbor::Null) => None,
+        Some(Cbor::Bytes(_)) => Some(bytes32(map.get(&3).ok_or(SpaceError::BadPayload)?)?),
         _ => return Err(SpaceError::BadPayload),
-    }
-    Ok(text)
+    };
+    Ok((text, cite))
+}
+
+/// Parts of a `note.put` payload: note id, title, body, parents.
+///
+/// # Errors
+///
+/// Returns [`SpaceError::BadPayload`] when the payload is not `text-snapshot-v1`.
+pub fn note_put_parts(
+    payload: &[u8],
+) -> Result<([u8; 32], String, String, Vec<EventId>), SpaceError> {
+    read_note(payload)
 }
 
 fn read_note(payload: &[u8]) -> Result<([u8; 32], String, String, Vec<EventId>), SpaceError> {
@@ -829,6 +861,7 @@ mod tests {
             event_id: EventId([mark; 32]),
             sender: [0; 32],
             text: mark.to_string(),
+            cite: None,
             unix_ms,
         }
     }
@@ -839,5 +872,18 @@ mod tests {
         reading_order(&mut messages);
         let texts: Vec<&str> = messages.iter().map(|item| item.text.as_str()).collect();
         assert_eq!(texts, ["9", "3", "1"]);
+    }
+
+    #[test]
+    fn a_citation_is_the_note_id_and_null_stays_empty() {
+        let note = [7_u8; 32];
+        let payload = super::msg_put_citing("hello", Some(&note)).expect("payload");
+        let (text, cite) = super::read_message(&payload).expect("read");
+        assert_eq!(text, "hello");
+        assert_eq!(cite, Some(note));
+        let bare = super::msg_put_payload("hello").expect("bare");
+        let (text, cite) = super::read_message(&bare).expect("bare read");
+        assert_eq!(text, "hello");
+        assert_eq!(cite, None);
     }
 }

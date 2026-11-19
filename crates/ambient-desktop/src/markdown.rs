@@ -7,9 +7,9 @@
 //! a second pane.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use iced::advanced::Renderer as _;
 use iced::advanced::text::Paragraph as _;
@@ -2111,14 +2111,84 @@ pub(super) fn is_due_day(token: &str) -> bool {
         && (1..=31).contains(&day)
 }
 
-/// The label without a trailing due day.
+/// The label without a trailing due day or a note citation.
 pub(super) fn task_words(label: &str) -> String {
-    match due_day(label) {
+    let label = without_cites(label);
+    match due_day(&label) {
         Some(day) => label[..label.len().saturating_sub(day.len())]
             .trim()
             .to_owned(),
         None => label.trim().to_owned(),
     }
+}
+
+/// The task label with `[[...]]` citations removed and the gaps collapsed.
+pub(super) fn without_cites(label: &str) -> String {
+    let mut out = String::new();
+    let mut from = 0;
+    for (start, end) in cite_spans(label) {
+        if let Some(head) = label.get(from..start) {
+            out.push_str(head);
+        }
+        out.push(' ');
+        from = end;
+    }
+    if let Some(tail) = label.get(from..) {
+        out.push_str(tail);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Note links in a task label, as `(target, title)`.
+pub(super) fn task_cites(label: &str) -> Vec<(String, String)> {
+    cite_spans(label)
+        .into_iter()
+        .filter_map(|(start, end)| {
+            let inner = label.get(start.saturating_add(2)..end.saturating_sub(2))?;
+            let (target, title) = inner
+                .split_once('|')
+                .map_or((inner, inner), |(target, title)| (target, title));
+            let target = target.trim();
+            if target.is_empty() {
+                return None;
+            }
+            let title = title.trim();
+            let title = if title.is_empty() { target } else { title };
+            Some((target.to_owned(), title.to_owned()))
+        })
+        .collect()
+}
+
+/// The raw `[[...]]` marks, so a rename can put them back.
+pub(super) fn cite_marks(label: &str) -> Vec<String> {
+    cite_spans(label)
+        .into_iter()
+        .filter_map(|(start, end)| label.get(start..end).map(str::to_owned))
+        .collect()
+}
+
+fn cite_spans(label: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while from < label.len() {
+        let Some(rel) = label.get(from..).and_then(|rest| rest.find("[[")) else {
+            break;
+        };
+        let start = from.saturating_add(rel);
+        let Some(close) = label
+            .get(start.saturating_add(2)..)
+            .and_then(|rest| rest.find("]]"))
+        else {
+            break;
+        };
+        let end = start
+            .saturating_add(2)
+            .saturating_add(close)
+            .saturating_add(2);
+        spans.push((start, end));
+        from = end;
+    }
+    spans
 }
 
 pub(super) fn join_due(words: &str, due: &str) -> String {
@@ -2161,9 +2231,16 @@ pub(super) fn find_bytes(text: &str, query: &str) -> Vec<usize> {
 
 /// Where a Ctrl-click should go. A plain click still only moves the caret.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct NoteTarget {
+    pub name: String,
+    pub version: Option<String>,
+}
+
+/// Where a Ctrl-click should go. A plain click still only moves the caret.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum OpenLink {
     Url(String),
-    Note(String),
+    Note(NoteTarget),
 }
 
 pub(super) fn opened_at(text: &str, byte: usize) -> Option<OpenLink> {
@@ -2187,10 +2264,10 @@ fn opened_in_line(line: &str, at: usize) -> Option<OpenLink> {
     let mut index = 0;
     while index < bytes.len() {
         if bytes.get(index..index.saturating_add(2)) == Some(b"[[")
-            && let Some((end, name)) = wiki_name(line, index)
+            && let Some((end, name, version)) = wiki_parts(line, index)
         {
             if (index.saturating_add(2)..end.saturating_sub(2)).contains(&at) {
-                return Some(OpenLink::Note(name));
+                return Some(OpenLink::Note(NoteTarget { name, version }));
             }
             index = end;
             continue;
@@ -2217,6 +2294,12 @@ fn opened_in_line(line: &str, at: usize) -> Option<OpenLink> {
 }
 
 fn wiki_name(line: &str, start: usize) -> Option<(usize, String)> {
+    let (end, name, _) = wiki_parts(line, start)?;
+    Some((end, name))
+}
+
+/// A note link target. `version` is set only for `id@version` with two note ids.
+fn wiki_parts(line: &str, start: usize) -> Option<(usize, String, Option<String>)> {
     let rest = line.get(start..)?;
     if !rest.starts_with("[[") {
         return None;
@@ -2232,7 +2315,20 @@ fn wiki_name(line: &str, start: usize) -> Option<(usize, String)> {
     if name.is_empty() {
         return None;
     }
-    Some((end, name.to_owned()))
+    let (name, version) = split_version(name);
+    Some((end, name, version))
+}
+
+/// `id@version` names one snapshot. Anything else stays the whole target.
+pub(super) fn split_version(target: &str) -> (String, Option<String>) {
+    let Some((name, version)) = target.split_once('@') else {
+        return (target.to_owned(), None);
+    };
+    if is_note_id(name) && is_note_id(version) {
+        (name.to_owned(), Some(version.to_owned()))
+    } else {
+        (target.to_owned(), None)
+    }
 }
 
 /// Wikilink targets in reading order. A fence and an image embed are not chapters.
@@ -2792,11 +2888,18 @@ pub(super) fn is_note_id(text: &str) -> bool {
 
 thread_local! {
     static KNOWN_LINKS: RefCell<Option<Arc<BTreeSet<String>>>> = const { RefCell::new(None) };
+    static MISSPELLINGS: RefCell<Arc<BTreeSet<String>>> =
+        RefCell::new(Arc::new(BTreeSet::new()));
 }
 
 /// Ids and lowercase titles a note link can resolve. `None` draws every link as known.
 pub(super) fn set_known_links(known: Option<Arc<BTreeSet<String>>>) {
     KNOWN_LINKS.with(|slot| *slot.borrow_mut() = known);
+}
+
+/// Words to underline. The caret's thread only reads this set.
+pub(crate) fn set_misspellings(words: Arc<BTreeSet<String>>) {
+    MISSPELLINGS.with(|slot| *slot.borrow_mut() = words);
 }
 
 fn wiki_missing(line: &str, start: usize, end: usize) -> bool {
@@ -2816,6 +2919,206 @@ fn wiki_missing(line: &str, start: usize, end: usize) -> bool {
         } else {
             !known.contains(&target.to_lowercase())
         }
+    })
+}
+
+fn spell_look(text: &str, mut look: Look) -> Look {
+    if look.underline || look.font == Font::MONOSPACE {
+        return look;
+    }
+    let Some(key) = spell_key(text) else {
+        return look;
+    };
+    let bad = MISSPELLINGS.with(|slot| slot.borrow().contains(&key));
+    if !bad {
+        return look;
+    }
+    look.underline = true;
+    look.color = Some(Color::from_rgb8(0xB0, 0x4A, 0x42));
+    look
+}
+
+/// One quiet line when a mark or a note link is still open. `None` when the page is closed.
+pub(crate) fn broken_mark(text: &str) -> Option<String> {
+    let mut carry = Carry::default();
+    let lines = split_lines(text);
+    for (index, line) in lines.iter().enumerate() {
+        let blocked = carry.fence || carry.math || carry.frontmatter;
+        if !blocked && line.trim().is_empty() && carry.len > 0 {
+            return Some(mark_warning(top(carry)));
+        }
+        if !blocked && open_wiki_line(line) {
+            return Some("A note link is still open.".to_owned());
+        }
+        let (_, next) = paint_in(line, carry, index == 0);
+        carry = next;
+    }
+    if carry.len > 0 {
+        return Some(mark_warning(top(carry)));
+    }
+    None
+}
+
+fn mark_warning(open: Option<Open>) -> String {
+    let name = match open {
+        Some(Open::StrongStar | Open::StrongUnder | Open::BothStar | Open::BothUnder) => "Bold",
+        Some(Open::EmStar | Open::EmUnder) => "Italic",
+        Some(Open::Strike) => "Strike",
+        Some(Open::Highlight) => "Highlight",
+        Some(Open::Code) => "Code",
+        Some(Open::Comment) => "A comment",
+        None => "A mark",
+    };
+    format!("{name} is still open.")
+}
+
+fn open_wiki_line(line: &str) -> bool {
+    let mut rest = line;
+    while let Some(at) = rest.find("[[") {
+        let after = rest.get(at.saturating_add(2)..).unwrap_or("");
+        let Some(close) = after.find("]]") else {
+            return true;
+        };
+        rest = after.get(close.saturating_add(2)..).unwrap_or("");
+    }
+    false
+}
+
+/// Lowercase words that are not in the dictionary. Links, code, and the tag line are skipped.
+pub(crate) fn misspellings(text: &str) -> BTreeSet<String> {
+    let dict = dictionary();
+    let mut bad = BTreeSet::new();
+    let mut carry = Carry::default();
+    for (index, line) in split_lines(text).iter().enumerate() {
+        let skip = carry.fence
+            || carry.math
+            || carry.frontmatter
+            || carry.indent_code
+            || line.trim_start().starts_with("%%ambient-tags:");
+        let (spans, next) = paint_in(line, carry, index == 0);
+        if !skip {
+            let mut cursor = 0;
+            for (range, mark) in &spans {
+                if range.start > cursor {
+                    collect_words(line, cursor..range.start, dict, &mut bad);
+                }
+                if spell_face(mark.face) {
+                    collect_words(line, range.clone(), dict, &mut bad);
+                }
+                cursor = cursor.max(range.end);
+            }
+            if cursor < line.len() {
+                collect_words(line, cursor..line.len(), dict, &mut bad);
+            }
+        }
+        carry = next;
+    }
+    bad
+}
+
+fn collect_words(
+    line: &str,
+    range: Range<usize>,
+    dict: &HashSet<String>,
+    bad: &mut BTreeSet<String>,
+) {
+    let Some(slice) = line.get(range) else {
+        return;
+    };
+    for word in slice.split_whitespace() {
+        let Some(key) = spell_key(word) else {
+            continue;
+        };
+        if !spelled(dict, &key) {
+            bad.insert(key);
+        }
+    }
+}
+
+fn spell_face(face: Face) -> bool {
+    matches!(
+        face,
+        Face::Text
+            | Face::Heading(_)
+            | Face::Quote
+            | Face::Check
+            | Face::Checked
+            | Face::Callout(_)
+    )
+}
+
+fn spell_key(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_matches(|ch: char| !ch.is_ascii_alphabetic() && ch != '\'');
+    if trimmed.is_empty() || !trimmed.is_ascii() {
+        return None;
+    }
+    let bare: String = trimmed
+        .chars()
+        .filter(char::is_ascii_alphabetic)
+        .flat_map(char::to_lowercase)
+        .collect();
+    if bare.len() < 3 || bare.len() == 64 {
+        return None;
+    }
+    Some(bare)
+}
+
+fn spelled(dict: &HashSet<String>, bare: &str) -> bool {
+    dict.contains(bare)
+        || contraction(bare)
+        || bare
+            .strip_suffix('s')
+            .is_some_and(|stem| stem.len() >= 3 && dict.contains(stem))
+}
+
+fn contraction(bare: &str) -> bool {
+    matches!(
+        bare,
+        "dont"
+            | "cant"
+            | "wont"
+            | "couldnt"
+            | "wouldnt"
+            | "shouldnt"
+            | "isnt"
+            | "arent"
+            | "wasnt"
+            | "werent"
+            | "hasnt"
+            | "havent"
+            | "hadnt"
+            | "doesnt"
+            | "didnt"
+            | "youre"
+            | "theyre"
+            | "ive"
+            | "youve"
+            | "weve"
+            | "theyve"
+            | "lets"
+            | "thats"
+            | "whats"
+            | "theres"
+            | "heres"
+            | "whos"
+            | "couldve"
+            | "shouldve"
+            | "wouldve"
+            | "mightve"
+            | "mustve"
+            | "aint"
+            | "mustnt"
+    )
+}
+
+fn dictionary() -> &'static HashSet<String> {
+    static WORDS: OnceLock<HashSet<String>> = OnceLock::new();
+    WORDS.get_or_init(|| {
+        include_str!("words.txt")
+            .lines()
+            .map(|line| line.trim().to_ascii_lowercase())
+            .filter(|word| word.len() >= 3 && word.bytes().all(|byte| byte.is_ascii_lowercase()))
+            .collect()
     })
 }
 
@@ -3807,7 +4110,7 @@ fn push_words(out: &mut Vec<Piece>, text: &str, source_at: usize, base: usize, l
             text: slice.to_owned(),
             origin,
             literal: true,
-            look,
+            look: spell_look(slice, look),
             covers: origin..origin.saturating_add(slice.len()),
         });
         index = end;
@@ -5690,6 +5993,48 @@ mod tests {
         assert_eq!(super::task_words("call 2026-11-20"), "call");
         assert_eq!(super::join_due("call", "2026-11-20"), "call 2026-11-20");
         assert_eq!(super::join_due("call", ""), "call");
+        assert_eq!(super::task_words("call [[abcd|Clinic]] 2026-11-20"), "call");
+        assert_eq!(
+            super::task_cites("call [[abcd|Clinic]]"),
+            vec![("abcd".to_owned(), "Clinic".to_owned())]
+        );
+        assert_eq!(
+            super::cite_marks("call [[abcd|Clinic]]"),
+            vec!["[[abcd|Clinic]]".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_pause_names_a_broken_mark_and_a_misspelling() {
+        assert_eq!(
+            super::broken_mark("**still"),
+            Some("Bold is still open.".to_owned())
+        );
+        assert!(super::broken_mark("**done**").is_none());
+        assert_eq!(
+            super::broken_mark("see [[Daily"),
+            Some("A note link is still open.".to_owned())
+        );
+        assert!(super::broken_mark("see [[Daily|today]]").is_none());
+        let words = super::misspellings("the clinic asdfghjk");
+        assert!(words.contains("asdfghjk"));
+        assert!(!words.contains("the"));
+    }
+
+    #[test]
+    fn a_version_link_keeps_the_note_id() {
+        let id = "ab".repeat(32);
+        let version = "cd".repeat(32);
+        let line = format!("[[{id}@{version}|Today]]");
+        assert_eq!(super::chapter_names(&line), vec![id.clone()]);
+        let at = line.find("Today").expect("label");
+        assert_eq!(
+            super::opened_at(&line, at),
+            Some(super::OpenLink::Note(super::NoteTarget {
+                name: id,
+                version: Some(version),
+            }))
+        );
     }
 
     #[test]
@@ -5714,7 +6059,10 @@ mod tests {
         let at = wiki.find("today").expect("label");
         assert_eq!(
             super::opened_at(wiki, at),
-            Some(super::OpenLink::Note("Daily".to_owned()))
+            Some(super::OpenLink::Note(super::NoteTarget {
+                name: "Daily".to_owned(),
+                version: None,
+            }))
         );
         let bare = "go https://example.com/a. now";
         let at = bare.find("https").expect("url");

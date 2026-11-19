@@ -87,6 +87,7 @@ pub(super) enum Job {
         id: String,
         text: String,
         files: Vec<PathBuf>,
+        cite: Option<String>,
     },
     Sync {
         writes: u64,
@@ -94,6 +95,11 @@ pub(super) enum Job {
     Side(OpenSnap),
     Search(String),
     Inbox,
+    Proof(String),
+    Version {
+        id: String,
+        version: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -114,7 +120,19 @@ pub(super) enum Done {
     Inbox(Vec<ChatRow>),
     Found {
         query: String,
-        notes: Vec<NoteSummary>,
+        notes: Vec<NoteHit>,
+        chats: Vec<ChatHit>,
+    },
+    Proof {
+        text: String,
+        warning: Option<String>,
+        words: BTreeSet<String>,
+    },
+    Version {
+        id: String,
+        title: String,
+        body: String,
+        current: bool,
     },
     SendFailed {
         text: String,
@@ -122,6 +140,21 @@ pub(super) enum Done {
     },
     Side(SideDone),
     Notice(String),
+}
+
+/// One note the search found, with the line that matched.
+#[derive(Clone, Debug)]
+pub(super) struct NoteHit {
+    pub note: NoteSummary,
+    pub line: String,
+}
+
+/// One conversation line the search found.
+#[derive(Clone, Debug)]
+pub(super) struct ChatHit {
+    pub id: String,
+    pub label: String,
+    pub line: String,
 }
 
 enum ChatWork {
@@ -132,6 +165,7 @@ enum ChatWork {
         id: String,
         text: String,
         files: Vec<PathBuf>,
+        cite: Option<String>,
     },
     Inbox,
 }
@@ -141,6 +175,8 @@ enum FolderWork {
     Side(OpenSnap),
     Sync { writes: u64 },
     Search(String),
+    Proof(String),
+    Version { id: String, version: String },
 }
 
 pub(super) fn start() -> std::sync::mpsc::Sender<Job> {
@@ -328,8 +364,18 @@ fn route(rx: &Receiver<Job>, chat: &Sender<ChatWork>, folder: &Sender<FolderWork
             Job::Pull => {
                 let _ = chat.send(ChatWork::Pull);
             }
-            Job::Send { id, text, files } => {
-                let _ = chat.send(ChatWork::Send { id, text, files });
+            Job::Send {
+                id,
+                text,
+                files,
+                cite,
+            } => {
+                let _ = chat.send(ChatWork::Send {
+                    id,
+                    text,
+                    files,
+                    cite,
+                });
             }
             Job::Sync { writes } => {
                 let _ = folder.send(FolderWork::Sync { writes });
@@ -339,6 +385,12 @@ fn route(rx: &Receiver<Job>, chat: &Sender<ChatWork>, folder: &Sender<FolderWork
             }
             Job::Search(query) => {
                 let _ = folder.send(FolderWork::Search(query));
+            }
+            Job::Proof(text) => {
+                let _ = folder.send(FolderWork::Proof(text));
+            }
+            Job::Version { id, version } => {
+                let _ = folder.send(FolderWork::Version { id, version });
             }
             Job::Inbox => {
                 let _ = chat.send(ChatWork::Inbox);
@@ -387,8 +439,13 @@ fn chat_run(rx: &Receiver<ChatWork>, tx: &UnboundedSender<Done>) {
                     pull = true;
                     force = true;
                 }
-                ChatWork::Send { id, text, files } => {
-                    send_one(dir.as_deref(), &id, &text, &files, tx);
+                ChatWork::Send {
+                    id,
+                    text,
+                    files,
+                    cite,
+                } => {
+                    send_one(dir.as_deref(), &id, &text, &files, cite.as_deref(), tx);
                     next_pull = Instant::now() + Duration::from_millis(350);
                 }
                 ChatWork::Inbox => inbox = true,
@@ -422,6 +479,8 @@ fn folder_run(rx: &Receiver<FolderWork>, tx: &UnboundedSender<Done>) {
         let mut sync: Option<u64> = None;
         let mut side = false;
         let mut search: Option<String> = None;
+        let mut proof: Option<String> = None;
+        let mut version: Option<(String, String)> = None;
         for job in batch {
             match job {
                 FolderWork::Hello(path) => {
@@ -436,7 +495,12 @@ fn folder_run(rx: &Receiver<FolderWork>, tx: &UnboundedSender<Done>) {
                 }
                 FolderWork::Sync { writes } => sync = Some(writes),
                 FolderWork::Search(query) => search = Some(query),
+                FolderWork::Proof(text) => proof = Some(text),
+                FolderWork::Version { id, version: at } => version = Some((id, at)),
             }
+        }
+        if let Some(text) = proof {
+            proof_one(&text, tx);
         }
         if side {
             publish_side(dir.as_deref(), &mut book, &snap, tx);
@@ -447,6 +511,9 @@ fn folder_run(rx: &Receiver<FolderWork>, tx: &UnboundedSender<Done>) {
         if let Some(writes) = sync {
             full_sync(dir.as_deref(), &mut book, &snap, writes, tx);
         }
+        if let Some((id, at)) = version {
+            version_one(dir.as_deref(), &mut book, &id, &at, tx);
+        }
     }
 }
 
@@ -455,6 +522,7 @@ fn send_one(
     id: &str,
     text: &str,
     files: &[PathBuf],
+    cite: Option<&str>,
     tx: &UnboundedSender<Done>,
 ) {
     let Some(dir) = dir else {
@@ -474,7 +542,7 @@ fn send_one(
             if body.trim().is_empty() {
                 return Err("Write a message, or add a file.".to_owned());
             }
-            ambient_cli::send_chat_in(dir, id, &body).map_err(|err| err.to_string())?;
+            ambient_cli::send_chat_citing(dir, id, &body, cite).map_err(|err| err.to_string())?;
             Ok(())
         })()
     };
@@ -570,10 +638,149 @@ fn search_one(
             .map(|opened| opened.search(query).unwrap_or_default())
             .unwrap_or_default()
     };
+    let mut notes = Vec::new();
+    if let Some(opened) = book.as_ref() {
+        for note in found {
+            let line = opened
+                .show_held(&note.id)
+                .ok()
+                .and_then(|shown| {
+                    shown
+                        .heads
+                        .first()
+                        .map(|head| snippet_line(&head.body, query))
+                })
+                .unwrap_or_default();
+            notes.push(NoteHit { note, line });
+        }
+    }
+    let chats = {
+        let _guard = super::io_lock();
+        chat_hits(dir, query)
+    };
     let _ = tx.unbounded_send(Done::Found {
         query: query.to_owned(),
-        notes: found,
+        notes,
+        chats,
     });
+}
+
+fn proof_one(text: &str, tx: &UnboundedSender<Done>) {
+    let warning = markdown::broken_mark(text);
+    let words = markdown::misspellings(text);
+    let _ = tx.unbounded_send(Done::Proof {
+        text: text.to_owned(),
+        warning,
+        words,
+    });
+}
+
+fn version_one(
+    dir: Option<&Path>,
+    book: &mut Option<Notebook>,
+    id: &str,
+    version: &str,
+    tx: &UnboundedSender<Done>,
+) {
+    let Some(dir) = dir else {
+        return;
+    };
+    {
+        let _guard = super::io_lock();
+        if book.is_none() {
+            match Notebook::open(dir) {
+                Ok(opened) => *book = Some(opened),
+                Err(err) => {
+                    let _ = tx.unbounded_send(Done::Notice(err.to_string()));
+                    return;
+                }
+            }
+        }
+        if let Some(opened) = book.as_ref()
+            && let Err(err) = opened.warm()
+        {
+            let _ = tx.unbounded_send(Done::Notice(err.to_string()));
+            return;
+        }
+    }
+    let found = book
+        .as_ref()
+        .and_then(|opened| opened.snapshot_held(id, version).ok().flatten());
+    match found {
+        Some(snap) => {
+            let _ = tx.unbounded_send(Done::Version {
+                id: id.to_owned(),
+                title: snap.title,
+                body: snap.body,
+                current: snap.current,
+            });
+        }
+        None => {
+            let _ = tx.unbounded_send(Done::Notice(
+                "That version is not in this folder.".to_owned(),
+            ));
+        }
+    }
+}
+
+fn snippet_line(body: &str, query: &str) -> String {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return String::new();
+    }
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("%%ambient-tags:") {
+            continue;
+        }
+        if trimmed.to_lowercase().contains(&needle) {
+            return clip_line(trimmed);
+        }
+    }
+    String::new()
+}
+
+fn clip_line(line: &str) -> String {
+    let mut out = String::new();
+    for ch in line.chars() {
+        if out.chars().count() >= 80 {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn chat_hits(dir: &Path, query: &str) -> Vec<ChatHit> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let Ok(chats) = ambient_cli::list_conversations(dir) else {
+        return Vec::new();
+    };
+    let mut hits = Vec::new();
+    for chat in chats {
+        let Ok(messages) = ambient_cli::chat_messages_in(dir, &chat.id) else {
+            continue;
+        };
+        let Some(line) = messages.iter().find_map(|message| {
+            message
+                .text
+                .lines()
+                .find(|line| line.to_lowercase().contains(&needle))
+                .map(clip_line)
+        }) else {
+            continue;
+        };
+        hits.push(ChatHit {
+            id: chat.id,
+            label: chat.label,
+            line,
+        });
+    }
+    hits
 }
 
 fn full_sync(

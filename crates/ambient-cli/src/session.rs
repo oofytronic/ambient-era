@@ -45,6 +45,8 @@ pub struct NoteSummary {
     /// Tags from the note's tag line. A view, not a separate record.
     /// A `#name` in the writing is not a tag.
     pub tags: Vec<String>,
+    /// Event id of the first head. This is the current version, not a grant.
+    pub version: String,
 }
 
 /// One surviving snapshot.
@@ -56,6 +58,8 @@ pub struct ShownHead {
     pub body: String,
     /// Label of the device that wrote this head.
     pub writer: String,
+    /// Event id of this snapshot. A link can name this version.
+    pub version: String,
 }
 
 /// One device on the identity log.
@@ -80,6 +84,17 @@ pub struct ShownNote {
     pub conflict: bool,
     /// Every current head, in event-id order.
     pub heads: Vec<ShownHead>,
+}
+
+/// One stored snapshot of a note. `current` means it is still a head.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoteSnap {
+    /// Title of that snapshot.
+    pub title: String,
+    /// Markdown body.
+    pub body: String,
+    /// True when this event is still a current head.
+    pub current: bool,
 }
 
 /// An open notebook directory. The same files the CLI reads.
@@ -390,9 +405,69 @@ impl Notebook {
                         .get(&head.signer)
                         .cloned()
                         .unwrap_or_else(|| short_hex(&head.signer)),
+                    version: head.event_id.to_string(),
                 })
                 .collect(),
         })
+    }
+
+    /// Read the log into memory if it changed.
+    ///
+    /// A later [`snapshot_held`](Self::snapshot_held) does not read the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when the notes file cannot be opened.
+    pub fn warm(&self) -> Result<(), CliError> {
+        self.ensure()
+    }
+
+    /// One snapshot of a note, from memory.
+    ///
+    /// Current heads are checked first. An older version is found by verifying
+    /// each wire already loaded. That scan is the slow path on a long log.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when either id is not 64 hex characters, or this
+    /// notebook has not been opened.
+    pub fn snapshot_held(&self, id_hex: &str, version: &str) -> Result<Option<NoteSnap>, CliError> {
+        let note_id = parse_hex32(id_hex)?;
+        let version_id = parse_hex32(version)?;
+        let guard = self.cache.borrow();
+        let Some(item) = guard.as_ref() else {
+            return Err(CliError::message("folder is not open"));
+        };
+        if let Some(view) = item.projected.view.as_ref()
+            && let Some(heads) = view.notes.get(&note_id)
+            && let Some(head) = heads.iter().find(|head| head.event_id.0 == version_id)
+        {
+            return Ok(Some(NoteSnap {
+                title: head.title.clone(),
+                body: head.body.clone(),
+                current: true,
+            }));
+        }
+        for wire in &item.wires {
+            let Ok(event) = verify(wire) else {
+                continue;
+            };
+            if event.event_type != "note.put" || event.id.0 != version_id {
+                continue;
+            }
+            let Ok((id, title, body, _)) = ambient_spaces::note_put_parts(&event.payload) else {
+                continue;
+            };
+            if id != note_id {
+                continue;
+            }
+            return Ok(Some(NoteSnap {
+                title,
+                body,
+                current: false,
+            }));
+        }
+        Ok(None)
     }
 
     /// Append a new note. Returns its hex id.
@@ -758,6 +833,10 @@ fn summary(
         writer,
         conflict: heads.len() > 1,
         tags: note_tags(heads),
+        version: heads
+            .first()
+            .map(|head| head.event_id.to_string())
+            .unwrap_or_default(),
     }
 }
 
@@ -980,4 +1059,34 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
         out.push(char::from(HEX.get(lo).copied().unwrap_or(b'0')));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Notebook;
+
+    #[test]
+    fn an_older_snapshot_stays_in_the_log() {
+        let dir = std::env::temp_dir().join(format!("ambient-snap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let book = Notebook::create(&dir).expect("create");
+        let id = book.add("Market", "buy milk").expect("add");
+        let first = book.show(&id).expect("show");
+        let version = first.heads[0].version.clone();
+        book.edit(&id, "Market", "buy oats").expect("edit");
+        let now = book.show(&id).expect("now");
+        let older = book
+            .snapshot_held(&id, &version)
+            .expect("scan")
+            .expect("found");
+        assert!(!older.current);
+        assert_eq!(older.body, "buy milk");
+        let current = book
+            .snapshot_held(&id, &now.heads[0].version)
+            .expect("current scan")
+            .expect("current");
+        assert!(current.current);
+        assert_eq!(current.body, "buy oats");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

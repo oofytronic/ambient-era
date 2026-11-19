@@ -20,8 +20,8 @@ mod sync;
 pub use draft::{Draft, Shortcut, shortcut};
 pub use notes::{CliError, run};
 pub use session::{
-    DELETED_BODY, DeviceLine, NoteSummary, Notebook, ShownHead, ShownNote, join_note_tags,
-    note_is_deleted, split_note_tags,
+    DELETED_BODY, DeviceLine, NoteSnap, NoteSummary, Notebook, ShownHead, ShownNote,
+    join_note_tags, note_is_deleted, split_note_tags,
 };
 
 pub use sync::{INTRODUCTION, NetMode, NetSetting, check_relay_url};
@@ -185,6 +185,24 @@ pub fn send_chat_in(dir: &Path, id: &str, text: &str) -> Result<(), CliError> {
     sync::say_in(dir, id, text)
 }
 
+/// Append one chat message that cites a note.
+///
+/// `cite` is the note id, or `None`. The text is still a copy. The citation
+/// grants no key and no later edits.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when that conversation does not exist, the message is
+/// too long, or `cite` is not a note id.
+pub fn send_chat_citing(
+    dir: &Path,
+    id: &str,
+    text: &str,
+    cite: Option<&str>,
+) -> Result<(), CliError> {
+    sync::say_citing(dir, id, text, cite)
+}
+
 /// Message texts in the only conversation. Empty when there is none.
 ///
 /// # Errors
@@ -234,6 +252,8 @@ pub struct ChatMessage {
     pub unix_ms: Option<u64>,
     /// True when this folder's contact card for that conversation signed it.
     pub mine: bool,
+    /// Note id this message cites, hex. Empty when the message cites nothing.
+    pub cite: Option<String>,
 }
 
 /// Message texts in one conversation, oldest first.
