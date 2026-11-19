@@ -74,19 +74,28 @@ pub(crate) fn match_fresh(
 
 fn rebuild(conn: &Connection, rows: &[(String, String, String)]) -> Result<(), CliError> {
     conn.execute_batch(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(id UNINDEXED, title, body, tokenize = 'unicode61');
-         DELETE FROM notes_fts;",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(id UNINDEXED, title, body, tokenize = 'unicode61');",
     )
     .map_err(|_| CliError::message("could not build search index"))?;
-    let mut insert = conn
-        .prepare("INSERT INTO notes_fts (id, title, body) VALUES (?1, ?2, ?3)")
+    // One transaction for the whole rebuild. Each insert used to commit on its own, and every
+    // commit is a flush to disk, so a thousand notes meant a thousand flushes.
+    conn.execute_batch("BEGIN; DELETE FROM notes_fts;")
         .map_err(|_| CliError::message("could not build search index"))?;
-    for (id, title, body) in rows {
-        insert
-            .execute(params![id, title, body])
-            .map_err(|_| CliError::message("could not build search index"))?;
+    let filled = (|| {
+        let mut insert =
+            conn.prepare("INSERT INTO notes_fts (id, title, body) VALUES (?1, ?2, ?3)")?;
+        for (id, title, body) in rows {
+            insert.execute(params![id, title, body])?;
+        }
+        Ok::<(), rusqlite::Error>(())
+    })();
+    match filled.and_then(|()| conn.execute_batch("COMMIT")) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(CliError::message("could not build search index"))
+        }
     }
-    Ok(())
 }
 
 fn query_ids(conn: &Connection, match_query: &str) -> Result<Vec<String>, CliError> {
