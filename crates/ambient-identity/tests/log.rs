@@ -6,7 +6,8 @@ use ambient_events::{EventId, encode_unsigned, sign_wire, verify};
 use ambient_identity::derive;
 use ambient_identity::{
     DeviceState, IdentityError, decode_pair_offer_text, device_add_payload, device_from_seeds,
-    encode_pair_offer, inbox_payload, is_retained, pair_offer_text, project_log, revoke_payload,
+    encode_pair_offer, inbox_payload, is_retained, pair_offer_text, project_log,
+    project_log_verified, revoke_payload,
 };
 
 fn root() -> [u8; 32] {
@@ -164,5 +165,46 @@ fn pair_offer_roundtrip() -> Result<(), String> {
         return Err("offer mismatch".to_owned());
     }
     let _: EventId = EventId(signing);
+    Ok(())
+}
+
+#[test]
+fn a_verified_projection_matches_the_wire_projection() -> Result<(), String> {
+    let identity = derive(&root()).map_err(|err| err.to_string())?;
+    let device = device_from_seeds(&seeds(1), &seeds(2), &seeds(3), "laptop")
+        .map_err(|err| err.to_string())?;
+    let genesis = identity.genesis_wire().map_err(|err| err.to_string())?;
+    let genesis_id = verify(&genesis).map_err(|err| err.to_string())?.id;
+    let add = device_add_payload(
+        &device.signing_key,
+        &device.encryption_key,
+        "laptop",
+        &device.mailbox,
+    )
+    .map_err(|err| err.to_string())?;
+    let add_wire = identity
+        .sign_log(Some(genesis_id), "id.device-add", &add)
+        .map_err(|err| err.to_string())?;
+    let add_id = verify(&add_wire).map_err(|err| err.to_string())?.id;
+    let inbox = inbox_payload(&device.signing_key, &seeds(9)).map_err(|err| err.to_string())?;
+    let inbox_wire = identity
+        .sign_log(Some(add_id), "id.inbox", &inbox)
+        .map_err(|err| err.to_string())?;
+    let wires: Vec<&[u8]> = vec![&genesis, &add_wire, &inbox_wire];
+    let by_wire = project_log(&identity.signing_key, &wires).map_err(|err| err.to_string())?;
+    let verified: Vec<_> = wires
+        .iter()
+        .map(|wire| verify(wire).map_err(|err| err.to_string()))
+        .collect::<Result<_, _>>()?;
+    let refs: Vec<_> = verified.iter().collect();
+    let by_event =
+        project_log_verified(&identity.signing_key, &refs).map_err(|err| err.to_string())?;
+    if by_wire != by_event {
+        return Err("the two projections differ".to_owned());
+    }
+    // A signer that is not the identity key is refused here too.
+    if project_log_verified(&seeds(7), &refs).is_ok() {
+        return Err("a foreign signer was accepted".to_owned());
+    }
     Ok(())
 }

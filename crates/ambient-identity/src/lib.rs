@@ -14,5 +14,5 @@ pub use identity::{Identity, derive};
 pub use log::{
     DeviceState, LogProjection, PairOffer, decode_pair_offer, decode_pair_offer_text,
     device_add_payload, encode_pair_offer, inbox_payload, is_retained, pair_offer_text,
-    project_log, revoke_payload,
+    project_log, project_log_verified, revoke_payload,
 };

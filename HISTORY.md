@@ -4,6 +4,16 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-19 — a save checks each signature once
+
+A save in the window took about 330 ms with a thousand notes, and a second reload after it about 160 ms more. Every `Notebook` started with a full load that checked every signature, the projection checked them again, and a write threw the cache away, so the next read began cold. A save, a sync, and a search each opened a new `Notebook`, so none of them found a warm one.
+
+A signature is now checked when its wire is loaded or written, and never again. `project_log_verified` and `project_notes_verified` project events that `verify` already accepted. The older functions verify first and call them, so their behavior is unchanged. The loaded notes keep those events, and `add` and `edit` append to them in place. A new `Notebook` adopts the live one's cache while the file still has the stamp it was built from. The cache is held by weak reference, so nothing stays in memory after the last notebook is dropped. A save with a thousand notes is about 30 ms and the reload after it about 2 ms.
+
+The write itself is safer. `write_log_if` writes only if the file is still the one that was read, and returns `Stale` instead of overwriting a write it never saw. `add` and `edit` then reload and sign again, so a second window or the CLI can no longer lose an event, or reuse a counter, which is the nonce. A lock on a sibling `.lock` file covers the check and the rename, the new bytes are flushed to disk before the rename, and the directory is flushed after it. The old write could leave a zero-length file after a power cut, and every writer shared one `.part` file name. The notebook folder now has a `notes.lock` file in it.
+
+Sync, pairing, restore, and revoke still write with `write_log`, which now takes the same lock and flushes, but still replaces the file without checking that it is unchanged.
+
 ## 2026-11-19 — spelling knows ordinary words
 
 The word list behind the underline was about 9,900 words from a web scrape. It flagged `cannot`, `encrypted`, `pause`, and `sovereign`, and it let `alot` through. It is now the Hunspell `en_US` and `en_GB` dictionaries, about 90,000 forms, plus a short list of technical words. The terms are in `crates/ambient-desktop/dict/SCOWL-LICENSE.txt`. Both spellings are accepted. No dependency was added.

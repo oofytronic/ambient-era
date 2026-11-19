@@ -9,6 +9,8 @@ pub enum StoreError {
     Corrupt,
     /// The file could not be read or written.
     Io,
+    /// The file changed after it was read, so nothing was written.
+    Stale,
 }
 
 impl fmt::Display for StoreError {
@@ -17,6 +19,7 @@ impl fmt::Display for StoreError {
             Self::BadKey => formatter.write_str("bad_key"),
             Self::Corrupt => formatter.write_str("corrupt"),
             Self::Io => formatter.write_str("io"),
+            Self::Stale => formatter.write_str("stale"),
         }
     }
 }

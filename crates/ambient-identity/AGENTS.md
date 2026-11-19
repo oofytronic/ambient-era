@@ -2,7 +2,7 @@
 
 Owns the root seed derivation tree and the rotatable identity log described in `VISION.md` section 4.
 
-**Public API:** `derive`, `Identity`, `device_from_seeds`, `project_log`, `is_retained`, pairing-offer encode and decode. The recovery seal (HPKE of the log) is not implemented.
+**Public API:** `derive`, `Identity`, `device_from_seeds`, `project_log`, `project_log_verified`, `is_retained`, pairing-offer encode and decode. The recovery seal (HPKE of the log) is not implemented.
 
 ## Invariants
 

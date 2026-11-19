@@ -2,7 +2,7 @@
 
 The one primitive for conversations and creations (ADR-0001). A Space is a membership list and a role log. Private Spaces are sealed to current member device keys (ADR-0005). They are not MLS groups.
 
-**Public API:** `project_notes`, `project_conversation`, the notes and conversation payload builders, `seal_blob`, and `open_blob`. Share-expiry is not in spec 03. Do not add it here.
+**Public API:** `project_notes`, `project_notes_for_root`, `project_notes_verified`, `project_conversation`, the notes and conversation payload builders, `seal_blob`, and `open_blob`. Share-expiry is not in spec 03. Do not add it here.
 
 ## Invariants
 

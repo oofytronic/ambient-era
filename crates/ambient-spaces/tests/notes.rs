@@ -6,6 +6,7 @@ use ambient_events::{EventId, encode_unsigned, sign_wire, signing_public, verify
 use ambient_identity::is_retained;
 use ambient_spaces::{
     GenesisMember, Revocation, Skip, note_put_payload, notes_genesis_payload, project_notes,
+    project_notes_for_root, project_notes_verified,
 };
 
 fn seed(fill: u8) -> [u8; 32] {
@@ -114,6 +115,54 @@ fn revoked_event_is_not_applied() -> Result<(), String> {
         || is_retained(Some(space_id), note_id, &prevs)
     {
         return Err("retention walk disagreed with the projection".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn a_verified_projection_matches_the_wire_projection() -> Result<(), String> {
+    let owner = seed(1);
+    let other = seed(2);
+    let payload = notes_genesis_payload(&[
+        GenesisMember {
+            signing_key: signing_public(&owner),
+            encryption_key: seed(3),
+            role: 1,
+            mailbox: seed(4),
+        },
+        GenesisMember {
+            signing_key: signing_public(&other),
+            encryption_key: seed(5),
+            role: 2,
+            mailbox: seed(6),
+        },
+    ])
+    .map_err(|err| err.to_string())?;
+    let genesis = sign(&owner, None, None, "space.genesis", &payload)?;
+    let space_id = verify(&genesis).map_err(|err| err.to_string())?.id;
+    let note = seed(9);
+    let left = note_put_payload(&note, "left", "alpha", &[]).map_err(|err| err.to_string())?;
+    let right = note_put_payload(&note, "right", "beta", &[]).map_err(|err| err.to_string())?;
+    let left_wire = sign(&owner, Some(space_id), Some(space_id), "note.put", &left)?;
+    let right_wire = sign(&other, None, Some(space_id), "note.put", &right)?;
+    let wires: Vec<&[u8]> = vec![&genesis, &left_wire, &right_wire];
+    let revoked = [Revocation {
+        signing_key: signing_public(&other),
+        up_to: None,
+    }];
+    for revoked in [&[][..], &revoked[..]] {
+        let by_wire =
+            project_notes_for_root(&wires, revoked, None).map_err(|err| err.to_string())?;
+        let verified: Vec<_> = wires
+            .iter()
+            .map(|wire| verify(wire).map_err(|err| err.to_string()))
+            .collect::<Result<_, _>>()?;
+        let refs: Vec<_> = verified.iter().collect();
+        let by_event =
+            project_notes_verified(&refs, revoked, None).map_err(|err| err.to_string())?;
+        if by_wire != by_event {
+            return Err("the two projections differ".to_owned());
+        }
     }
     Ok(())
 }

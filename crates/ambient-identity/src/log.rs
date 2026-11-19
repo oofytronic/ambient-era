@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use ambient_events::{Cbor, EventId, decode_cbor, encode_cbor, verify};
+use ambient_events::{Cbor, EventId, VerifiedEvent, decode_cbor, encode_cbor, verify};
 
 use crate::error::IdentityError;
 use crate::identity::Identity;
@@ -72,7 +72,7 @@ pub fn project_log(
     identity_key: &[u8; 32],
     wires: &[&[u8]],
 ) -> Result<LogProjection, IdentityError> {
-    let mut grouped: HashMap<Option<EventId>, Vec<Item>> = HashMap::new();
+    let mut events = Vec::with_capacity(wires.len());
     for wire in wires {
         let event = verify(wire).map_err(IdentityError::Event)?;
         if event.signer != *identity_key {
@@ -80,10 +80,37 @@ pub fn project_log(
                 ambient_events::EventError::BadSignature,
             ));
         }
+        events.push(event);
+    }
+    let events: Vec<&VerifiedEvent> = events.iter().collect();
+    project_log_verified(identity_key, &events)
+}
+
+/// Project identity-log events that [`verify`] has already accepted.
+///
+/// The same projection as [`project_log`], for a caller that holds the verified events and
+/// would otherwise check every signature again. The events MUST come from [`verify`]. This
+/// function checks the signer is `identity_key` and nothing else about the signature.
+///
+/// # Errors
+///
+/// A signer other than the identity key, a second genesis in the accepted chain, or a payload
+/// that does not match its type.
+pub fn project_log_verified(
+    identity_key: &[u8; 32],
+    events: &[&VerifiedEvent],
+) -> Result<LogProjection, IdentityError> {
+    let mut grouped: HashMap<Option<EventId>, Vec<Item>> = HashMap::new();
+    for event in events {
+        if event.signer != *identity_key {
+            return Err(IdentityError::Event(
+                ambient_events::EventError::BadSignature,
+            ));
+        }
         grouped.entry(event.prev).or_default().push(Item {
             id: event.id,
-            event_type: event.event_type,
-            payload: event.payload,
+            event_type: event.event_type.clone(),
+            payload: event.payload.clone(),
         });
     }
     let mut forks = Vec::new();

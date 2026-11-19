@@ -2,7 +2,7 @@
 
 Local persistence behind traits so each platform can supply its backend (SQLCipher natively, SQLite on OPFS on web).
 
-**Public API:** `seal_log`, `open_log`, `read_log`, `write_log`, `log_stamp`. The bytes are an encrypted log of wire events. `log_stamp` reads the counter without decrypting, so a client can reuse a projection. SQLCipher and FTS5 are not this backend: the native client keeps that index beside the log, because this crate must compile for wasm. Search on the native client uses that index. If the index cannot be opened, search scans the decrypted projection.
+**Public API:** `seal_log`, `open_log`, `read_log`, `log_stamp`, `write_log`, `write_log_if`. The bytes are an encrypted log of wire events. `log_stamp` reads the counter and length without decrypting, so a client can reuse a projection. `write_log_if` writes only if the file still has the stamp the caller read, holds a lock on a sibling `.lock` file, and flushes a sibling `.part` file to disk before renaming it over the log. It returns `Stale` instead of overwriting a write it never saw. SQLCipher and FTS5 are not this backend: the native client keeps that index beside the log, because this crate must compile for wasm. Search on the native client uses that index. If the index cannot be opened, search scans the decrypted projection.
 
 ## Invariants
 

@@ -4,17 +4,19 @@ use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use ambient_events::{EventId, encode_unsigned, sign_wire, verify};
+use ambient_events::{EventId, VerifiedEvent, encode_unsigned, sign_wire, verify};
 use ambient_identity::{
-    DeviceState, decode_pair_offer_text, device_add_payload, project_log, revoke_payload,
+    DeviceState, decode_pair_offer_text, device_add_payload, project_log, project_log_verified,
+    revoke_payload,
 };
 use ambient_spaces::{
     GenesisMember, Revocation, member_add_payload, member_remove_payload, note_put_payload,
-    notes_genesis_payload, project_notes_for_root,
+    notes_genesis_payload, project_notes_verified,
 };
-use ambient_store::{read_log, write_log};
+use ambient_store::{StoreError, read_log, write_log, write_log_if};
 
 use crate::keys::{self, Local};
 use crate::notes::CliError;
@@ -101,15 +103,23 @@ pub struct NoteSnap {
 pub struct Notebook {
     local: Local,
     /// Last projection. Reused until [`log_stamp`] changes, so a click does not verify again.
-    cache: RefCell<Option<NoteCache>>,
+    ///
+    /// Shared, not copied: another [`Notebook`] opened on the same folder adopts it while the
+    /// file is unchanged, so a save does not start from a cold load. See [`SHARED`].
+    cache: RefCell<Option<Arc<NoteCache>>>,
 }
 
+#[derive(Clone)]
 struct NoteCache {
     stamp: Option<(u64, u64)>,
     wires: Vec<Vec<u8>>,
+    /// Every wire that verified, in file order. A signature is checked once, when its wire is
+    /// loaded or written. Every projection after that starts from these.
+    events: Vec<VerifiedEvent>,
     projected: Projected,
 }
 
+#[derive(Clone)]
 struct Projected {
     view: Option<ambient_spaces::Projection>,
     names: BTreeMap<[u8; 32], String>,
@@ -117,6 +127,35 @@ struct Projected {
     /// `note.put` event id to its index in the loaded wires.
     /// Built during the verify that loads the log, so opening a version does not scan.
     snaps: HashMap<[u8; 32], usize>,
+}
+
+/// How many times a save runs again after another writer got in first. Two writers
+/// colliding is rare, and a third in a row almost never happens, so a small number is plenty.
+const APPEND_TRIES: usize = 8;
+
+/// Which notebook a cache belongs to: the notes file, the identity, and this device.
+type ShareKey = (PathBuf, [u8; 32], [u8; 32]);
+
+/// The newest cache for each folder open in this process.
+///
+/// A [`Notebook`] is opened for every save and every sync, and each used to start with a full
+/// load that checks every signature. A fresh one now adopts the cache a live notebook already
+/// holds, provided the file still has the stamp that cache was built from. The entries are weak,
+/// so nothing stays in memory once the last notebook that holds one is gone.
+static SHARED: Mutex<Vec<(ShareKey, Weak<NoteCache>)>> = Mutex::new(Vec::new());
+
+fn shared_get(key: &ShareKey, stamp: Option<(u64, u64)>) -> Option<Arc<NoteCache>> {
+    let list = SHARED.lock().unwrap_or_else(PoisonError::into_inner);
+    list.iter()
+        .find(|(held, _)| held == key)
+        .and_then(|(_, cache)| cache.upgrade())
+        .filter(|cache| cache.stamp == stamp)
+}
+
+fn shared_put(key: ShareKey, cache: &Arc<NoteCache>) {
+    let mut list = SHARED.lock().unwrap_or_else(PoisonError::into_inner);
+    list.retain(|(held, weak)| held != &key && weak.strong_count() > 0);
+    list.push((key, Arc::downgrade(cache)));
 }
 
 impl Notebook {
@@ -479,35 +518,21 @@ impl Notebook {
     ///
     /// Returns [`CliError`] when the title is too long or the log cannot be written.
     pub fn add(&self, title: &str, body: &str) -> Result<String, CliError> {
-        self.ensure()?;
-        let (mut wires, view) = {
-            let guard = self.cache.borrow();
-            let Some(item) = guard.as_ref() else {
-                return Err(CliError::message("could not open notes file"));
-            };
-            if item.wires.is_empty() {
-                return Err(CliError::message("sync this device before writing a note"));
-            }
-            let view = item
-                .projected
-                .view
-                .clone()
-                .ok_or_else(|| CliError::message("notes log rejected"))?;
-            (item.wires.clone(), view)
-        };
         let note_id = random_note()?;
         let payload = note_put_payload(&note_id, title, body, &[])
             .map_err(|_| CliError::message("title must be at most 200 bytes"))?;
-        let prev = view.tip.get(&self.local.device.signing_key).copied();
-        wires.push(sign_device(
-            &self.local,
-            prev,
-            Some(view.space_id),
-            "note.put",
-            &payload,
-        )?);
-        write_log(&self.local.notes_path, &self.local.store_key, &wires)
-            .map_err(|_| CliError::message("could not write notes file"))?;
+        self.append(|held| {
+            if held.wires.is_empty() {
+                return Err(CliError::message("sync this device before writing a note"));
+            }
+            let view = held
+                .projected
+                .view
+                .as_ref()
+                .ok_or_else(|| CliError::message("notes log rejected"))?;
+            let prev = view.tip.get(&self.local.device.signing_key).copied();
+            sign_device(&self.local, prev, Some(view.space_id), "note.put", &payload)
+        })?;
         Ok(hex(&note_id))
     }
 
@@ -518,37 +543,104 @@ impl Notebook {
     /// Returns [`CliError`] when the note does not exist or the title is too long.
     pub fn edit(&self, id_hex: &str, title: &str, body: &str) -> Result<(), CliError> {
         let note_id = parse_hex32(id_hex)?;
-        self.ensure()?;
-        let (mut wires, view) = {
-            let guard = self.cache.borrow();
-            let Some(item) = guard.as_ref() else {
-                return Err(CliError::message("could not open notes file"));
-            };
-            let view = item
+        self.append(|held| {
+            let view = held
                 .projected
                 .view
-                .clone()
+                .as_ref()
                 .ok_or_else(|| CliError::message("no such note"))?;
-            (item.wires.clone(), view)
+            let heads = view
+                .notes
+                .get(&note_id)
+                .ok_or_else(|| CliError::message("no such note"))?;
+            let parents: Vec<EventId> = heads.iter().map(|head| head.event_id).collect();
+            let payload = note_put_payload(&note_id, title, body, &parents)
+                .map_err(|_| CliError::message("title must be at most 200 bytes"))?;
+            let prev = view.tip.get(&self.local.device.signing_key).copied();
+            sign_device(&self.local, prev, Some(view.space_id), "note.put", &payload)
+        })
+    }
+
+    /// Sign one event against the notes as they are now, and append it.
+    ///
+    /// `build` sees the loaded notes and returns the signed wire. The write only goes through if
+    /// the file is still the one those notes came from. If another writer got there first the
+    /// notes are loaded again and `build` runs once more, so the new event links to what is
+    /// really there and nothing that writer appended is lost. The loaded notes are updated in
+    /// place, so the next read does not load or verify the log again.
+    fn append(
+        &self,
+        build: impl Fn(&NoteCache) -> Result<Vec<u8>, CliError>,
+    ) -> Result<(), CliError> {
+        for _ in 0..APPEND_TRIES {
+            self.ensure()?;
+            let Some(held) = self.cache.borrow_mut().take() else {
+                return Err(CliError::message("could not open notes file"));
+            };
+            let wire = match build(&held) {
+                Ok(wire) => wire,
+                Err(err) => {
+                    *self.cache.borrow_mut() = Some(held);
+                    return Err(err);
+                }
+            };
+            // Unique when no other notebook holds this cache, and then nothing is copied.
+            let mut next = Arc::try_unwrap(held).unwrap_or_else(|shared| (*shared).clone());
+            next.wires.push(wire);
+            match write_log_if(
+                &self.local.notes_path,
+                &self.local.store_key,
+                next.stamp,
+                &next.wires,
+            ) {
+                Ok(stamp) => {
+                    next.stamp = Some(stamp);
+                    self.install_appended(next);
+                    return Ok(());
+                }
+                Err(StoreError::Stale) => {
+                    // The cache was consumed. The next pass loads what the other writer wrote.
+                }
+                Err(_) => {
+                    next.wires.pop();
+                    *self.cache.borrow_mut() = Some(Arc::new(next));
+                    return Err(CliError::message("could not write notes file"));
+                }
+            }
+        }
+        Err(CliError::message(
+            "the notes changed while saving. Try again",
+        ))
+    }
+
+    /// Fold the wire just written into the loaded notes. The event is this device's own, so
+    /// it is checked once and the projection is rebuilt from the events already held. If
+    /// anything about that fails the cache is dropped and the next read loads from the file.
+    fn install_appended(&self, mut next: NoteCache) {
+        let index = next.wires.len().saturating_sub(1);
+        let Some(event) = next.wires.get(index).and_then(|wire| verify(wire).ok()) else {
+            return;
         };
-        let heads = view
-            .notes
-            .get(&note_id)
-            .ok_or_else(|| CliError::message("no such note"))?;
-        let parents: Vec<EventId> = heads.iter().map(|head| head.event_id).collect();
-        let payload = note_put_payload(&note_id, title, body, &parents)
-            .map_err(|_| CliError::message("title must be at most 200 bytes"))?;
-        let prev = view.tip.get(&self.local.device.signing_key).copied();
-        wires.push(sign_device(
-            &self.local,
-            prev,
-            Some(view.space_id),
-            "note.put",
-            &payload,
-        )?);
-        write_log(&self.local.notes_path, &self.local.store_key, &wires)
-            .map_err(|_| CliError::message("could not write notes file"))?;
-        Ok(())
+        let mut snaps = std::mem::take(&mut next.projected.snaps);
+        if event.event_type == "note.put" {
+            snaps.insert(event.id.0, index);
+        }
+        next.events.push(event);
+        let Ok(projected) = project_events(&self.local, &next.events, snaps) else {
+            return;
+        };
+        next.projected = projected;
+        let item = Arc::new(next);
+        shared_put(self.share_key(), &item);
+        *self.cache.borrow_mut() = Some(item);
+    }
+
+    fn share_key(&self) -> ShareKey {
+        (
+            self.local.notes_path.clone(),
+            self.local.identity_public,
+            self.local.device.signing_key,
+        )
     }
 
     /// True when this folder holds the root. A paired device does not.
@@ -782,13 +874,21 @@ impl Notebook {
         {
             return Ok(());
         }
+        let key = self.share_key();
+        if let Some(shared) = shared_get(&key, stamp) {
+            *self.cache.borrow_mut() = Some(shared);
+            return Ok(());
+        }
         let wires = load(&self.local)?;
-        let projected = open_projected(&self.local, &wires)?;
-        *self.cache.borrow_mut() = Some(NoteCache {
+        let (events, projected) = open_projected(&self.local, &wires)?;
+        let item = Arc::new(NoteCache {
             stamp,
             wires,
+            events,
             projected,
         });
+        shared_put(key, &item);
+        *self.cache.borrow_mut() = Some(item);
         Ok(())
     }
 }
@@ -940,21 +1040,29 @@ fn identity_wires<'a>(local: &Local, wires: &'a [Vec<u8>]) -> Result<Vec<&'a [u8
 
 fn view_notes(local: &Local, wires: &[Vec<u8>]) -> Result<ambient_spaces::Projection, CliError> {
     open_projected(local, wires)?
+        .1
         .view
         .ok_or_else(|| CliError::message("notes log rejected"))
 }
 
-fn open_projected(local: &Local, wires: &[Vec<u8>]) -> Result<Projected, CliError> {
+/// Check every signature once, then project. Returns the verified events so later projections
+/// do not check them again. A wire that does not verify is skipped, as it always was.
+fn open_projected(
+    local: &Local,
+    wires: &[Vec<u8>],
+) -> Result<(Vec<VerifiedEvent>, Projected), CliError> {
     if wires.is_empty() {
-        return Ok(Projected {
-            view: None,
-            names: BTreeMap::new(),
-            devices: Vec::new(),
-            snaps: HashMap::new(),
-        });
+        return Ok((
+            Vec::new(),
+            Projected {
+                view: None,
+                names: BTreeMap::new(),
+                devices: Vec::new(),
+                snaps: HashMap::new(),
+            },
+        ));
     }
-    let mut identity_wires = Vec::new();
-    let mut space_wires = Vec::new();
+    let mut events = Vec::with_capacity(wires.len());
     let mut snaps = HashMap::new();
     for (index, wire) in wires.iter().enumerate() {
         let Ok(event) = verify(wire) else {
@@ -963,16 +1071,30 @@ fn open_projected(local: &Local, wires: &[Vec<u8>]) -> Result<Projected, CliErro
         if event.event_type == "note.put" {
             snaps.insert(event.id.0, index);
         }
-        if event.signer == local.identity_public && event.event_type != "space.member-add" {
-            identity_wires.push(wire.as_slice());
-            continue;
-        }
-        if event.signer == local.identity_public {
-            identity_wires.push(wire.as_slice());
-        }
-        space_wires.push(wire.as_slice());
+        events.push(event);
     }
-    let log = project_log(&local.identity_public, &identity_wires)
+    let projected = project_events(local, &events, snaps)?;
+    Ok((events, projected))
+}
+
+/// Project verified events. No signature is checked here.
+fn project_events(
+    local: &Local,
+    events: &[VerifiedEvent],
+    snaps: HashMap<[u8; 32], usize>,
+) -> Result<Projected, CliError> {
+    let mut identity_events: Vec<&VerifiedEvent> = Vec::new();
+    let mut space_events: Vec<&VerifiedEvent> = Vec::new();
+    for event in events {
+        if event.signer == local.identity_public {
+            identity_events.push(event);
+            if event.event_type != "space.member-add" {
+                continue;
+            }
+        }
+        space_events.push(event);
+    }
+    let log = project_log_verified(&local.identity_public, &identity_events)
         .map_err(|_| CliError::message("identity log rejected"))?;
     let mut names = BTreeMap::new();
     let mut devices = Vec::new();
@@ -998,7 +1120,7 @@ fn open_projected(local: &Local, wires: &[Vec<u8>]) -> Result<Projected, CliErro
             });
         }
     }
-    let view = project_notes_for_root(&space_wires, &revoked_keys, Some(local.identity_public))
+    let view = project_notes_verified(&space_events, &revoked_keys, Some(local.identity_public))
         .map_err(|_| CliError::message("notes log rejected"))?;
     Ok(Projected {
         view: Some(view),
@@ -1072,12 +1194,19 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Notebook;
+    use std::sync::Arc;
+
+    use super::{Notebook, open_projected};
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ambient-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
 
     #[test]
     fn an_older_snapshot_stays_in_the_log() {
-        let dir = std::env::temp_dir().join(format!("ambient-snap-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = scratch("snap");
         let book = Notebook::create(&dir).expect("create");
         let id = book.add("Market", "buy milk").expect("add");
         let first = book.show(&id).expect("show");
@@ -1096,6 +1225,128 @@ mod tests {
             .expect("current");
         assert!(current.current);
         assert_eq!(current.body, "buy oats");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_write_updates_the_held_notes_without_reloading() {
+        let dir = scratch("held");
+        let book = Notebook::create(&dir).expect("create");
+        let id = book.add("Plan", "first").expect("add");
+        // `list_held` and `show_held` never look at the file. They must already see the write.
+        assert!(book.list_held().expect("held").iter().any(|n| n.id == id));
+        assert_eq!(book.show_held(&id).expect("show").heads[0].body, "first");
+        let version = book.show_held(&id).expect("show").heads[0].version.clone();
+        book.edit(&id, "Plan", "second").expect("edit");
+        assert_eq!(book.show_held(&id).expect("show").heads[0].body, "second");
+        // The older snapshot is reachable from the index that the write extended.
+        let older = book
+            .snapshot_held(&id, &version)
+            .expect("lookup")
+            .expect("found");
+        assert_eq!(older.body, "first");
+        assert!(!older.current);
+        // And the file agrees.
+        let fresh = Notebook::open(&dir).expect("reopen");
+        assert_eq!(fresh.show_held(&id).expect("show").heads[0].body, "second");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_incremental_projection_matches_a_full_reload() {
+        let dir = scratch("same");
+        let book = Notebook::create(&dir).expect("create");
+        let mut ids = Vec::new();
+        for n in 0..6 {
+            ids.push(
+                book.add(&format!("n{n}"), &format!("body {n}"))
+                    .expect("add"),
+            );
+        }
+        book.edit(&ids[1], "n1", "changed").expect("edit");
+        book.edit(&ids[4], "four", "changed too").expect("edit");
+        let held = book.cache.borrow().clone().expect("cache");
+        let (events, from_disk) = open_projected(&book.local, &held.wires).expect("project");
+        assert_eq!(held.events, events);
+        assert_eq!(held.projected.view, from_disk.view);
+        assert_eq!(held.projected.names, from_disk.names);
+        assert_eq!(held.projected.devices, from_disk.devices);
+        assert_eq!(held.projected.snaps, from_disk.snaps);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_notebook_adopts_the_warm_cache() {
+        let dir = scratch("share");
+        let book = Notebook::create(&dir).expect("create");
+        book.add("a", "one").expect("add");
+        let other = Notebook::open(&dir).expect("open");
+        let (left, right) = (
+            book.cache.borrow().clone().expect("cache"),
+            other.cache.borrow().clone().expect("cache"),
+        );
+        assert!(Arc::ptr_eq(&left, &right), "the second open loaded again");
+        // A write by one is picked up by the next open, still without a reload.
+        other.add("b", "two").expect("add");
+        let third = Notebook::open(&dir).expect("open");
+        let (written, adopted) = (
+            other.cache.borrow().clone().expect("cache"),
+            third.cache.borrow().clone().expect("cache"),
+        );
+        assert!(
+            Arc::ptr_eq(&written, &adopted),
+            "the third open loaded again"
+        );
+        assert_eq!(third.list_held().expect("list").len(), 2);
+        // The first notebook notices the file moved and catches up.
+        assert_eq!(book.list().expect("list").len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nothing_is_kept_once_the_last_notebook_is_gone() {
+        let dir = scratch("weak");
+        let weak = {
+            let book = Notebook::create(&dir).expect("create");
+            book.add("a", "secret").expect("add");
+            Arc::downgrade(&book.cache.borrow().clone().expect("cache"))
+        };
+        assert!(weak.upgrade().is_none(), "the cache outlived its notebook");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn writers_in_separate_notebooks_lose_nothing() {
+        let dir = scratch("race");
+        drop(Notebook::create(&dir).expect("create"));
+        let workers: Vec<_> = (0..3)
+            .map(|worker| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    let book = Notebook::open(&dir).expect("open");
+                    for round in 0..4 {
+                        book.add(&format!("w{worker}-{round}"), "text")
+                            .expect("add");
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("worker");
+        }
+        let book = Notebook::open(&dir).expect("open");
+        let mut titles: Vec<String> = book
+            .list_held()
+            .expect("list")
+            .into_iter()
+            .map(|note| note.title)
+            .collect();
+        titles.sort();
+        let mut want: Vec<String> = (0..3)
+            .flat_map(|w| (0..4).map(move |r| format!("w{w}-{r}")))
+            .collect();
+        want.sort();
+        assert_eq!(titles, want);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

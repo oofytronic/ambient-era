@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use ambient_events::{Cbor, EventId, decode_cbor, encode_cbor, verify};
+use ambient_events::{Cbor, EventId, VerifiedEvent, decode_cbor, encode_cbor, verify};
 use ambient_identity::is_retained;
 
 use crate::error::SpaceError;
@@ -159,6 +159,34 @@ pub fn project_notes_for_root(
     })
 }
 
+/// Project a Notes space from events that [`verify`] has already accepted.
+///
+/// The same projection as [`project_notes_for_root`], for a caller that holds the verified
+/// events and would otherwise check every signature again. The events MUST come from
+/// [`verify`]. Nothing here looks at a signature.
+///
+/// # Errors
+///
+/// Missing genesis or a malformed payload.
+pub fn project_notes_verified(
+    events: &[&VerifiedEvent],
+    revoked: &[Revocation],
+    identity: Option<[u8; 32]>,
+) -> Result<Projection, SpaceError> {
+    let items: Vec<Item> = events
+        .iter()
+        .map(|event| item_of((*event).clone()))
+        .collect();
+    let projected = project_items(&items, revoked, "notes", identity)?;
+    Ok(Projection {
+        space_id: projected.space_id,
+        tip: projected.tip,
+        notes: projected.notes,
+        members: projected.members,
+        skipped: projected.skipped,
+    })
+}
+
 /// Project a conversation Space. `note.put` is `wrong_kind` and is not applied.
 ///
 /// # Errors
@@ -193,25 +221,38 @@ fn project(
     expected: &str,
     identity: Option<[u8; 32]>,
 ) -> Result<Projected, SpaceError> {
-    let mut items = Vec::new();
+    let mut items = Vec::with_capacity(wires.len());
     for wire in wires {
         let event = verify(wire).map_err(SpaceError::Event)?;
-        items.push(Item {
-            id: event.id,
-            prev: event.prev,
-            signer: event.signer,
-            space: event.space,
-            event_type: event.event_type,
-            payload: event.payload,
-            unix_ms: event.unix_ms,
-        });
+        items.push(item_of(event));
     }
-    let (ready, mut skipped) = resolve_forks(&items);
+    project_items(&items, revoked, expected, identity)
+}
+
+fn item_of(event: VerifiedEvent) -> Item {
+    Item {
+        id: event.id,
+        prev: event.prev,
+        signer: event.signer,
+        space: event.space,
+        event_type: event.event_type,
+        payload: event.payload,
+        unix_ms: event.unix_ms,
+    }
+}
+
+fn project_items(
+    items: &[Item],
+    revoked: &[Revocation],
+    expected: &str,
+    identity: Option<[u8; 32]>,
+) -> Result<Projected, SpaceError> {
+    let (ready, mut skipped) = resolve_forks(items);
     let revoked_map: BTreeMap<[u8; 32], Option<EventId>> = revoked
         .iter()
         .map(|item| (item.signing_key, item.up_to))
         .collect();
-    let prevs = prevs_of(&items);
+    let prevs = prevs_of(items);
     let mut kept = Vec::new();
     let mut revoked_ids = BTreeSet::new();
     for item in ready {
