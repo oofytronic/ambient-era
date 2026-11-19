@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 
@@ -114,6 +114,9 @@ struct Projected {
     view: Option<ambient_spaces::Projection>,
     names: BTreeMap<[u8; 32], String>,
     devices: Vec<DeviceLine>,
+    /// `note.put` event id to its index in the loaded wires.
+    /// Built during the verify that loads the log, so opening a version does not scan.
+    snaps: HashMap<[u8; 32], usize>,
 }
 
 impl Notebook {
@@ -424,8 +427,8 @@ impl Notebook {
 
     /// One snapshot of a note, from memory.
     ///
-    /// Current heads are checked first. An older version is found by verifying
-    /// each wire already loaded. That scan is the slow path on a long log.
+    /// Current heads are checked first. An older version is the one wire recorded
+    /// when the log was loaded. That load already verified every event.
     ///
     /// # Errors
     ///
@@ -448,26 +451,26 @@ impl Notebook {
                 current: true,
             }));
         }
-        for wire in &item.wires {
-            let Ok(event) = verify(wire) else {
-                continue;
-            };
-            if event.event_type != "note.put" || event.id.0 != version_id {
-                continue;
-            }
-            let Ok((id, title, body, _)) = ambient_spaces::note_put_parts(&event.payload) else {
-                continue;
-            };
-            if id != note_id {
-                continue;
-            }
-            return Ok(Some(NoteSnap {
-                title,
-                body,
-                current: false,
-            }));
+        let Some(&index) = item.projected.snaps.get(&version_id) else {
+            return Ok(None);
+        };
+        let Some(wire) = item.wires.get(index) else {
+            return Ok(None);
+        };
+        let Ok(event) = verify(wire) else {
+            return Ok(None);
+        };
+        let Ok((id, title, body, _)) = ambient_spaces::note_put_parts(&event.payload) else {
+            return Ok(None);
+        };
+        if id != note_id {
+            return Ok(None);
         }
-        Ok(None)
+        Ok(Some(NoteSnap {
+            title,
+            body,
+            current: false,
+        }))
     }
 
     /// Append a new note. Returns its hex id.
@@ -947,14 +950,19 @@ fn open_projected(local: &Local, wires: &[Vec<u8>]) -> Result<Projected, CliErro
             view: None,
             names: BTreeMap::new(),
             devices: Vec::new(),
+            snaps: HashMap::new(),
         });
     }
     let mut identity_wires = Vec::new();
     let mut space_wires = Vec::new();
-    for wire in wires {
+    let mut snaps = HashMap::new();
+    for (index, wire) in wires.iter().enumerate() {
         let Ok(event) = verify(wire) else {
             continue;
         };
+        if event.event_type == "note.put" {
+            snaps.insert(event.id.0, index);
+        }
         if event.signer == local.identity_public && event.event_type != "space.member-add" {
             identity_wires.push(wire.as_slice());
             continue;
@@ -996,6 +1004,7 @@ fn open_projected(local: &Local, wires: &[Vec<u8>]) -> Result<Projected, CliErro
         view: Some(view),
         names,
         devices,
+        snaps,
     })
 }
 

@@ -139,6 +139,12 @@ struct App {
     aliases: BTreeMap<String, String>,
     syncing: bool,
     edited_at: Option<Instant>,
+    /// Bumps when the pause wait starts over, so a late wake cannot save another note.
+    pause_token: u64,
+    pause_armed: bool,
+    /// Bumps when the search wait starts over. Only the latest query is run.
+    search_token: u64,
+    search_armed: bool,
     writes: u64,
     size: Size,
     detail: bool,
@@ -254,6 +260,13 @@ enum InvitePick {
     Mine,
 }
 
+/// One wait. A new token drops the previous wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Wake {
+    Pause(u64),
+    Search(u64),
+}
+
 #[derive(Clone, Debug)]
 enum Message {
     QueryChanged(String),
@@ -366,7 +379,7 @@ enum Message {
     ConfirmSend,
     CancelSend,
     Breeze,
-    AutoSave,
+    Woke(Wake),
     Opened(Result<(), String>),
     Saved(
         u64,
@@ -733,6 +746,10 @@ impl App {
             aliases: BTreeMap::new(),
             syncing: false,
             edited_at: None,
+            pause_token: 0,
+            pause_armed: false,
+            search_token: 0,
+            search_armed: false,
             writes: 0,
             size: Size::new(1280.0, 820.0),
             detail: false,
@@ -878,10 +895,17 @@ impl App {
                 iced::time::every(std::time::Duration::from_millis(32)).map(|_| Message::Breeze),
             );
         }
-        if app.notebook.is_some() && app.editor_dirty() {
-            parts.push(
-                iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::AutoSave),
-            );
+        if app.pause_armed {
+            parts.push(iced::Subscription::run_with(
+                Wake::Pause(app.pause_token),
+                wake_stream,
+            ));
+        }
+        if app.search_armed {
+            parts.push(iced::Subscription::run_with(
+                Wake::Search(app.search_token),
+                wake_stream,
+            ));
         }
         let remote = app.net_mode != ambient_cli::NetMode::ThisComputer;
         if app.notebook.is_some() && (app.relay_ready || remote) {
@@ -906,12 +930,12 @@ impl App {
                 self.search_hits = None;
                 self.search_lines.clear();
                 self.search_chats.clear();
-                if self.query.is_empty() {
-                    self.refresh_shown();
+                if self.query.trim().is_empty() {
+                    self.disarm_search();
                 } else {
-                    self.post(lane::Job::Search(self.query.clone()));
-                    self.refresh_shown();
+                    self.arm_search();
                 }
+                self.refresh_shown();
                 Task::none()
             }
             Message::PickTag(tag) => {
@@ -962,7 +986,7 @@ impl App {
                     return self.note_follow(true);
                 }
                 if self.body.edit(&action) {
-                    self.edited_at = Some(Instant::now());
+                    self.arm_pause();
                 }
                 self.note_follow(true)
             }
@@ -1431,7 +1455,21 @@ impl App {
                 self.breeze_frame = self.breeze_frame.wrapping_add(1);
                 Task::none()
             }
-            Message::AutoSave => self.start_save(false),
+            Message::Woke(wake) => match wake {
+                Wake::Pause(token) if self.pause_armed && token == self.pause_token => {
+                    self.pause_armed = false;
+                    self.maybe_proof();
+                    self.start_save(true)
+                }
+                Wake::Search(token) if self.search_armed && token == self.search_token => {
+                    self.search_armed = false;
+                    if !self.query.trim().is_empty() {
+                        self.post(lane::Job::Search(self.query.clone()));
+                    }
+                    Task::none()
+                }
+                Wake::Pause(_) | Wake::Search(_) => Task::none(),
+            },
             Message::Opened(result) => self.finish_open(result),
             Message::Saved(token, result, title, body) => {
                 self.finish_save(token, result, title, body)
@@ -3310,11 +3348,11 @@ impl App {
                 if let Some((title, body)) = stash {
                     self.title_text = title;
                     self.load_sealed(&body);
-                    self.edited_at = Some(Instant::now());
+                    self.arm_pause();
                 } else {
                     self.title_text.clone_from(&draft.title);
                     self.load_sealed(&draft.body);
-                    self.edited_at = None;
+                    self.disarm_pause();
                 }
                 self.conflicts = draft.conflicts;
                 self.note_writer = note
@@ -3330,6 +3368,7 @@ impl App {
                 self.reading = false;
                 self.touch_group();
                 self.reset_proof();
+                self.maybe_proof();
             }
             Err(err) => self.message = err.to_string(),
         }
@@ -3361,8 +3400,9 @@ impl App {
         if let Some((title, body)) = stash {
             self.title_text = title;
             self.load_sealed(&body);
-            self.edited_at = Some(Instant::now());
+            self.arm_pause();
             self.reset_proof();
+            self.maybe_proof();
             self.touch_group();
             return;
         }
@@ -3370,9 +3410,10 @@ impl App {
         self.tags.clear();
         self.tag_draft.clear();
         self.body.load("");
-        self.edited_at = None;
+        self.disarm_pause();
         self.message.clear();
         self.reset_proof();
+        self.maybe_proof();
         self.touch_group();
     }
 
@@ -3411,14 +3452,14 @@ impl App {
         }
         self.tags.push(tag);
         self.tag_draft.clear();
-        self.edited_at = Some(Instant::now());
+        self.arm_pause();
     }
 
     fn remove_tag(&mut self, tag: &str) {
         let before = self.tags.len();
         self.tags.retain(|have| !have.eq_ignore_ascii_case(tag));
         if self.tags.len() != before {
-            self.edited_at = Some(Instant::now());
+            self.arm_pause();
         }
     }
 
@@ -3946,6 +3987,28 @@ impl App {
         }
     }
 
+    fn arm_pause(&mut self) {
+        self.edited_at = Some(Instant::now());
+        self.pause_token = self.pause_token.wrapping_add(1);
+        self.pause_armed = true;
+    }
+
+    fn disarm_pause(&mut self) {
+        self.edited_at = None;
+        self.pause_armed = false;
+        self.pause_token = self.pause_token.wrapping_add(1);
+    }
+
+    fn arm_search(&mut self) {
+        self.search_token = self.search_token.wrapping_add(1);
+        self.search_armed = true;
+    }
+
+    fn disarm_search(&mut self) {
+        self.search_armed = false;
+        self.search_token = self.search_token.wrapping_add(1);
+    }
+
     fn start_save(&mut self, force: bool) -> Task<Message> {
         if self.notebook.is_none() || !self.editor_dirty() {
             return Task::none();
@@ -3976,30 +4039,17 @@ impl App {
     }
 
     fn begin_sync(&mut self) -> Task<Message> {
-        if self.notebook.is_none() {
-            return Task::none();
-        }
-        let paused = self
-            .edited_at
-            .is_none_or(|at| at.elapsed() >= Duration::from_millis(700));
-        if paused {
-            self.maybe_proof();
-        }
-        let save = if self.editor_dirty() && paused {
-            self.start_save(false)
-        } else {
-            Task::none()
-        };
-        if self.syncing
+        if self.notebook.is_none()
+            || self.syncing
             || (self.net_mode == ambient_cli::NetMode::ThisComputer && !self.relay_ready)
         {
-            return save;
+            return Task::none();
         }
         self.syncing = true;
         self.post(lane::Job::Sync {
             writes: self.writes,
         });
-        save
+        Task::none()
     }
 
     fn refresh_open_note(&mut self) {
@@ -4034,7 +4084,7 @@ impl App {
         self.disk_body.clone_from(&draft.body);
         self.title_text.clone_from(&draft.title);
         self.load_sealed(&draft.body);
-        self.edited_at = None;
+        self.disarm_pause();
         self.touch_group();
     }
 
@@ -4483,7 +4533,7 @@ impl App {
             self.history.begin(&title, &body, cursor, burst, now)
         };
         if change(self) {
-            self.edited_at = Some(now);
+            self.arm_pause();
         } else {
             self.history.abort(gate);
         }
@@ -4504,9 +4554,9 @@ impl App {
         self.drag_from = None;
         self.last_press = None;
         if self.editor_dirty() {
-            self.edited_at = Some(Instant::now());
+            self.arm_pause();
         } else {
-            self.edited_at = None;
+            self.disarm_pause();
         }
     }
 
@@ -5201,7 +5251,7 @@ impl App {
             if self.title_text == saved.title && self.stored_body() == saved.body {
                 self.disk_title = saved.title;
                 self.disk_body = saved.body;
-                self.edited_at = None;
+                self.disarm_pause();
             }
             if self.selected.is_none() {
                 if self.history_key.is_empty() {
@@ -5687,7 +5737,7 @@ impl App {
         self.disk_body.clear();
         self.conflicts.clear();
         self.note_writer.clear();
-        self.edited_at = None;
+        self.disarm_pause();
         self.histories.remove(&id);
         self.history_order.retain(|key| key != &id);
         if self.book_id.as_deref() == Some(id.as_str()) {
@@ -5751,7 +5801,7 @@ impl App {
         self.body.load("");
         self.disk_title.clear();
         self.disk_body.clear();
-        self.edited_at = None;
+        self.disarm_pause();
         self.confirm_delete = false;
         self.save_token = self.save_token.wrapping_add(1);
         self.histories.remove("");
@@ -5937,7 +5987,7 @@ impl App {
                 if current && self.title_text == title && self.stored_body() == body {
                     self.disk_title = title;
                     self.disk_body = body;
-                    self.edited_at = None;
+                    self.disarm_pause();
                 }
                 self.writes = self.writes.saturating_add(1);
                 self.pending = true;
@@ -6126,7 +6176,8 @@ impl App {
         }
         self.notebook = None;
         let wiped = {
-            let _guard = io_lock();
+            let _notes = notes_lock();
+            let _chat = chat_lock();
             profile::wipe_folder(&self.dir)
         };
         if let Err(err) = wiped {
@@ -6204,7 +6255,7 @@ impl App {
         self.history_key.clear();
         self.open_error.clear();
         self.message.clear();
-        self.edited_at = None;
+        self.disarm_pause();
         self.saving = false;
         self.save_again = false;
         self.pending = false;
@@ -6630,9 +6681,20 @@ struct SyncOutcome {
     transport: bool,
 }
 
-fn io_lock() -> std::sync::MutexGuard<'static, ()> {
-    static IO: Mutex<()> = Mutex::new(());
-    IO.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+/// Notes, the search index, and snapshots. Never take the chat lock first.
+fn notes_lock() -> std::sync::MutexGuard<'static, ()> {
+    static NOTES: Mutex<()> = Mutex::new(());
+    NOTES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Conversation logs. Never take this and then the notes lock.
+fn chat_lock() -> std::sync::MutexGuard<'static, ()> {
+    static CHATS: Mutex<()> = Mutex::new(());
+    CHATS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn bubbles(lines: Vec<ambient_cli::ChatMessage>) -> Vec<ChatBubble> {
@@ -6656,6 +6718,20 @@ fn bubbles(lines: Vec<ambient_cli::ChatMessage>) -> Vec<ChatBubble> {
 fn lane_messages() -> impl iced::futures::Stream<Item = Message> + Send {
     use iced::futures::StreamExt;
     lane::listen().map(Message::Lane)
+}
+
+fn wake_stream(wake: &Wake) -> iced::futures::stream::BoxStream<'static, Message> {
+    use iced::futures::stream::StreamExt;
+    let delay = match *wake {
+        Wake::Pause(_) => Duration::from_millis(700),
+        Wake::Search(_) => Duration::from_millis(200),
+    };
+    let fired = *wake;
+    iced::futures::stream::once(async move {
+        tokio::time::sleep(delay).await;
+        Message::Woke(fired)
+    })
+    .boxed()
 }
 
 fn sync_outcome(dir: &Path) -> SyncOutcome {
@@ -7785,7 +7861,8 @@ fn open_task(dir: PathBuf) -> Task<Message> {
             let (sender, receiver) = iced::futures::channel::oneshot::channel();
             std::thread::spawn(move || {
                 let result = (|| {
-                    let _guard = io_lock();
+                    let _notes = notes_lock();
+                    let _chat = chat_lock();
                     let book = Notebook::open(&dir).map_err(|err| err.to_string())?;
                     let files = lane::files_of(&book);
                     lane::park_side(lane::compute(&files, &lane::OpenSnap::default()));
@@ -7854,7 +7931,7 @@ fn write_snapshot(
     title: &str,
     body: &str,
 ) -> Result<(String, Vec<NoteSummary>), String> {
-    let _guard = io_lock();
+    let _notes = notes_lock();
     let book = Notebook::open(dir).map_err(|err| err.to_string())?;
     let saved = match id {
         Some(id) => {
@@ -7873,7 +7950,7 @@ fn write_chapter(
     current: Option<&(Option<String>, String, String)>,
     title: &str,
 ) -> Result<MadeChapter, String> {
-    let _guard = io_lock();
+    let _notes = notes_lock();
     let book = Notebook::open(dir).map_err(|err| err.to_string())?;
     let saved = if let Some((id, note_title, note_body)) = current {
         let id = match id {

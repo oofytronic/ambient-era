@@ -126,6 +126,7 @@ dependencies = [
  "iced",
  "image",
  "qrcode",
+ "tokio",
 ]
 
 [[package]]

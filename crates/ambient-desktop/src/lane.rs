@@ -1,10 +1,11 @@
 //! Folder work for the window.
 //!
-//! The caret's thread paints and takes keys. Two background threads touch the
-//! folder. One only pulls the conversation on screen. The other reads notes,
-//! builds the group list, and runs a full sync. They share one lock so a save
-//! cannot land in the middle of a sync, and the lock is not held while the
-//! group list is counted. A result is sent when it is finished. The screen
+//! The caret's thread paints and takes keys. Two threads touch the folder.
+//! One only pulls the conversation on screen. The other reads notes, builds
+//! the group list, and runs a full sync. A third thread only checks spelling.
+//! It never takes a lock. Notes and conversations use different locks. A full
+//! sync takes the notes lock first, then the chat lock, so a save cannot land
+//! in the middle of a sync. A result is sent when it is finished. The screen
 //! keeps what it already drew until then.
 
 use std::collections::BTreeSet;
@@ -157,6 +158,13 @@ pub(super) struct ChatHit {
     pub line: String,
 }
 
+/// One conversation the search can scan without opening the log again.
+struct CorpusRow {
+    id: String,
+    label: String,
+    lines: Vec<String>,
+}
+
 enum ChatWork {
     Hello(PathBuf),
     Watch(Option<String>),
@@ -175,7 +183,6 @@ enum FolderWork {
     Side(OpenSnap),
     Sync { writes: u64 },
     Search(String),
-    Proof(String),
     Version { id: String, version: String },
 }
 
@@ -185,9 +192,12 @@ pub(super) fn start() -> std::sync::mpsc::Sender<Job> {
     let (work_tx, work_rx) = std::sync::mpsc::channel();
     let (chat_tx, chat_rx) = std::sync::mpsc::channel();
     let (folder_tx, folder_rx) = std::sync::mpsc::channel();
+    let (proof_tx, proof_rx) = std::sync::mpsc::channel();
     let chat_done = done_tx.clone();
-    std::thread::spawn(move || route(&work_rx, &chat_tx, &folder_tx));
+    let proof_done = done_tx.clone();
+    std::thread::spawn(move || route(&work_rx, &chat_tx, &folder_tx, &proof_tx));
     std::thread::spawn(move || chat_run(&chat_rx, &chat_done));
+    std::thread::spawn(move || proof_run(&proof_rx, &proof_done));
     std::thread::spawn(move || folder_run(&folder_rx, &done_tx));
     work_tx
 }
@@ -316,7 +326,7 @@ pub(super) fn compute(files: &[NoteFile], open: &OpenSnap) -> SideDone {
     }
 }
 
-/// Conversation list. The caller holds the folder lock.
+/// Conversation list. The caller holds the chat lock.
 pub(super) fn inbox_of(dir: &Path) -> Vec<ChatRow> {
     let Ok(chats) = ambient_cli::list_conversations(dir) else {
         return Vec::new();
@@ -347,7 +357,12 @@ pub(super) fn inbox_of(dir: &Path) -> Vec<ChatRow> {
         .collect()
 }
 
-fn route(rx: &Receiver<Job>, chat: &Sender<ChatWork>, folder: &Sender<FolderWork>) {
+fn route(
+    rx: &Receiver<Job>,
+    chat: &Sender<ChatWork>,
+    folder: &Sender<FolderWork>,
+    proof: &Sender<String>,
+) {
     while let Ok(job) = rx.recv() {
         match job {
             Job::Hello(path) => {
@@ -387,7 +402,7 @@ fn route(rx: &Receiver<Job>, chat: &Sender<ChatWork>, folder: &Sender<FolderWork
                 let _ = folder.send(FolderWork::Search(query));
             }
             Job::Proof(text) => {
-                let _ = folder.send(FolderWork::Proof(text));
+                let _ = proof.send(text);
             }
             Job::Version { id, version } => {
                 let _ = folder.send(FolderWork::Version { id, version });
@@ -467,6 +482,7 @@ fn folder_run(rx: &Receiver<FolderWork>, tx: &UnboundedSender<Done>) {
     let mut dir: Option<PathBuf> = None;
     let mut book: Option<Notebook> = None;
     let mut snap = OpenSnap::default();
+    let mut chats: Option<(u64, Vec<CorpusRow>)> = None;
     loop {
         let mut batch = Vec::new();
         match rx.recv() {
@@ -479,13 +495,13 @@ fn folder_run(rx: &Receiver<FolderWork>, tx: &UnboundedSender<Done>) {
         let mut sync: Option<u64> = None;
         let mut side = false;
         let mut search: Option<String> = None;
-        let mut proof: Option<String> = None;
         let mut version: Option<(String, String)> = None;
         for job in batch {
             match job {
                 FolderWork::Hello(path) => {
                     if dir.as_ref() != Some(&path) {
                         book = None;
+                        chats = None;
                     }
                     dir = Some(path);
                 }
@@ -495,18 +511,14 @@ fn folder_run(rx: &Receiver<FolderWork>, tx: &UnboundedSender<Done>) {
                 }
                 FolderWork::Sync { writes } => sync = Some(writes),
                 FolderWork::Search(query) => search = Some(query),
-                FolderWork::Proof(text) => proof = Some(text),
                 FolderWork::Version { id, version: at } => version = Some((id, at)),
             }
-        }
-        if let Some(text) = proof {
-            proof_one(&text, tx);
         }
         if side {
             publish_side(dir.as_deref(), &mut book, &snap, tx);
         }
         if let Some(query) = search {
-            search_one(dir.as_deref(), &mut book, &query, tx);
+            search_one(dir.as_deref(), &mut book, &mut chats, &query, tx);
         }
         if let Some(writes) = sync {
             full_sync(dir.as_deref(), &mut book, &snap, writes, tx);
@@ -529,7 +541,7 @@ fn send_one(
         return;
     };
     let wrote = {
-        let _guard = super::io_lock();
+        let _guard = super::chat_lock();
         (|| {
             let mut body = text.to_owned();
             for path in files {
@@ -556,7 +568,7 @@ fn send_one(
     push_chat(dir, id, tx);
     publish_inbox(dir, tx);
     {
-        let _guard = super::io_lock();
+        let _guard = super::chat_lock();
         let _ = ambient_cli::sync_conversation(dir, id);
     }
     push_chat(dir, id, tx);
@@ -571,7 +583,7 @@ fn pull_one(dir: Option<&Path>, id: &str, force: bool, tx: &UnboundedSender<Done
         push_chat(dir, id, tx);
     }
     let detail = {
-        let _guard = super::io_lock();
+        let _guard = super::chat_lock();
         ambient_cli::sync_conversation(dir, id).map_err(|err| err.to_string())
     };
     match detail {
@@ -584,7 +596,7 @@ fn pull_one(dir: Option<&Path>, id: &str, force: bool, tx: &UnboundedSender<Done
 }
 
 fn push_chat(dir: &Path, id: &str, tx: &UnboundedSender<Done>) {
-    let _guard = super::io_lock();
+    let _chat = super::chat_lock();
     let Ok(messages) = ambient_cli::chat_messages_in(dir, id) else {
         return;
     };
@@ -595,7 +607,7 @@ fn push_chat(dir: &Path, id: &str, tx: &UnboundedSender<Done>) {
 }
 
 fn publish_inbox(dir: &Path, tx: &UnboundedSender<Done>) {
-    let _guard = super::io_lock();
+    let _chat = super::chat_lock();
     let _ = tx.unbounded_send(Done::Inbox(inbox_of(dir)));
 }
 
@@ -617,6 +629,7 @@ fn publish_side(
 fn search_one(
     dir: Option<&Path>,
     book: &mut Option<Notebook>,
+    chats: &mut Option<(u64, Vec<CorpusRow>)>,
     query: &str,
     tx: &UnboundedSender<Done>,
 ) {
@@ -624,7 +637,7 @@ fn search_one(
         return;
     };
     let found = {
-        let _guard = super::io_lock();
+        let _notes = super::notes_lock();
         if book.is_none() {
             match Notebook::open(dir) {
                 Ok(opened) => *book = Some(opened),
@@ -654,10 +667,7 @@ fn search_one(
             notes.push(NoteHit { note, line });
         }
     }
-    let chats = {
-        let _guard = super::io_lock();
-        chat_hits(dir, query)
-    };
+    let chats = chat_matches(dir, chats, query);
     let _ = tx.unbounded_send(Done::Found {
         query: query.to_owned(),
         notes,
@@ -675,6 +685,15 @@ fn proof_one(text: &str, tx: &UnboundedSender<Done>) {
     });
 }
 
+fn proof_run(rx: &Receiver<String>, tx: &UnboundedSender<Done>) {
+    while let Ok(mut text) = rx.recv() {
+        while let Ok(next) = rx.try_recv() {
+            text = next;
+        }
+        proof_one(&text, tx);
+    }
+}
+
 fn version_one(
     dir: Option<&Path>,
     book: &mut Option<Notebook>,
@@ -686,7 +705,7 @@ fn version_one(
         return;
     };
     {
-        let _guard = super::io_lock();
+        let _notes = super::notes_lock();
         if book.is_none() {
             match Notebook::open(dir) {
                 Ok(opened) => *book = Some(opened),
@@ -752,31 +771,76 @@ fn clip_line(line: &str) -> String {
     out
 }
 
-fn chat_hits(dir: &Path, query: &str) -> Vec<ChatHit> {
+fn chat_matches(
+    dir: &Path,
+    chats: &mut Option<(u64, Vec<CorpusRow>)>,
+    query: &str,
+) -> Vec<ChatHit> {
     let needle = query.trim().to_lowercase();
     if needle.is_empty() {
         return Vec::new();
     }
+    refresh_corpus(dir, chats);
+    if let Some((_, rows)) = chats.as_ref() {
+        return hits_in(rows, &needle);
+    }
+    let _chat = super::chat_lock();
+    hits_in(&load_corpus(dir), &needle)
+}
+
+fn refresh_corpus(dir: &Path, chats: &mut Option<(u64, Vec<CorpusRow>)>) {
+    let generation = ambient_cli::conversation_generation(dir);
+    let fresh = match (chats.as_ref(), generation) {
+        (Some((have, _)), Some(now)) => *have == now,
+        _ => false,
+    };
+    if fresh {
+        return;
+    }
+    let _chat = super::chat_lock();
+    let generation = ambient_cli::conversation_generation(dir);
+    let Some(generation) = generation else {
+        *chats = None;
+        return;
+    };
+    *chats = Some((generation, load_corpus(dir)));
+}
+
+/// The caller holds the chat lock.
+fn load_corpus(dir: &Path) -> Vec<CorpusRow> {
     let Ok(chats) = ambient_cli::list_conversations(dir) else {
         return Vec::new();
     };
+    chats
+        .into_iter()
+        .map(|chat| {
+            let lines = ambient_cli::chat_messages_in(dir, &chat.id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|message| message.text)
+                .collect();
+            CorpusRow {
+                id: chat.id,
+                label: chat.label,
+                lines,
+            }
+        })
+        .collect()
+}
+
+fn hits_in(rows: &[CorpusRow], needle: &str) -> Vec<ChatHit> {
     let mut hits = Vec::new();
-    for chat in chats {
-        let Ok(messages) = ambient_cli::chat_messages_in(dir, &chat.id) else {
-            continue;
-        };
-        let Some(line) = messages.iter().find_map(|message| {
-            message
-                .text
-                .lines()
-                .find(|line| line.to_lowercase().contains(&needle))
+    for row in rows {
+        let Some(line) = row.lines.iter().find_map(|text| {
+            text.lines()
+                .find(|line| line.to_lowercase().contains(needle))
                 .map(clip_line)
         }) else {
             continue;
         };
         hits.push(ChatHit {
-            id: chat.id,
-            label: chat.label,
+            id: row.id.clone(),
+            label: row.label.clone(),
             line,
         });
     }
@@ -793,7 +857,8 @@ fn full_sync(
     let Some(dir) = dir else {
         return;
     };
-    let guard = super::io_lock();
+    let notes_guard = super::notes_lock();
+    let chat_guard = super::chat_lock();
     let outcome = super::sync_outcome(dir);
     if outcome.failed {
         let _ = tx.unbounded_send(Done::Synced {
@@ -839,7 +904,8 @@ fn full_sync(
     };
     let pending = ambient_cli::has_unsent(dir).unwrap_or(true) || outcome.pending;
     let detail = outcome.detail;
-    drop(guard);
+    drop(chat_guard);
+    drop(notes_guard);
     let side = compute(&files, snap);
     if super::content_arrived(&detail) {
         publish_inbox(dir, tx);
@@ -856,7 +922,7 @@ fn full_sync(
 }
 
 fn files_cached(dir: &Path, book: &mut Option<Notebook>) -> Result<Vec<NoteFile>, String> {
-    let _guard = super::io_lock();
+    let _notes = super::notes_lock();
     if book.is_none() {
         *book = Some(Notebook::open(dir).map_err(|err| err.to_string())?);
     }

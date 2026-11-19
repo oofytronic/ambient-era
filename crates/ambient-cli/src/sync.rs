@@ -1212,6 +1212,26 @@ fn chat_stamps(dir: &Path) -> Option<Vec<(PathBuf, u64, u64)>> {
     Some(stamps)
 }
 
+/// A number that changes when a conversation log changes.
+///
+/// It only stats the logs. It does not open them. `None` means a log could not be stated.
+#[must_use]
+pub(crate) fn conversation_generation(dir: &Path) -> Option<u64> {
+    let stamps = chat_stamps(dir)?;
+    let mut hash = 0xcbf29ce484222325_u64;
+    for (path, counter, len) in stamps {
+        for byte in path.to_string_lossy().as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= counter;
+        hash = hash.wrapping_mul(0x100000001b3);
+        hash ^= len;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    Some(hash)
+}
+
 fn load_slots(dir: &Path, key: &[u8; 32]) -> Result<Vec<Slot>, CliError> {
     let mut slots = Vec::new();
     if dir.join("card").is_file() {

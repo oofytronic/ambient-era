@@ -4,6 +4,14 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-19 — the pause and the search stop blocking
+
+A keystroke does not search the folder and does not start a timer that redraws the window. Titles still filter at once. The body and the conversations wait about a fifth of a second, and only the latest query runs. Notes and conversations take different locks. A search of notes does not wait on a chat pull. Conversation text stays in memory on the folder thread and is reread only when a log's stamp changes. That scan happens after the lock is dropped.
+
+A pause is one wake, about 700ms after the last key. It saves, rebuilds the group list, and checks spelling. The three-second timer only syncs. Opening a note checks spelling at once. Spelling runs on its own thread and never takes a lock.
+
+An older version is an index built while the log is loaded. Opening it reads that one event, not every wire.
+
 ## 2026-11-18 — search, versions, and a citation
 
 After a pause, a misspelled word is underlined and a mark that is still open is one quiet line. Neither check runs on the caret's thread. Search shows the line that matched, in a note or in a conversation. A note link can name one version of a note, `[[id@version|title]]`. The version is the event id. The current head opens the note. An older snapshot opens read-only and is not written back. A task keeps a note link on its line. A chat line cites a note in the existing `msg.put` field. That field is the note id only. It grants no key and no later edits.

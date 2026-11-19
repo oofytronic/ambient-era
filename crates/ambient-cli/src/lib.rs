@@ -282,6 +282,12 @@ pub fn chat_messages_in(dir: &Path, id: &str) -> Result<Vec<ChatMessage>, CliErr
     sync::messages_in(dir, id)
 }
 
+/// Changes when a conversation log changes. Stats only. `None` if a log cannot be stated.
+#[must_use]
+pub fn conversation_generation(dir: &Path) -> Option<u64> {
+    sync::conversation_generation(dir)
+}
+
 /// Wrap the key file with a passphrase. The passphrase is not the root and not a passkey.
 ///
 /// # Errors
