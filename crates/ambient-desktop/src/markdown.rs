@@ -2984,7 +2984,11 @@ fn open_wiki_line(line: &str) -> bool {
     false
 }
 
-/// Lowercase words that are not in the dictionary. Links, code, and the tag line are skipped.
+/// Words, as typed, that are not in the dictionary. Links, code, and the tag line are skipped.
+///
+/// A word is kept as it was written, apart from the punctuation around it, because that is
+/// the key the underline looks up. Names, acronyms, and code-like words are not judged. See
+/// [`spell_key`] and [`collect_words`].
 pub(crate) fn misspellings(text: &str) -> BTreeSet<String> {
     let dict = dictionary();
     let mut bad = BTreeSet::new();
@@ -2997,18 +3001,31 @@ pub(crate) fn misspellings(text: &str) -> BTreeSet<String> {
             || line.trim_start().starts_with("%%ambient-tags:");
         let (spans, next) = paint_in(line, carry, index == 0);
         if !skip {
+            let mut starts_sentence = true;
             let mut cursor = 0;
             for (range, mark) in &spans {
                 if range.start > cursor {
-                    collect_words(line, cursor..range.start, dict, &mut bad);
+                    collect_words(
+                        line,
+                        cursor..range.start,
+                        dict,
+                        &mut starts_sentence,
+                        &mut bad,
+                    );
                 }
                 if spell_face(mark.face) {
-                    collect_words(line, range.clone(), dict, &mut bad);
+                    collect_words(line, range.clone(), dict, &mut starts_sentence, &mut bad);
                 }
                 cursor = cursor.max(range.end);
             }
             if cursor < line.len() {
-                collect_words(line, cursor..line.len(), dict, &mut bad);
+                collect_words(
+                    line,
+                    cursor..line.len(),
+                    dict,
+                    &mut starts_sentence,
+                    &mut bad,
+                );
             }
         }
         carry = next;
@@ -3016,23 +3033,41 @@ pub(crate) fn misspellings(text: &str) -> BTreeSet<String> {
     bad
 }
 
+/// Check each word in `range`. `starts_sentence` is true at the start of a line and after a
+/// word that ends a sentence. A capitalized word that is not at the start of a sentence and is
+/// not in the dictionary is taken to be a name and is left alone.
 fn collect_words(
     line: &str,
     range: Range<usize>,
-    dict: &HashSet<String>,
+    dict: &HashSet<&'static str>,
+    starts_sentence: &mut bool,
     bad: &mut BTreeSet<String>,
 ) {
     let Some(slice) = line.get(range) else {
         return;
     };
     for word in slice.split_whitespace() {
+        let at_start = *starts_sentence;
+        if word.chars().any(char::is_alphanumeric) {
+            *starts_sentence = ends_sentence(word);
+        }
         let Some(key) = spell_key(word) else {
             continue;
         };
-        if !spelled(dict, &key) {
+        if !at_start && key.starts_with(|ch: char| ch.is_ascii_uppercase()) {
+            continue;
+        }
+        if !key_spelled(dict, &key) {
             bad.insert(key);
         }
     }
+}
+
+fn ends_sentence(word: &str) -> bool {
+    word.trim_end_matches([
+        '"', '\'', ')', ']', '*', '_', '~', '=', '\u{201d}', '\u{2019}',
+    ])
+    .ends_with(['.', '!', '?', ':', '\u{2026}'])
 }
 
 fn spell_face(face: Face) -> bool {
@@ -3047,23 +3082,124 @@ fn spell_face(face: Face) -> bool {
     )
 }
 
+/// The word to look up for one whitespace-delimited piece of text: the piece as typed, without
+/// the punctuation around it. Curly apostrophes become `'` and en and em dashes become `-`.
+///
+/// `None` means the piece is not for the spellchecker, so it is never underlined. That covers
+/// anything that is not plain English letters: a word with a digit, an accent, or a symbol in
+/// it (a file name, an address, a path, an identifier), a `#tag` or `@name`, an acronym, and a word
+/// with a capital inside it (`iPhone`, `JavaScript`). Only `'`, `-`, and `/` may join letters.
+/// The underline and the proof both call this, so they always agree on the word.
 fn spell_key(raw: &str) -> Option<String> {
-    let trimmed = raw.trim_matches(|ch: char| !ch.is_ascii_alphabetic() && ch != '\'');
-    if trimmed.is_empty() || !trimmed.is_ascii() {
+    if raw.starts_with(['#', '@', '/', '~', '\\']) {
         return None;
     }
-    let bare: String = trimmed
+    let token: String = raw
         .chars()
-        .filter(char::is_ascii_alphabetic)
-        .flat_map(char::to_lowercase)
+        .map(|ch| match ch {
+            '\u{2018}' | '\u{2019}' => '\'',
+            '\u{2013}' | '\u{2014}' => '-',
+            other => other,
+        })
         .collect();
-    if bare.len() < 3 || bare.len() == 64 {
+    if token
+        .chars()
+        .any(|ch| ch.is_alphabetic() && !ch.is_ascii_alphabetic())
+    {
         return None;
     }
-    Some(bare)
+    let trimmed = token.trim_matches(|ch: char| !ch.is_ascii_alphabetic());
+    if !trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphabetic() || matches!(ch, '\'' | '-' | '/'))
+    {
+        return None;
+    }
+    let letters = trimmed.chars().filter(char::is_ascii_alphabetic).count();
+    if !(3..64).contains(&letters) {
+        return None;
+    }
+    let capitals = trimmed.chars().filter(char::is_ascii_uppercase).count();
+    let first_is_capital = trimmed.starts_with(|ch: char| ch.is_ascii_uppercase());
+    if capitals > 1 || (capitals == 1 && !first_is_capital) {
+        return None;
+    }
+    Some(trimmed.to_owned())
 }
 
-fn spelled(dict: &HashSet<String>, bare: &str) -> bool {
+/// Prefixes that are not words alone but are written before a hyphen: `pre-approved`,
+/// `non-profit`, `anti-pattern`. Shorter ones (`re`, `un`, `co`) are never judged.
+const PREFIXES: [&str; 22] = [
+    "pre", "non", "pro", "sub", "mid", "mis", "out", "anti", "semi", "multi", "over", "under",
+    "inter", "intra", "post", "meta", "mini", "mega", "ultra", "super", "hyper", "micro",
+];
+
+/// A word is spelled when every part of it is. Parts are split at `-` and `/`, so `well-known`
+/// and `and/or` are two words each. A prefix from [`PREFIXES`] passes before a hyphen.
+fn key_spelled(dict: &HashSet<&'static str>, key: &str) -> bool {
+    let parts: Vec<&str> = key.split(['-', '/']).collect();
+    let last = parts.len().saturating_sub(1);
+    parts.iter().enumerate().all(|(at, part)| {
+        part_spelled(dict, part)
+            || (at < last && PREFIXES.contains(&part.to_ascii_lowercase().as_str()))
+    })
+}
+
+fn part_spelled(dict: &HashSet<&'static str>, part: &str) -> bool {
+    if part.chars().filter(char::is_ascii_alphabetic).count() < 3 {
+        return true;
+    }
+    let lower = part.to_ascii_lowercase();
+    if lower
+        .split_once('\'')
+        .is_some_and(|(head, tail)| clitic_spelled(dict, head, tail))
+    {
+        return true;
+    }
+    let bare: String = lower.chars().filter(char::is_ascii_alphabetic).collect();
+    spelled(dict, &bare)
+}
+
+/// `it's`, `John's`, `don't`, `they're`, `we've`, `I'll`, `she'd`, `I'm`, and a few old ones.
+/// A stem of one or two letters is not judged, because the dictionary holds words of three or more.
+fn clitic_spelled(dict: &HashSet<&'static str>, head: &str, tail: &str) -> bool {
+    match tail {
+        "s" | "re" | "ve" | "ll" | "d" | "m" => head.len() < 3 || spelled(dict, head),
+        // Only a verb that takes `n't`. A loose rule would accept `dosn't` because `dos` is a word.
+        "t" => head.strip_suffix('n').is_some_and(|stem| {
+            matches!(
+                stem,
+                "do" | "does"
+                    | "did"
+                    | "is"
+                    | "are"
+                    | "was"
+                    | "were"
+                    | "has"
+                    | "have"
+                    | "had"
+                    | "would"
+                    | "could"
+                    | "should"
+                    | "must"
+                    | "might"
+                    | "need"
+                    | "dare"
+                    | "ought"
+                    | "ca"
+                    | "wo"
+                    | "sha"
+                    | "ai"
+            )
+        }),
+        _ => matches!(
+            (head, tail),
+            ("o", "clock") | ("ma", "am") | ("y", "all") | ("ne" | "e", "er")
+        ),
+    }
+}
+
+fn spelled(dict: &HashSet<&'static str>, bare: &str) -> bool {
     dict.contains(bare)
         || contraction(bare)
         || bare
@@ -3111,13 +3247,19 @@ fn contraction(bare: &str) -> bool {
     )
 }
 
-fn dictionary() -> &'static HashSet<String> {
-    static WORDS: OnceLock<HashSet<String>> = OnceLock::new();
-    WORDS.get_or_init(|| {
-        include_str!("words.txt")
+const WORDS: &str = include_str!("../dict/words.txt");
+const WORDS_EXTRA: &str = include_str!("../dict/words-extra.txt");
+
+/// Every word the proof accepts. The lines are borrowed from the compiled-in files, so loading
+/// does no per-word allocation. `dict/README.md` says where the list came from. A test keeps
+/// both files lowercase, sorted, and free of duplicates, so nothing is trimmed or lowercased here.
+fn dictionary() -> &'static HashSet<&'static str> {
+    static LOADED: OnceLock<HashSet<&'static str>> = OnceLock::new();
+    LOADED.get_or_init(|| {
+        WORDS
             .lines()
-            .map(|line| line.trim().to_ascii_lowercase())
-            .filter(|word| word.len() >= 3 && word.bytes().all(|byte| byte.is_ascii_lowercase()))
+            .chain(WORDS_EXTRA.lines())
+            .filter(|word| !word.is_empty())
             .collect()
     })
 }
@@ -6019,6 +6161,159 @@ mod tests {
         let words = super::misspellings("the clinic asdfghjk");
         assert!(words.contains("asdfghjk"));
         assert!(!words.contains("the"));
+    }
+
+    fn flagged(text: &str) -> Vec<String> {
+        super::misspellings(text).into_iter().collect()
+    }
+
+    #[test]
+    fn common_words_are_not_underlined() {
+        // Words that the old 9,900-word list flagged, and ordinary prose around them.
+        let text = "We cannot pause the encrypted sync. The sovereign tool was scoped, rewritten, \
+            and quietly left unchanged. Deliberately narrower, it borrows the breadth of a cipher. \
+            People went running, walked home, and happily made tomorrow's plans. The children \
+            studied cities, boxes, and replayed the recording. Colour and color are both fine. \
+            Please review the delegated sidebar, the audited primitives, and the redundancy of \
+            the versioned mailbox. Email me online about the website, the app, and the repo.";
+        assert_eq!(flagged(text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_compound_is_judged_by_its_parts() {
+        let ok = "A well-known and/or state-of-the-art, long-lived, end-to-end tool \u{2014} \
+            built by a self-taught maker \u{2013} is on-topic.";
+        assert_eq!(flagged(ok), Vec::<String>::new());
+        assert_eq!(
+            flagged("a pre-approved, non-profit, anti-pattern plan"),
+            Vec::<String>::new()
+        );
+        // A prefix is only a prefix before a hyphen.
+        assert_eq!(flagged("the pre was"), vec!["pre".to_owned()]);
+        assert_eq!(flagged("a well-knwon tool"), vec!["well-knwon".to_owned()]);
+        assert_eq!(flagged("this and/orx that"), vec!["and/orx".to_owned()]);
+    }
+
+    #[test]
+    fn contractions_and_possessives_are_words() {
+        let text = "I don\u{2019}t think it's what they're saying. We've seen John's note, \
+            and she'd say I'm sure it can't be. Won't you come? It's five o'clock, ma'am. \
+            The dogs' bowls are empty, and y'all know that isn't all.";
+        assert_eq!(flagged(text), Vec::<String>::new());
+        assert_eq!(flagged("it dosn't work"), vec!["dosn't".to_owned()]);
+    }
+
+    #[test]
+    fn things_that_are_not_words_are_left_alone() {
+        let text = "See ROADMAP.md and notes_v2.txt, h264, 3rd, 1st, https://example.com/a, \
+            /usr/bin/env, ~/notes, #tag, @someone, NASA, iPhone, JavaScript, caf\u{e9}, e.g. \
+            and U.S. rules, and (maybe) word(s).";
+        assert_eq!(flagged(text), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_name_is_left_alone_until_it_starts_a_sentence() {
+        assert_eq!(flagged("I met Zorblax yesterday."), Vec::<String>::new());
+        assert_eq!(
+            flagged("It ended. Zorblax left."),
+            vec!["Zorblax".to_owned()]
+        );
+        assert_eq!(flagged("zorblax left."), vec!["zorblax".to_owned()]);
+        // A real word that is capitalized is fine anywhere.
+        assert_eq!(flagged("Then Tomorrow came."), Vec::<String>::new());
+    }
+
+    #[test]
+    fn real_misspellings_are_still_caught() {
+        let typos = [
+            "recieve",
+            "definately",
+            "seperate",
+            "occured",
+            "untill",
+            "wierd",
+            "accomodate",
+            "adress",
+            "teh",
+            "wich",
+            "becuase",
+            "alot",
+            "beleive",
+            "tommorow",
+            "thier",
+            "freind",
+            "neccessary",
+            "goverment",
+            "enviroment",
+            "embarass",
+            "acheive",
+            "existance",
+            "grammer",
+            "independant",
+            "occurence",
+            "recomend",
+            "succesful",
+            "tendancy",
+            "truely",
+        ];
+        let text = typos.join(" ");
+        let found = flagged(&text);
+        let missed: Vec<&str> = typos
+            .iter()
+            .copied()
+            .filter(|word| !found.iter().any(|hit| hit == word))
+            .collect();
+        assert!(missed.is_empty(), "not caught: {missed:?}");
+        // At the start of a sentence a capital does not hide one.
+        assert_eq!(flagged("Recieve it."), vec!["Recieve".to_owned()]);
+    }
+
+    #[test]
+    fn the_underline_and_the_proof_use_the_same_word() {
+        for raw in [
+            "**word**",
+            "(word),",
+            "\"word\"",
+            "word.",
+            "Word",
+            "well-known",
+            "don\u{2019}t",
+        ] {
+            let key = super::spell_key(raw).expect("a word");
+            assert!(key.chars().any(|ch| ch.is_ascii_alphabetic()));
+            assert!(!key.starts_with(|ch: char| !ch.is_ascii_alphabetic()));
+            assert!(!key.ends_with(|ch: char| !ch.is_ascii_alphabetic()));
+        }
+        assert_eq!(super::spell_key("don\u{2019}t"), Some("don't".to_owned()));
+        assert_eq!(super::spell_key("Word,"), Some("Word".to_owned()));
+        assert_eq!(super::spell_key("is"), None);
+        assert_eq!(super::spell_key("a1b2c3"), None);
+    }
+
+    #[test]
+    fn the_word_lists_are_clean() {
+        for (name, list) in [
+            ("words.txt", super::WORDS),
+            ("words-extra.txt", super::WORDS_EXTRA),
+        ] {
+            let mut last = "";
+            for line in list.lines() {
+                assert!(line.len() >= 3, "{name}: {line:?} is too short");
+                assert!(
+                    line.bytes().all(|byte| byte.is_ascii_lowercase()),
+                    "{name}: {line:?} is not lowercase letters"
+                );
+                assert!(last < line, "{name}: {line:?} is out of order or repeated");
+                last = line;
+            }
+        }
+        for word in super::WORDS_EXTRA.lines() {
+            assert!(
+                super::WORDS.lines().all(|main| main != word),
+                "words-extra.txt repeats {word:?} from words.txt"
+            );
+        }
+        assert!(super::dictionary().len() > 90_000);
     }
 
     #[test]

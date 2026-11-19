@@ -4,6 +4,12 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-19 — spelling knows ordinary words
+
+The word list behind the underline was about 9,900 words from a web scrape. It flagged `cannot`, `encrypted`, `pause`, and `sovereign`, and it let `alot` through. It is now the Hunspell `en_US` and `en_GB` dictionaries, about 90,000 forms, plus a short list of technical words. The terms are in `crates/ambient-desktop/dict/SCOWL-LICENSE.txt`. Both spellings are accepted. No dependency was added.
+
+The check also reads a word the way a person writes it. `well-known` and `and/or` are two words. `don't`, `John's`, and curly apostrophes are fine. A word with a digit, an accent, a symbol, or a capital inside it (a file name, an address, `iPhone`, `NASA`) is not judged. A capitalized word that is not in the dictionary is left alone unless it starts a sentence, because it is more likely a name than a typo. The price is that a misspelled capitalized word in the middle of a sentence is not underlined.
+
 ## 2026-11-19 — the pause and the search stop blocking
 
 A keystroke does not search the folder and does not start a timer that redraws the window. Titles still filter at once. The body and the conversations wait about a fifth of a second, and only the latest query runs. Notes and conversations take different locks. A search of notes does not wait on a chat pull. Conversation text stays in memory on the folder thread and is reread only when a log's stamp changes. That scan happens after the lock is dropped.
