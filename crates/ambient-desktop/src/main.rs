@@ -688,11 +688,16 @@ enum WelcomeStep {
 }
 
 impl App {
-    #[allow(clippy::too_many_lines)]
     fn boot() -> (Self, Task<Message>) {
         let dir = std::env::args()
             .nth(1)
             .map_or_else(|| PathBuf::from("notebook"), PathBuf::from);
+        Self::at(dir)
+    }
+
+    /// The app for one folder. A test uses this with a folder of its own.
+    #[allow(clippy::too_many_lines)]
+    fn at(dir: PathBuf) -> (Self, Task<Message>) {
         let mut app = Self {
             dir,
             notebook: None,
@@ -6061,6 +6066,11 @@ impl App {
                 self.pending = true;
                 if self.install_latest() {
                     self.post_side();
+                    // The tasks come from the notebook that was just installed. Without this the
+                    // tab kept showing the old list until it was left and opened again.
+                    if self.screen == Screen::Tasks {
+                        self.rebuild_tasks();
+                    }
                 } else {
                     self.take_notes(notes);
                 }
@@ -6087,6 +6097,8 @@ impl App {
     }
 
     fn apply_note(&self, id: Option<String>, title: String, body: String) -> Task<Message> {
+        #[cfg(test)]
+        tests_support::record_write(id.as_deref(), &title, &body);
         let dir = self.dir.clone();
         Task::perform(
             async move {
@@ -8710,5 +8722,124 @@ mod scrollbar_tests {
         // Once the wake has run, the next burst starts a new one.
         SCROLL_WAKE.store(false, std::sync::atomic::Ordering::Relaxed);
         assert!(scroll_seen().is_some());
+    }
+}
+
+/// What a test needs from the app's background writes. They are recorded so a test can do them
+/// itself, the way the worker thread would, and hand the result back.
+#[cfg(test)]
+mod tests_support {
+    use std::cell::RefCell;
+
+    type Write = (Option<String>, String, String);
+
+    thread_local! {
+        static WRITES: RefCell<Vec<Write>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record_write(id: Option<&str>, title: &str, body: &str) {
+        WRITES.with(|writes| {
+            writes
+                .borrow_mut()
+                .push((id.map(str::to_owned), title.to_owned(), body.to_owned()));
+        });
+    }
+
+    pub(super) fn take_writes() -> Vec<Write> {
+        WRITES.with(|writes| std::mem::take(&mut *writes.borrow_mut()))
+    }
+}
+
+/// Tests that drive a real `App` on a real folder, through the same `update` the window uses.
+#[cfg(test)]
+mod app_tests {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    use super::{App, Message, Notebook, tests_support, write_snapshot};
+
+    /// The published notebook is one slot per process, so these tests take turns.
+    fn one_at_a_time() -> MutexGuard<'static, ()> {
+        static TURN: Mutex<()> = Mutex::new(());
+        TURN.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn folder(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("aerodash-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn open_app(dir: &Path) -> App {
+        Notebook::create(dir).expect("create");
+        let (mut app, _) = App::at(dir.to_path_buf());
+        app.loaded = true;
+        app.adopt_open_book(Notebook::open(dir).expect("open"));
+        let _ = tests_support::take_writes();
+        app
+    }
+
+    /// Do the writes the app asked for, as its worker thread would, and hand each result back.
+    fn settle(app: &mut App) {
+        for (id, title, body) in tests_support::take_writes() {
+            let result =
+                write_snapshot(&app.dir, id.as_deref(), &title, &body).map(|(_id, notes)| notes);
+            let _ = app.update(Message::Applied(result));
+        }
+    }
+
+    fn listed(app: &App) -> Vec<String> {
+        app.tasks.iter().map(|task| task.text.clone()).collect()
+    }
+
+    #[test]
+    fn the_tasks_tab_updates_when_a_task_is_added_removed_or_checked() {
+        let _turn = one_at_a_time();
+        let dir = folder("tasks");
+        let mut app = open_app(&dir);
+        let _ = app.update(Message::ShowTasks);
+        assert!(listed(&app).is_empty());
+
+        // The first task creates the Tasks note.
+        let _ = app.update(Message::TaskDraft("buy milk".to_owned()));
+        let _ = app.update(Message::AddTask);
+        settle(&mut app);
+        assert_eq!(listed(&app), ["buy milk"], "the first task did not show");
+
+        // The second goes into the note that is there now.
+        let _ = app.update(Message::TaskDraft("call the clinic".to_owned()));
+        let _ = app.update(Message::AddTask);
+        settle(&mut app);
+        assert_eq!(listed(&app), ["buy milk", "call the clinic"]);
+
+        // Checking one moves it to done, without leaving the tab.
+        let milk = app
+            .tasks
+            .iter()
+            .find(|task| task.text == "buy milk")
+            .expect("task");
+        let (id, line) = (milk.note_id.clone(), milk.line);
+        let _ = app.update(Message::SetTask {
+            id: id.clone(),
+            line,
+            done: true,
+        });
+        settle(&mut app);
+        let milk = app
+            .tasks
+            .iter()
+            .find(|task| task.text == "buy milk")
+            .expect("task");
+        assert!(milk.done, "the check did not show");
+
+        // Removing one takes it off the list.
+        let _ = app.update(Message::RemoveTask { id, line });
+        settle(&mut app);
+        assert_eq!(
+            listed(&app),
+            ["call the clinic"],
+            "the removal did not show"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
