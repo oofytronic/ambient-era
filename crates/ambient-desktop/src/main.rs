@@ -2825,20 +2825,20 @@ impl App {
             return body.into();
         }
         if self.confirm_delete {
-            body = body.push(self.delete_confirm());
-            return body.into();
+            return Self::overlay_corner(body.into(), self.delete_confirm());
         }
         self.overlay_tools(body.into(), true)
     }
 
-    fn overlay_tools<'a>(
-        &'a self,
+    /// Put `card` over the page in the lower right corner, where the round buttons are. A
+    /// question about something those buttons did appears under the pointer, not across the page.
+    fn overlay_corner<'a>(
         page: Element<'a, Message>,
-        editing: bool,
+        card: Element<'a, Message>,
     ) -> Element<'a, Message> {
         stack![
             page,
-            container(self.tool_cluster(editing))
+            container(card)
                 .width(Fill)
                 .height(Fill)
                 .align_x(iced::alignment::Horizontal::Right)
@@ -2853,6 +2853,14 @@ impl App {
         .width(Fill)
         .height(Fill)
         .into()
+    }
+
+    fn overlay_tools<'a>(
+        &'a self,
+        page: Element<'a, Message>,
+        editing: bool,
+    ) -> Element<'a, Message> {
+        Self::overlay_corner(page, self.tool_cluster(editing))
     }
 
     fn tool_cluster(&self, editing: bool) -> Element<'_, Message> {
@@ -2884,15 +2892,22 @@ impl App {
             "Discard this unsaved note?"
         };
         let verb = if saved { "Delete note" } else { "Discard" };
-        column![
-            text(prompt).size(14).color(ink.muted),
-            row![
-                action_label(verb, Message::DeleteNote),
-                ghost_label("Cancel", Message::CancelDelete),
+        container(
+            column![
+                text(prompt).size(14).color(ink.muted),
+                row![
+                    ghost_label("Cancel", Message::CancelDelete),
+                    space().width(Fill),
+                    action_label(verb, Message::DeleteNote),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
             ]
-            .spacing(8),
-        ]
-        .spacing(8)
+            .spacing(12),
+        )
+        .width(320)
+        .padding(14)
+        .style(card_style)
         .into()
     }
 
