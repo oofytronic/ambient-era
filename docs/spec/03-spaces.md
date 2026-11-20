@@ -71,6 +71,8 @@ Writers (role 2) MAY append `note.put` and `msg.put`. They MUST NOT append membe
 
 Project state by taking the set of applied events. Order of arrival does not matter. Parent links, signer chains, and membership events are the only structure. The relay's cursor is not an order.
 
+A `note.put` or `msg.put` from a signer who is not a member yet waits. Nothing orders it against the `space.member-add` that enrolls that signer, because a device's first event has no predecessor and event ids are random. An implementation MUST NOT let the order of ids decide whether it is applied. It is `not_member` only when nothing that is left to apply can enroll the signer, and then it is not applied. A signer that is never enrolled stays refused. Events a removed member signed after removal are refused as before.
+
 ## Sealing
 
 Private Space wire bytes are sealed before they are given to a relay. One HPKE base-mode seal per recipient, with a fresh ephemeral key each time.
@@ -103,3 +105,4 @@ Vector `conformance/vectors/spaces/0001-hpke-blob.json` seals the plaintext `hel
 ## Changelog
 
 - v1 (2026-10-27): notes and conversation Spaces, HPKE to member keys, snapshot notes with an explicit conflict rule.
+- v1 (2026-11-20): Merge says an event from a signer who is not yet a member waits for an enrollment instead of being refused at once. No change to the wire format.

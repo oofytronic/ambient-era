@@ -347,10 +347,29 @@ fn apply_ready(
                 .map(|item| item.id)
                 .cmp(&by_prev.get(right).map(|item| item.id))
         });
+        // A note or message from a signer that is not a member yet has to wait. Event ids are
+        // random and signers have no order between them, so whether the enrollment is applied
+        // before the first note from the device it enrolls would otherwise be luck, and a note
+        // applied too early is dropped as `NotMember` for good. A waiting event stays where it
+        // is and is looked at again after every round. Only when a whole round applies nothing
+        // is it clear that no event left can enroll them, and then they are refused.
+        let mut waiting = Vec::new();
+        let mut applied = false;
         for key in ready {
+            let Some(held) = by_prev.get(&key) else {
+                continue;
+            };
+            if !revoked_ids.contains(&held.id)
+                && writes_content(&held.event_type, conversation)
+                && !can_write(members, &held.signer)
+            {
+                waiting.push(key);
+                continue;
+            }
             let Some(item) = by_prev.remove(&key) else {
                 continue;
             };
+            applied = true;
             if revoked_ids.contains(&item.id) {
                 skipped.push((item.id, Skip::Revoked));
                 tip.insert(item.signer, item.id);
@@ -367,7 +386,27 @@ fn apply_ready(
             }
             tip.insert(item.signer, item.id);
         }
+        if !applied {
+            for key in waiting {
+                let Some(item) = by_prev.remove(&key) else {
+                    continue;
+                };
+                skipped.push((item.id, Skip::NotMember));
+                tip.insert(item.signer, item.id);
+            }
+        }
     }
+}
+
+/// Whether this event needs its signer to be a member to mean anything.
+fn writes_content(event_type: &str, conversation: bool) -> bool {
+    (event_type == "note.put" && !conversation) || (event_type == "msg.put" && conversation)
+}
+
+fn can_write(members: &BTreeMap<[u8; 32], Member>, signer: &[u8; 32]) -> bool {
+    members
+        .get(signer)
+        .is_some_and(|member| member.role == 1 || member.role == 2)
 }
 
 struct StoredNote {

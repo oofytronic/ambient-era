@@ -4,6 +4,14 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-20 — a new device's first note is not dropped, and a sync no longer overwrites a write
+
+A note written on a newly enrolled device could vanish from every other device, about four runs in ten in `restored_folder_writes_back`. The note was never lost from the log, but the projection refused it. A device becomes a member when a `space.member-add` is applied. Its first note has no earlier event, so it is ready at once, and events were applied in the order of their random ids. When the note came first its signer was not a member yet, so it was skipped as `NotMember`, and the skip moved that signer's chain past it for good.
+
+A note or message from a signer that is not yet a member now waits. It stays in the merge and is looked at again after every round. Only when a round applies nothing is it clear that no event left can enroll the signer, and then it is refused as before. A signer nothing ever enrolls is still refused. [Spec 03](docs/spec/03-spaces.md) said when an event is `not_member` only for events signed after a removal, and did not say how a first note and its enrollment are ordered when neither refers to the other. It now says so under Merge. The wire format and the vectors are unchanged. Removals keep their order among the other events.
+
+The second fix is for writers that read a log, wait, and write it back. Sync waits on the relay between the two. A note or a message written in that wait was overwritten, and so were the notes the relay delivered. Sync, `say`, enroll, pair, and revoke now write with `write_log_if`. If the file moved, they read it again, merge again, and retry a few times. Restore still uses `write_log`, because it writes a folder that has no notes file yet.
+
 ## 2026-11-19 — a save checks each signature once
 
 A save in the window took about 330 ms with a thousand notes, and a second reload after it about 160 ms more. Every `Notebook` started with a full load that checked every signature, the projection checked them again, and a write threw the cache away, so the next read began cold. A save, a sync, and a search each opened a new `Notebook`, so none of them found a warm one.
