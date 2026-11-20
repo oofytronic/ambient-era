@@ -1862,6 +1862,13 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
+        Wheel {
+            child: self.screen_view(),
+        }
+        .into()
+    }
+
+    fn screen_view(&self) -> Element<'_, Message> {
         if self.breeze_on() {
             return self.breeze_screen();
         }
@@ -8177,6 +8184,141 @@ fn slim_bar() -> scrollable::Scrollbar {
         .margin(2.0)
 }
 
+/// Pixels a wheel notch moves a page of this height. Iced moves a fixed 60, which is slow in a
+/// tall window. This is the step GTK takes, the page height to the power of two thirds, kept
+/// between 60 and 150 so a small window is not left slower than before and a large one is not
+/// jumpy. A touchpad sends pixels, already scaled by the system, and is left alone.
+fn wheel_step(page: f32) -> f32 {
+    page.max(1.0).powf(2.0 / 3.0).clamp(60.0, 150.0)
+}
+
+/// Stands over the whole window and scales a wheel notch before any scroll area sees it.
+struct Wheel<'a> {
+    child: Element<'a, Message>,
+}
+
+impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for Wheel<'_> {
+    fn size(&self) -> Size<iced::Length> {
+        self.child.as_widget().size()
+    }
+
+    fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+        vec![iced::advanced::widget::Tree::new(&self.child)]
+    }
+
+    fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+        tree.diff_children(&[self.child.as_widget()]);
+    }
+
+    fn layout(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        renderer: &iced::Renderer,
+        limits: &iced::advanced::layout::Limits,
+    ) -> iced::advanced::layout::Node {
+        let Some(child) = tree.children.first_mut() else {
+            return iced::advanced::layout::Node::new(Size::ZERO);
+        };
+        self.child.as_widget_mut().layout(child, renderer, limits)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        event: &iced::Event,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        renderer: &iced::Renderer,
+        clipboard: &mut dyn iced::advanced::Clipboard,
+        shell: &mut iced::advanced::Shell<'_, Message>,
+        viewport: &iced::Rectangle,
+    ) {
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        let scaled = match event {
+            iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+                delta: iced::mouse::ScrollDelta::Lines { x, y },
+            }) => {
+                // Iced multiplies a line by 60, so this is the factor that makes it the step.
+                let by = wheel_step(layout.bounds().height) / 60.0;
+                Some(iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+                    delta: iced::mouse::ScrollDelta::Lines {
+                        x: x * by,
+                        y: y * by,
+                    },
+                }))
+            }
+            _ => None,
+        };
+        self.child.as_widget_mut().update(
+            child,
+            scaled.as_ref().unwrap_or(event),
+            layout,
+            cursor,
+            renderer,
+            clipboard,
+            shell,
+            viewport,
+        );
+    }
+
+    fn draw(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        renderer: &mut iced::Renderer,
+        theme: &Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+    ) {
+        let Some(child) = tree.children.first() else {
+            return;
+        };
+        self.child
+            .as_widget()
+            .draw(child, renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        cursor: iced::advanced::mouse::Cursor,
+        viewport: &iced::Rectangle,
+        renderer: &iced::Renderer,
+    ) -> iced::advanced::mouse::Interaction {
+        let Some(child) = tree.children.first() else {
+            return iced::advanced::mouse::Interaction::None;
+        };
+        self.child
+            .as_widget()
+            .mouse_interaction(child, layout, cursor, viewport, renderer)
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'_>,
+        renderer: &iced::Renderer,
+        operation: &mut dyn iced::advanced::widget::Operation,
+    ) {
+        let Some(child) = tree.children.first_mut() else {
+            return;
+        };
+        self.child
+            .as_widget_mut()
+            .operate(child, layout, renderer, operation);
+    }
+}
+
+impl<'a> From<Wheel<'a>> for Element<'a, Message> {
+    fn from(wheel: Wheel<'a>) -> Self {
+        Element::new(wheel)
+    }
+}
+
 /// Room between content and the bar. The bar is drawn over the content, so without this it sits
 /// on the edge of a button or a line of text.
 const BAR_ROOM: f32 = 10.0;
@@ -10063,6 +10205,20 @@ mod app_tests {
             "one already on the note is not offered"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_wheel_notch_is_a_page_step_not_a_fixed_sixty() {
+        assert!(
+            (super::wheel_step(100.0) - 60.0).abs() < f32::EPSILON,
+            "a small window keeps 60"
+        );
+        let tall = super::wheel_step(720.0);
+        assert!((79.0..81.0).contains(&tall), "{tall}");
+        assert!(
+            (super::wheel_step(100_000.0) - 150.0).abs() < f32::EPSILON,
+            "and a huge one is capped"
+        );
     }
 
     #[test]
