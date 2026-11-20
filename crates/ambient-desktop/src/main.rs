@@ -369,6 +369,10 @@ enum Message {
     DropPending(usize),
     OpenPath(PathBuf),
     Format(FormatKind),
+    /// Tab or Shift+Tab in the writing: nest the list items under the caret, or bring them out.
+    ShiftItems {
+        back: bool,
+    },
     PasteNote,
     Pasted(Option<String>),
     ClearSelect,
@@ -985,6 +989,16 @@ impl App {
                     });
                 }
                 Task::none()
+            }
+            Message::ShiftItems { back } => {
+                match markdown::shift_items(&self.body.text(), &self.body.cursor(), back) {
+                    Some(change) => {
+                        self.drag_from = None;
+                        self.apply_change(change);
+                        self.note_follow(true)
+                    }
+                    None => Task::none(),
+                }
             }
             Message::BodyEdited(action) => {
                 if matches!(
@@ -8165,10 +8179,29 @@ fn binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>
     };
     let command = press.modifiers.control() || press.modifiers.command();
     let shift = press.modifiers.shift();
+    if !command
+        && !press.modifiers.alt()
+        && matches!(
+            press.key.as_ref(),
+            Key::Named(iced::keyboard::key::Named::Tab)
+        )
+    {
+        return Some(text_editor::Binding::Custom(Message::ShiftItems {
+            back: shift,
+        }));
+    }
     match (character.as_deref(), command, shift) {
         (Some("z" | "Z"), true, true) | (Some("y" | "Y"), true, _) => {
             Some(text_editor::Binding::Custom(Message::Redo))
         }
+        // Formatting, on the same marks the buttons use. Shift keeps the ones a browser or a
+        // word processor already gives to something else out of the way.
+        (Some("b" | "B"), true, false) => Some(format_binding(FormatKind::Bold)),
+        (Some("i" | "I"), true, false) => Some(format_binding(FormatKind::Italic)),
+        (Some("k" | "K"), true, false) => Some(format_binding(FormatKind::Link)),
+        (Some("e" | "E"), true, false) => Some(format_binding(FormatKind::Code)),
+        (Some("x" | "X"), true, true) => Some(format_binding(FormatKind::Strike)),
+        (Some("h" | "H"), true, true) => Some(format_binding(FormatKind::Highlight)),
         (Some("z" | "Z"), true, false) => Some(text_editor::Binding::Custom(Message::Undo)),
         (Some("f" | "F"), true, _) => Some(text_editor::Binding::Custom(Message::FindOpen)),
         (Some("s"), true, _) => Some(text_editor::Binding::Custom(Message::Save)),
@@ -8177,6 +8210,10 @@ fn binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>
         (Some("x"), true, _) => Some(text_editor::Binding::Custom(Message::CutNote)),
         _ => text_editor::Binding::from_key_press(press),
     }
+}
+
+fn format_binding(kind: FormatKind) -> text_editor::Binding<Message> {
+    text_editor::Binding::Custom(Message::Format(kind))
 }
 
 fn composer_binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>> {

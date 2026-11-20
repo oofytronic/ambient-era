@@ -100,3 +100,20 @@ broken_intra_doc_links = "deny"
 # unoptimized, so stepping through them still works and rebuilding them stays quick.
 [profile.dev.package."*"]
 opt-level = 3
+
+# The crates on the typing, saving, and syncing path are optimized too. The window parses and
+# measures the page on every key, and in an unoptimized build that took about four times as
+# long, which is the difference between smooth and noticeably late. Compiling them this way
+# costs seconds. Stepping through them in a debugger is harder.
+[profile.dev.package.ambient-desktop]
+opt-level = 3
+[profile.dev.package.ambient-cli]
+opt-level = 3
+[profile.dev.package.ambient-spaces]
+opt-level = 3
+[profile.dev.package.ambient-identity]
+opt-level = 3
+[profile.dev.package.ambient-events]
+opt-level = 3
+[profile.dev.package.ambient-store]
+opt-level = 3

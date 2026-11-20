@@ -5,6 +5,11 @@
 //! leaves the marks immediately. An unclosed mark stays visible and continues onto
 //! the next line until a blank line. The marks stay in the saved text. This is not
 //! a second pane.
+//!
+//! The construct the caret is in is shown as typed, whole: the outermost run of marks around
+//! it, or a whole link, image, or note link, so its marks can be read, changed, or taken out.
+//! A caret moved to just after a construct touches it and shows it too. A caret that got there
+//! by typing does not, so the closing mark settles at once.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet};
@@ -33,6 +38,9 @@ pub(super) struct NoteBody {
     /// Parsed once per text change. A drag must not parse the page again.
     cache: Vec<LineCache>,
     cached: String,
+    /// The last thing done was typing or deleting. A caret just after a closing mark then stays
+    /// outside it. A caret moved there with a key or the pointer is treated as touching it.
+    typed: bool,
 }
 
 const OPEN_CAP: usize = 8;
@@ -259,6 +267,7 @@ impl NoteBody {
             shown_top: f32::NAN,
             cache: Vec::new(),
             cached: String::new(),
+            typed: false,
         };
         body.sync_live();
         body
@@ -328,11 +337,13 @@ impl NoteBody {
         self.editor = text_editor::Content::with_text(source);
         self.shown_line = 0;
         self.shown_top = f32::NAN;
+        self.typed = false;
         self.sync_live();
     }
 
     /// Puts the caret back after `load` replaced the document.
     pub(super) fn place(&mut self, cursor: text_editor::Cursor) {
+        self.typed = false;
         self.shown_line = cursor.position.line;
         self.shown_top = f32::NAN;
         let clear = cursor.selection.is_none();
@@ -344,6 +355,7 @@ impl NoteBody {
     }
 
     pub(super) fn perform(&mut self, action: &Action) {
+        self.typed = matches!(action, Action::Edit(_));
         self.editor.perform(action.clone());
         self.sync_live();
     }
@@ -354,6 +366,7 @@ impl NoteBody {
 
     /// Moves the caret to a byte in the document and opens that word.
     pub(super) fn place_byte(&mut self, byte: usize) {
+        self.typed = false;
         let text = self.editor.text();
         let position = byte_pos(&text, byte.min(text.len()));
         self.editor.move_to(text_editor::Cursor {
@@ -441,12 +454,14 @@ impl NoteBody {
     pub(super) fn edit(&mut self, action: &Action) -> bool {
         match action {
             Action::Click(_) | Action::Drag(_) => {
+                self.typed = false;
                 self.live.perform(action.clone());
                 self.mirror_live_cursor();
                 false
             }
             Action::Scroll { .. } => false,
             Action::Edit(_) => {
+                self.typed = true;
                 let previous = self.editor.text();
                 self.editor.perform(action.clone());
                 self.sync_live();
@@ -457,6 +472,7 @@ impl NoteBody {
             | Action::SelectWord
             | Action::SelectLine
             | Action::SelectAll => {
+                self.typed = false;
                 self.editor.perform(action.clone());
                 self.sync_live();
                 false
@@ -486,8 +502,10 @@ impl NoteBody {
         let (win_start, win_end) = self.live_at.unwrap_or((0, 0));
         let active = byte_pos(&text, win_start.min(text.len())).line;
         let mut y = 0.0;
+        let mut next_base = 0_usize;
         for (index, line) in split_lines(&text).into_iter().enumerate() {
-            let base = line_start(&text, index);
+            let base = next_base;
+            next_base = base.saturating_add(line.len()).saturating_add(1);
             let local_win = if index == active {
                 let start = win_start.saturating_sub(base).min(line.len());
                 let end = win_end.saturating_sub(base).min(line.len()).max(start);
@@ -547,7 +565,7 @@ impl NoteBody {
         self.ensure_cache();
         let text = self.editor.text();
         let cursor = self.editor.cursor();
-        let (start, end) = window_bytes(&text, &cursor, &self.cache);
+        let (start, end) = window_bytes(&text, &cursor, &self.cache, !self.typed);
         let slice = text.get(start..end).unwrap_or("");
         let mut local = local_cursor(&text, &cursor, start, end);
         local.selection = None;
@@ -564,7 +582,9 @@ impl NoteBody {
         if self.cached == text {
             return;
         }
-        self.cache = cache_lines(&text);
+        let old = std::mem::take(&mut self.cached);
+        let rows = std::mem::take(&mut self.cache);
+        self.cache = update_lines(&old, rows, &text);
         self.cached = text;
     }
 
@@ -623,6 +643,7 @@ pub(super) fn view(
     let paint = selection_color(dark);
     let placeholder = text.is_empty();
     let mut page = column![].spacing(LINE_GAP).width(Length::Fill);
+    let mut next_base = 0_usize;
     for (index, line) in split_lines(&text).into_iter().enumerate() {
         let incoming = body
             .cache
@@ -630,7 +651,10 @@ pub(super) fn view(
             .map(|row| row.carry)
             .unwrap_or_default();
         let at_start = index == 0;
-        let base = line_start(&text, index);
+        // The start of each line, kept as a running sum. Asking for it by index scans the page
+        // from the top every time.
+        let base = next_base;
+        next_base = base.saturating_add(line.len()).saturating_add(1);
         page = page.push(line_block(
             body,
             line,
@@ -1701,7 +1725,7 @@ struct ListParts {
 
 fn list_parts(line: &str) -> Option<ListParts> {
     let spaces = leading_indent(line);
-    if spaces > 24 {
+    if spaces > MAX_INDENT {
         return None;
     }
     let rest = line.get(spaces..)?;
@@ -2578,17 +2602,190 @@ pub(super) fn format_change(text: &str, cursor: text_editor::Cursor, kind: Forma
     }
 }
 
-/// Enter in a list or task inserts the next marker, including on an empty item.
-/// Backspace on an empty item leaves the list. A fence, math block, or
-/// frontmatter is left alone.
+/// Enter in a list, a task, or a quote starts the next line with the same marker. On an empty
+/// item it ends the list instead, or steps out one level if the item is nested, so pressing
+/// Enter twice finishes a list. A fence, math block, or frontmatter is left alone.
 pub(super) fn continue_enter(text: &str, cursor: text_editor::Cursor) -> Option<Change> {
-    let (start, line, parts) = list_at_cursor(text, &cursor)?;
+    let Some((start, line, parts)) = list_at_cursor(text, &cursor) else {
+        return quote_enter(text, &cursor);
+    };
+    if line.get(parts.end..).unwrap_or("").trim().is_empty() {
+        return Some(leave_item(text, start, line));
+    }
     let column = cursor_column(line, cursor.position.column);
     let at = start.saturating_add(column.max(parts.end));
     let mut insert = String::from("\n");
     insert.push_str(&next_prefix(line, &parts));
     Some(rewrite(text, at, at, &insert, insert.len(), None))
 }
+
+/// An empty item: out one level if it is nested, otherwise the marker goes.
+fn leave_item(text: &str, start: usize, line: &str) -> Change {
+    let end = start.saturating_add(line.len());
+    let indent = leading_indent(line);
+    if indent > 0 {
+        let step = if line.starts_with('\t') {
+            1
+        } else {
+            indent.min(ITEM_INDENT)
+        };
+        let outer = line.get(step..).unwrap_or("");
+        return rewrite(text, start, end, outer, outer.len(), None);
+    }
+    rewrite(text, start, end, "", 0, None)
+}
+
+/// The width of one level of nesting.
+const ITEM_INDENT: usize = 2;
+
+/// The marker of a quote line: any indent, one or more `>`, and the space after them.
+fn quote_prefix(line: &str) -> Option<usize> {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    if indent > 3 {
+        return None;
+    }
+    let mut end = indent;
+    let mut marks = 0_usize;
+    loop {
+        match line.as_bytes().get(end) {
+            Some(b'>') => {
+                marks = marks.saturating_add(1);
+                end = end.saturating_add(1);
+            }
+            Some(b' ')
+                if marks > 0 && line.as_bytes().get(end.saturating_add(1)) == Some(&b'>') =>
+            {
+                end = end.saturating_add(1);
+            }
+            _ => break,
+        }
+    }
+    if marks == 0 {
+        return None;
+    }
+    if line.as_bytes().get(end) == Some(&b' ') {
+        end = end.saturating_add(1);
+    }
+    Some(end)
+}
+
+fn quote_enter(text: &str, cursor: &text_editor::Cursor) -> Option<Change> {
+    if cursor.selection.is_some() || skipped_block(text, cursor.position.line) {
+        return None;
+    }
+    let start = line_start(text, cursor.position.line);
+    let end = line_end(text, cursor.position.line);
+    let line = text.get(start..end)?;
+    let prefix = quote_prefix(line)?;
+    let column = cursor_column(line, cursor.position.column);
+    if column < prefix.min(line.len()) {
+        return None;
+    }
+    if line.get(prefix..).unwrap_or("").trim().is_empty() {
+        return Some(rewrite(text, start, end, "", 0, None));
+    }
+    let at = start.saturating_add(column);
+    let mut insert = String::from("\n");
+    insert.push_str(line.get(..prefix).unwrap_or("> "));
+    Some(rewrite(text, at, at, &insert, insert.len(), None))
+}
+
+/// One line of a block that `shift_items` rewrote: where it began before and after, how long it
+/// was, and how many bytes were added to its start (`grew`) or taken from it.
+struct Row {
+    old_start: usize,
+    old_len: usize,
+    new_start: usize,
+    step: usize,
+    grew: bool,
+}
+
+/// Tab and Shift+Tab: nest the list items the caret is in, or the ones a selection covers, one
+/// level, or bring them out one. `None` when none of those lines is a list item, so the key does
+/// nothing in a paragraph.
+pub(super) fn shift_items(text: &str, cursor: &text_editor::Cursor, back: bool) -> Option<Change> {
+    let (from, to) = range_bytes(text, cursor);
+    let first = byte_pos(text, from).line;
+    let mut last = byte_pos(text, to).line;
+    if to > from && last > first && to == line_start(text, last) {
+        // A selection that ends at the start of a line does not include that line.
+        last = last.saturating_sub(1);
+    }
+    if (first..=last).any(|line_no| skipped_block(text, line_no)) {
+        return None;
+    }
+    let block_start = line_start(text, first);
+    let block_end = line_end(text, last);
+    let block = text.get(block_start..block_end)?;
+    let mut out = String::with_capacity(block.len().saturating_add(8));
+    let mut rows: Vec<Row> = Vec::new();
+    let mut old_start = 0_usize;
+    for (index, line) in block.split('\n').enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        let (shifted, step, grew) = shift_line(line, back);
+        rows.push(Row {
+            old_start,
+            old_len: line.len(),
+            new_start: out.len(),
+            step,
+            grew,
+        });
+        out.push_str(&shifted);
+        old_start = old_start.saturating_add(line.len()).saturating_add(1);
+    }
+    if rows.iter().all(|row| row.step == 0) {
+        return None;
+    }
+    let map = |byte: usize| -> usize {
+        let local = byte.saturating_sub(block_start);
+        for row in &rows {
+            if local <= row.old_start.saturating_add(row.old_len) {
+                let col = local.saturating_sub(row.old_start);
+                let col = if row.grew {
+                    col.saturating_add(row.step)
+                } else {
+                    col.saturating_sub(row.step)
+                };
+                return row.new_start.saturating_add(col);
+            }
+        }
+        out.len()
+    };
+    let at = map(pos_byte(text, cursor.position));
+    let select = cursor
+        .selection
+        .map(|anchor| (map(pos_byte(text, anchor)), at));
+    Some(rewrite(text, block_start, block_end, &out, at, select))
+}
+
+/// One line moved a level. A line that is not a list item, or that cannot move further, comes
+/// back as it was with a step of 0.
+fn shift_line(line: &str, back: bool) -> (String, usize, bool) {
+    if list_parts(line).is_none() {
+        return (line.to_owned(), 0, false);
+    }
+    if back {
+        let step = if line.starts_with('\t') {
+            1
+        } else {
+            leading_spaces(line).min(ITEM_INDENT)
+        };
+        return (line.get(step..).unwrap_or(line).to_owned(), step, false);
+    }
+    if leading_indent(line).saturating_add(ITEM_INDENT) > MAX_INDENT {
+        return (line.to_owned(), 0, false);
+    }
+    (
+        format!("{}{line}", " ".repeat(ITEM_INDENT)),
+        ITEM_INDENT,
+        true,
+    )
+}
+
+/// `list_parts` does not read an item indented further than this.
+const MAX_INDENT: usize = 24;
 
 /// Backspace on an empty list or task removes that marker.
 pub(super) fn exit_empty_item(text: &str, cursor: text_editor::Cursor) -> Option<Change> {
@@ -2723,6 +2920,9 @@ fn wrap(text: &str, cursor: &text_editor::Cursor, left: &str, right: &str) -> Ch
     if let Some(stripped) = peel(inner, left, right) {
         return rewrite(text, from, to, stripped, stripped.len(), None);
     }
+    if let Some(change) = unwrap_emphasis(text, from, to, left) {
+        return change;
+    }
     if surrounded(text, from, to, left, right) {
         let start = from.saturating_sub(left.len());
         let end = to.saturating_add(right.len());
@@ -2739,6 +2939,59 @@ fn wrap(text: &str, cursor: &text_editor::Cursor, left: &str, right: &str) -> Ch
         insert.len()
     };
     rewrite(text, from, to, &insert, cursor_at, None)
+}
+
+/// Emphasis marks of `mark` that sit right outside `from..to` on both sides. Three of them are
+/// bold and italic together.
+fn emphasis_run(text: &str, from: usize, to: usize, mark: char) -> usize {
+    let before = text.get(..from).map_or(0, |prefix| {
+        prefix.chars().rev().take_while(|ch| *ch == mark).count()
+    });
+    let after = text.get(to..).map_or(0, |suffix| {
+        suffix.chars().take_while(|ch| *ch == mark).count()
+    });
+    before.min(after)
+}
+
+/// Bold or italic that is already on, written with `*` or with `_`, taken off again.
+///
+/// The old check only knew an exact `**word**` or `*word*`. Any extra mark beside it, as in
+/// `***both***`, or the underscore spelling, made it add a second layer instead of removing the
+/// first. This counts the marks around the text and removes the ones that were asked for.
+fn unwrap_emphasis(text: &str, from: usize, to: usize, left: &str) -> Option<Change> {
+    let want = match left {
+        "**" => 2,
+        "*" => 1,
+        _ => return None,
+    };
+    // Two marks are bold, one is italic, and three are both.
+    let is_on = |run: usize| {
+        if want == 2 {
+            run >= 2
+        } else {
+            run == 1 || run >= 3
+        }
+    };
+    let inner = text.get(from..to)?;
+    for mark in ['*', '_'] {
+        if is_on(emphasis_run(text, from, to, mark)) {
+            let start = from.checked_sub(want)?;
+            let end = to.checked_add(want)?;
+            return Some(rewrite(text, start, end, inner, inner.len(), None));
+        }
+        // A word counts `_` as a letter, so the marks of `_em_` are inside the word the caret
+        // is in. Count the ones at both ends of the text itself.
+        if mark == '_' {
+            let lead = inner.chars().take_while(|ch| *ch == '_').count();
+            let trail = inner.chars().rev().take_while(|ch| *ch == '_').count();
+            let run = lead.min(trail);
+            if is_on(run) && inner.len() > want.saturating_mul(2) {
+                let stripped = inner.get(want..inner.len().checked_sub(want)?)?;
+                return Some(rewrite(text, from, to, stripped, stripped.len(), None));
+            }
+        }
+    }
+    None
 }
 
 fn trim_edges(text: &str, mut from: usize, mut to: usize) -> (usize, usize) {
@@ -3714,21 +3967,100 @@ fn line_carries(text: &str) -> Vec<Carry> {
     cache_lines(text).into_iter().map(|row| row.carry).collect()
 }
 
+#[derive(Clone, Debug, PartialEq)]
 struct LineCache {
     carry: Carry,
     spans: Vec<(Range<usize>, Mark)>,
     unclosed: Vec<usize>,
+    /// What the next line starts with. An edit restarts from the line before the change.
+    outgoing: Carry,
+}
+
+fn cache_line(line: &str, incoming: Carry, first: bool) -> LineCache {
+    let stored = if first {
+        Carry {
+            blank: true,
+            ..incoming
+        }
+    } else {
+        incoming
+    };
+    let (spans, next) = paint_in(line, stored, first);
+    let (_, unclosed) = scan_pairs(line, stored);
+    LineCache {
+        carry: stored,
+        spans,
+        unclosed,
+        outgoing: next,
+    }
+}
+
+fn first_carry() -> Carry {
+    Carry {
+        blank: true,
+        ..Carry::default()
+    }
 }
 
 fn cache_lines(text: &str) -> Vec<LineCache> {
-    let mut incoming = Carry {
-        blank: true,
-        ..Carry::default()
-    };
+    let mut incoming = first_carry();
     let mut rows = Vec::new();
-    let mut first = true;
-    for line in split_lines(text) {
-        let stored = if first {
+    for (index, line) in split_lines(text).into_iter().enumerate() {
+        let row = cache_line(line, incoming, index == 0);
+        incoming = row.outgoing;
+        rows.push(row);
+    }
+    rows
+}
+
+/// The same rows as `cache_lines(new)`, built from the rows for `old`.
+///
+/// A line's row depends on the line and on the marks still open from the line before. So the
+/// lines that are the same at the top keep their rows. The changed lines are parsed again. Below
+/// them, rows are kept as soon as the marks open at the top of a line match what they were
+/// before, which is almost always the very next line. Typing in a long note parses the line
+/// that changed, not the note.
+fn update_lines(old: &str, cache: Vec<LineCache>, new: &str) -> Vec<LineCache> {
+    let old_lines = split_lines(old);
+    let new_lines = split_lines(new);
+    if cache.len() != old_lines.len() {
+        return cache_lines(new);
+    }
+    let top = old_lines
+        .iter()
+        .zip(&new_lines)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let room = old_lines.len().min(new_lines.len()).saturating_sub(top);
+    let bottom = old_lines
+        .iter()
+        .rev()
+        .zip(new_lines.iter().rev())
+        .take(room)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut rows = cache;
+    let kept_below = rows.split_off(rows.len().saturating_sub(bottom));
+    rows.truncate(top);
+    let mut incoming = rows.last().map_or_else(first_carry, |row| row.outgoing);
+    let changed_to = new_lines.len().saturating_sub(bottom);
+    for index in top..changed_to {
+        let Some(line) = new_lines.get(index) else {
+            break;
+        };
+        let row = cache_line(line, incoming, index == 0);
+        incoming = row.outgoing;
+        rows.push(row);
+    }
+    let mut below = kept_below.into_iter();
+    for index in changed_to..new_lines.len() {
+        let Some(line) = new_lines.get(index) else {
+            break;
+        };
+        let Some(row) = below.next() else {
+            break;
+        };
+        let expected = if index == 0 {
             Carry {
                 blank: true,
                 ..incoming
@@ -3736,30 +4068,25 @@ fn cache_lines(text: &str) -> Vec<LineCache> {
         } else {
             incoming
         };
-        let (spans, next) = paint_in(line, stored, first);
-        let (_, unclosed) = scan_pairs(line, stored);
-        rows.push(LineCache {
-            carry: stored,
-            spans,
-            unclosed,
-        });
-        incoming = next;
-        first = false;
-    }
-    if rows.is_empty() {
-        rows.push(LineCache {
-            carry: Carry {
-                blank: true,
-                ..Carry::default()
-            },
-            spans: Vec::new(),
-            unclosed: Vec::new(),
-        });
+        if row.carry == expected {
+            // The marks open here are what they were. Nothing below can have changed.
+            rows.push(row);
+            rows.extend(below);
+            return rows;
+        }
+        let row = cache_line(line, incoming, index == 0);
+        incoming = row.outgoing;
+        rows.push(row);
     }
     rows
 }
 
-fn window_bytes(text: &str, cursor: &text_editor::Cursor, cache: &[LineCache]) -> (usize, usize) {
+fn window_bytes(
+    text: &str,
+    cursor: &text_editor::Cursor,
+    cache: &[LineCache],
+    touching: bool,
+) -> (usize, usize) {
     let caret = pos_byte(text, cursor.position);
     let line_no = byte_pos(text, caret).line;
     let ls = line_start(text, line_no);
@@ -3767,7 +4094,7 @@ fn window_bytes(text: &str, cursor: &text_editor::Cursor, cache: &[LineCache]) -
     let line = text.get(ls..le).unwrap_or("");
     let incoming = cache.get(line_no).map(|row| row.carry).unwrap_or_default();
     let at = floor_boundary(line, caret.saturating_sub(ls).min(line.len()));
-    let win = edit_window(line, at, incoming);
+    let win = edit_window(line, at, incoming, touching);
     let start = floor_boundary(line, win.start.min(line.len()));
     let end = floor_boundary(line, win.end.max(start).min(line.len()));
     let info = lead(line);
@@ -3780,29 +4107,54 @@ fn window_bytes(text: &str, cursor: &text_editor::Cursor, cache: &[LineCache]) -
     (ls.saturating_add(start), ls.saturating_add(end))
 }
 
-fn edit_window(line: &str, at: usize, carry: Carry) -> Range<usize> {
+/// The part of a line to show as typed, around the caret at `at`.
+///
+/// A mark that is still open shows from where it opens. A construct the caret is in shows whole,
+/// so its marks can be read, changed, or taken out: the outermost pair of marks around the caret
+/// (`**bold *and italic* too**`), or a whole link, image, or note link. With nothing around the
+/// caret, it is the word it is in. `touching` is whether a caret just after a construct counts as
+/// being in it. It does when the caret was moved there, so a Backspace acts on something that
+/// can be seen. It does not right after typing, so a closing mark settles at once.
+fn edit_window(line: &str, at: usize, carry: Carry, touching: bool) -> Range<usize> {
     let at = floor_boundary(line, at.min(line.len()));
     if line.is_empty() {
         return 0..0;
     }
-    let (pairs, unclosed) = scan_pairs(line, carry);
-    if let Some(start) = unclosed.iter().copied().filter(|start| *start <= at).min() {
+    let scan = scan_all(line, carry);
+    if let Some(start) = scan
+        .unclosed
+        .iter()
+        .copied()
+        .filter(|start| *start <= at)
+        .min()
+    {
         return start..line.len();
     }
-    if let Some(pair) = smallest_pair(&pairs, at) {
-        let interior_start = pair.start.saturating_add(pair.open_len);
-        let interior_end = pair.end.saturating_sub(pair.close_len);
-        let on_mark = at < interior_start || at > interior_end;
-        if on_mark {
-            if pair.local_open {
-                return pair.start..pair.end;
-            }
-            let close_at = pair.end.saturating_sub(pair.close_len);
-            return close_at..pair.end;
-        }
-        return caret_word(line, at, interior_start, interior_end, &pairs);
+    let around = |range: &Range<usize>| {
+        range.start <= at && (at < range.end || (touching && at == range.end))
+    };
+    let pairs = scan
+        .pairs
+        .iter()
+        .filter(|pair| pair.end > pair.start)
+        .map(|pair| pair.start..pair.end);
+    let outermost = pairs
+        .chain(scan.atoms.iter().cloned())
+        .filter(|range| around(range))
+        .max_by_key(|range| range.end.saturating_sub(range.start));
+    if let Some(range) = outermost {
+        return range;
     }
-    caret_word(line, at, 0, line.len(), &pairs)
+    // Typing the last mark of a link settles it, as it does for a pair. Without this the last
+    // word of a link with spaces in it stayed open until the caret moved on.
+    if scan
+        .atoms
+        .iter()
+        .any(|atom| atom.end == at && atom.end > atom.start)
+    {
+        return at..at;
+    }
+    caret_word(line, at, 0, line.len(), &scan.pairs)
 }
 
 #[derive(Clone, Copy)]
@@ -3812,14 +4164,6 @@ struct Pair {
     open_len: usize,
     close_len: usize,
     local_open: bool,
-}
-
-fn smallest_pair(pairs: &[Pair], at: usize) -> Option<Pair> {
-    pairs
-        .iter()
-        .filter(|pair| pair.start <= at && at < pair.end)
-        .min_by_key(|pair| pair.end.saturating_sub(pair.start))
-        .copied()
 }
 
 fn caret_word(line: &str, at: usize, lo: usize, hi: usize, pairs: &[Pair]) -> Range<usize> {
@@ -3891,7 +4235,21 @@ fn caret_word(line: &str, at: usize, lo: usize, hi: usize, pairs: &[Pair]) -> Ra
     at..at
 }
 
-fn scan_pairs(line: &str, mut carry: Carry) -> (Vec<Pair>, Vec<usize>) {
+fn scan_pairs(line: &str, carry: Carry) -> (Vec<Pair>, Vec<usize>) {
+    let scan = scan_all(line, carry);
+    (scan.pairs, scan.unclosed)
+}
+
+/// What one line holds that has marks around it: the pairs, the marks still open at the end, and
+/// the atoms, which are links, images, note links, footnotes, math, and addresses.
+struct Scan {
+    pairs: Vec<Pair>,
+    unclosed: Vec<usize>,
+    atoms: Vec<Range<usize>>,
+}
+
+fn scan_all(line: &str, mut carry: Carry) -> Scan {
+    let mut atoms = Vec::new();
     let mut pairs = Vec::new();
     let mut local = Vec::new();
     let mut index = 0;
@@ -3905,6 +4263,7 @@ fn scan_pairs(line: &str, mut carry: Carry) -> (Vec<Pair>, Vec<usize>) {
         if !in_literal(carry)
             && let Some(end) = skip_atom(line, index, limit, carry)
         {
+            atoms.push(index..end);
             index = end;
             continue;
         }
@@ -3940,7 +4299,11 @@ fn scan_pairs(line: &str, mut carry: Carry) -> (Vec<Pair>, Vec<usize>) {
         index = index.saturating_add(step);
     }
     let unclosed = local.into_iter().map(|(at, _)| at).collect();
-    (pairs, unclosed)
+    Scan {
+        pairs,
+        unclosed,
+        atoms,
+    }
 }
 
 fn skip_atom(line: &str, index: usize, limit: usize, carry: Carry) -> Option<usize> {
@@ -5293,12 +5656,23 @@ fn wrap_ranges(
     if f32::from(glyphs) * size.max(1.0) <= measure {
         return one_row(0..line.len());
     }
-    wrap_by(line, measure, atomic, |slice, exact| {
-        if exact {
-            text_width(slice, atomic_font, atomic_size)
-        } else {
-            text_width(slice, font, size)
-        }
+    let key = memo::key(|hasher| {
+        use std::hash::Hash;
+        line.hash(hasher);
+        measure.to_bits().hash(hasher);
+        atomic.start.hash(hasher);
+        atomic.end.hash(hasher);
+        memo::hash_font(hasher, font, size);
+        memo::hash_font(hasher, atomic_font, atomic_size);
+    });
+    memo::wrap(key, || {
+        wrap_by(line, measure, atomic.clone(), |slice, exact| {
+            if exact {
+                text_width(slice, atomic_font, atomic_size)
+            } else {
+                text_width(slice, font, size)
+            }
+        })
     })
 }
 
@@ -5463,24 +5837,94 @@ fn step_char(line: &str, index: usize) -> usize {
     )
 }
 
+/// Widths and wraps are pure functions of their arguments, and shaping a paragraph to measure it
+/// is the slowest thing the page does. The page asks again for every line on every update, and
+/// for most lines the answer has not changed. These keep the answers, so a keystroke pays for
+/// the line that changed and not for the whole page. An entry is looked up by a 64-bit hash of
+/// everything it depends on. The tables are cleared when they grow past a bound.
+mod memo {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+    use std::ops::Range;
+
+    use iced::Font;
+
+    const WIDTHS: usize = 20_000;
+    const WRAPS: usize = 4_000;
+
+    thread_local! {
+        static WIDTH: RefCell<HashMap<u64, f32>> = RefCell::new(HashMap::new());
+        static WRAP: RefCell<HashMap<u64, Vec<Range<usize>>>> = RefCell::new(HashMap::new());
+    }
+
+    pub(super) fn key(parts: impl FnOnce(&mut std::collections::hash_map::DefaultHasher)) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        parts(&mut hasher);
+        hasher.finish()
+    }
+
+    pub(super) fn hash_font(hasher: &mut impl Hasher, font: Font, size: f32) {
+        font.hash(hasher);
+        size.to_bits().hash(hasher);
+    }
+
+    pub(super) fn width(key: u64, measure: impl FnOnce() -> f32) -> f32 {
+        if let Some(width) = WIDTH.with(|table| table.borrow().get(&key).copied()) {
+            return width;
+        }
+        let width = measure();
+        WIDTH.with(|table| {
+            let mut table = table.borrow_mut();
+            if table.len() >= WIDTHS {
+                table.clear();
+            }
+            table.insert(key, width);
+        });
+        width
+    }
+
+    pub(super) fn wrap(key: u64, rows: impl FnOnce() -> Vec<Range<usize>>) -> Vec<Range<usize>> {
+        if let Some(rows) = WRAP.with(|table| table.borrow().get(&key).cloned()) {
+            return rows;
+        }
+        let rows = rows();
+        WRAP.with(|table| {
+            let mut table = table.borrow_mut();
+            if table.len() >= WRAPS {
+                table.clear();
+            }
+            table.insert(key, rows.clone());
+        });
+        rows
+    }
+}
+
 fn text_width(sample: &str, font: Font, size: f32) -> f32 {
     if sample.is_empty() {
         return 0.0;
     }
-    let paragraph = <iced::Renderer as iced::advanced::text::Renderer>::Paragraph::with_text(
-        iced::advanced::text::Text {
-            content: sample,
-            bounds: Size::new(10_000.0, 10_000.0),
-            size: size.into(),
-            line_height: iced::advanced::text::LineHeight::Relative(LEADING),
-            font,
-            align_x: iced::advanced::text::Alignment::Left,
-            align_y: iced::alignment::Vertical::Top,
-            shaping: iced::advanced::text::Shaping::Advanced,
-            wrapping: iced::advanced::text::Wrapping::None,
-        },
-    );
-    paragraph.min_width()
+    let key = memo::key(|hasher| {
+        use std::hash::Hash;
+        sample.hash(hasher);
+        memo::hash_font(hasher, font, size);
+    });
+    memo::width(key, || {
+        let paragraph = <iced::Renderer as iced::advanced::text::Renderer>::Paragraph::with_text(
+            iced::advanced::text::Text {
+                content: sample,
+                bounds: Size::new(10_000.0, 10_000.0),
+                size: size.into(),
+                line_height: iced::advanced::text::LineHeight::Relative(LEADING),
+                font,
+                align_x: iced::advanced::text::Alignment::Left,
+                align_y: iced::alignment::Vertical::Top,
+                shaping: iced::advanced::text::Shaping::Advanced,
+                wrapping: iced::advanced::text::Wrapping::None,
+            },
+        );
+        paragraph.min_width()
+    })
 }
 
 fn selection_color(dark: bool) -> Color {
@@ -6163,6 +6607,250 @@ mod tests {
         assert!(!words.contains("the"));
     }
 
+    /// A small deterministic generator, so a failure can be reproduced from its seed.
+    struct Dice(u64);
+
+    impl Dice {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            usize::try_from(self.next() % u64::try_from(bound.max(1)).unwrap_or(1)).unwrap_or(0)
+        }
+    }
+
+    const PIECES: [&str; 26] = [
+        "**", "*", "_", "__", "==", "~~", "`", "\n", "\n\n", "word ", "and ", " ", "# ", "- ",
+        "- [ ] ", "> ", "```\n", "~~~\n", "[[", "]]", "$$\n", "---\n", "    ", "1. ", "|", "é ",
+    ];
+
+    fn random_text(dice: &mut Dice, pieces: usize) -> String {
+        let mut text = String::new();
+        for _ in 0..pieces {
+            text.push_str(PIECES[dice.below(PIECES.len())]);
+        }
+        text
+    }
+
+    fn boundary(text: &str, mut at: usize) -> usize {
+        at = at.min(text.len());
+        while !text.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    }
+
+    #[test]
+    fn an_edit_re_parses_only_what_it_changed_and_gets_the_same_rows() {
+        let mut dice = Dice(0x9E37_79B9_7F4A_7C15);
+        for trial in 0..4000 {
+            let size = 1 + dice.below(40);
+            let old = random_text(&mut dice, size);
+            let cache = super::cache_lines(&old);
+            // One edit, as typing or a paste makes it: replace a stretch with something else.
+            let from = boundary(&old, dice.below(old.len() + 1));
+            let to = boundary(&old, from + dice.below(12));
+            let mut new = String::new();
+            new.push_str(&old[..from]);
+            for _ in 0..dice.below(4) {
+                new.push_str(PIECES[dice.below(PIECES.len())]);
+            }
+            new.push_str(&old[to..]);
+            let updated = super::update_lines(&old, cache, &new);
+            let fresh = super::cache_lines(&new);
+            assert_eq!(
+                updated, fresh,
+                "trial {trial}: {old:?} became {new:?} and the rows differ"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chain_of_edits_never_drifts_from_a_fresh_parse() {
+        let mut dice = Dice(0xD1B5_4A32_D192_ED03);
+        for trial in 0..200 {
+            let mut text = random_text(&mut dice, 30);
+            let mut cache = super::cache_lines(&text);
+            for step in 0..60 {
+                let from = boundary(&text, dice.below(text.len() + 1));
+                let to = boundary(&text, from + dice.below(4));
+                let mut next = String::new();
+                next.push_str(&text[..from]);
+                if dice.below(3) > 0 {
+                    next.push_str(PIECES[dice.below(PIECES.len())]);
+                }
+                next.push_str(&text[to..]);
+                cache = super::update_lines(&text, cache, &next);
+                text = next;
+                assert_eq!(
+                    cache,
+                    super::cache_lines(&text),
+                    "trial {trial} step {step}: {text:?}"
+                );
+            }
+        }
+    }
+
+    fn apply(text: &str, from: usize, to: usize, kind: super::FormatKind) -> String {
+        let cursor = super::text_editor::Cursor {
+            position: super::byte_pos(text, to),
+            selection: (from != to).then(|| super::byte_pos(text, from)),
+        };
+        let change = super::format_change(text, cursor, kind);
+        let a = super::pos_byte(text, change.anchor);
+        let b = super::pos_byte(text, change.end);
+        format!("{}{}{}", &text[..a], change.insert, &text[b..])
+    }
+
+    #[test]
+    fn bold_and_italic_toggle_one_layer_at_a_time() {
+        use super::FormatKind::{Bold, Italic};
+        // Bold and italic together: taking one off leaves the other.
+        assert_eq!(apply("***both***", 5, 5, Bold), "*both*");
+        assert_eq!(apply("***both***", 5, 5, Italic), "**both**");
+        assert_eq!(apply("***both***", 3, 7, Bold), "*both*");
+        assert_eq!(apply("***both***", 3, 7, Italic), "**both**");
+        // Adding the second layer, and taking it off again, gets back to where it started.
+        assert_eq!(apply("**bold**", 4, 4, Italic), "***bold***");
+        assert_eq!(apply("*em*", 2, 2, Bold), "***em***");
+        let both = apply("**bold**", 4, 4, Italic);
+        assert_eq!(apply(&both, 5, 5, Italic), "**bold**");
+        // The plain cases still work.
+        assert_eq!(apply("hello world", 2, 2, Bold), "**hello** world");
+        assert_eq!(apply("**hello** world", 4, 4, Bold), "hello world");
+        assert_eq!(apply("*one* two", 1, 1, Italic), "one two");
+        assert_eq!(apply("a **b c** d", 5, 5, Bold), "a b c d");
+    }
+
+    #[test]
+    fn the_underscore_spelling_is_taken_off_too() {
+        use super::FormatKind::{Bold, Italic};
+        assert_eq!(apply("__bold__", 4, 4, Bold), "bold");
+        assert_eq!(apply("_em_", 2, 2, Italic), "em");
+        assert_eq!(apply("___both___", 5, 5, Bold), "_both_");
+        // The other layer is added around it, not mistaken for it.
+        assert_eq!(apply("_em_", 2, 2, Bold), "**_em_**");
+        assert_eq!(apply("__bold__", 4, 4, Italic), "*__bold__*");
+        // An underscore inside a word is not a mark.
+        assert_eq!(apply("snake_case_name", 8, 8, Italic), "*snake_case_name*");
+    }
+
+    fn cursor_at(text: &str, byte: usize) -> super::text_editor::Cursor {
+        super::text_editor::Cursor {
+            position: super::byte_pos(text, byte),
+            selection: None,
+        }
+    }
+
+    fn selecting(text: &str, anchor: usize, caret: usize) -> super::text_editor::Cursor {
+        super::text_editor::Cursor {
+            position: super::byte_pos(text, caret),
+            selection: Some(super::byte_pos(text, anchor)),
+        }
+    }
+
+    /// The text after a change, and where the caret and the anchor are in it, as bytes.
+    fn after(text: &str, change: &super::Change) -> (String, usize, Option<usize>) {
+        let from = super::pos_byte(text, change.anchor);
+        let to = super::pos_byte(text, change.end);
+        let next = format!("{}{}{}", &text[..from], change.insert, &text[to..]);
+        let caret = super::pos_byte(&next, change.after.position);
+        let anchor = change.after.selection.map(|at| super::pos_byte(&next, at));
+        (next, caret, anchor)
+    }
+
+    fn enter(text: &str, byte: usize) -> Option<(String, usize)> {
+        let change = super::continue_enter(text, cursor_at(text, byte))?;
+        let (next, caret, _) = after(text, &change);
+        Some((next, caret))
+    }
+
+    #[test]
+    fn enter_continues_a_list_and_a_second_enter_ends_it() {
+        assert_eq!(enter("- one", 5), Some(("- one\n- ".to_owned(), 8)));
+        assert_eq!(enter("1. one", 6), Some(("1. one\n2. ".to_owned(), 10)));
+        assert_eq!(enter("9. nine", 7), Some(("9. nine\n10. ".to_owned(), 12)));
+        assert_eq!(
+            enter("- [x] done", 10),
+            Some(("- [x] done\n- [ ] ".to_owned(), 17))
+        );
+        // On the empty item that Enter just made, the list ends.
+        assert_eq!(enter("- one\n- ", 8), Some(("- one\n".to_owned(), 6)));
+        assert_eq!(enter("- ", 2), Some((String::new(), 0)));
+        assert_eq!(enter("- [ ] ", 6), Some((String::new(), 0)));
+        assert_eq!(enter("1. one\n2. ", 10), Some(("1. one\n".to_owned(), 7)));
+        // An empty item that is nested comes out one level first.
+        assert_eq!(enter("- a\n  - ", 8), Some(("- a\n- ".to_owned(), 6)));
+        // Text after the caret moves to the new item.
+        assert_eq!(enter("- one two", 5), Some(("- one\n-  two".to_owned(), 8)));
+        // A paragraph, and code, are left to the editor.
+        assert_eq!(enter("plain", 5), None);
+        assert_eq!(enter("```\n- x\n```", 9), None);
+    }
+
+    #[test]
+    fn enter_continues_a_quote_and_a_second_enter_ends_it() {
+        assert_eq!(enter("> quote", 7), Some(("> quote\n> ".to_owned(), 10)));
+        assert_eq!(enter(">> deep", 7), Some((">> deep\n>> ".to_owned(), 11)));
+        assert_eq!(enter("> a\n> ", 6), Some(("> a\n".to_owned(), 4)));
+        assert_eq!(enter("> ", 2), Some((String::new(), 0)));
+        // A caret in the marker itself is left alone.
+        assert_eq!(enter("> quote", 1), None);
+        // A greater-than that is not at the start of a line is not a quote.
+        assert_eq!(enter("a > b", 5), None);
+    }
+
+    #[test]
+    fn tab_nests_a_list_item_and_shift_tab_brings_it_out() {
+        let text = "- one";
+        let change = super::shift_items(text, &cursor_at(text, 3), false).expect("nests");
+        assert_eq!(after(text, &change), ("  - one".to_owned(), 5, None));
+        let nested = "  - one";
+        let change = super::shift_items(nested, &cursor_at(nested, 5), true).expect("comes out");
+        assert_eq!(after(nested, &change), ("- one".to_owned(), 3, None));
+        // A tab character comes out as one.
+        let tabbed = "\t- one";
+        let change = super::shift_items(tabbed, &cursor_at(tabbed, 4), true).expect("tab");
+        assert_eq!(after(tabbed, &change).0, "- one");
+        // Nothing to bring out, nothing to nest in a paragraph, and nesting stops at a limit.
+        assert!(super::shift_items("- one", &cursor_at("- one", 3), true).is_none());
+        assert!(super::shift_items("plain", &cursor_at("plain", 2), false).is_none());
+        let deep = format!("{}- x", " ".repeat(24));
+        assert!(super::shift_items(&deep, &cursor_at(&deep, 28), false).is_none());
+        // An ordered item and a task nest the same way.
+        let task = "- [ ] box";
+        let change = super::shift_items(task, &cursor_at(task, 9), false).expect("task");
+        assert_eq!(after(task, &change).0, "  - [ ] box");
+    }
+
+    #[test]
+    fn tab_nests_every_list_item_a_selection_covers() {
+        let text = "- a\n- b\nplain\n- c";
+        // From inside the first item to inside the last.
+        let change = super::shift_items(text, &selecting(text, 2, 17), false).expect("block");
+        let (next, caret, anchor) = after(text, &change);
+        assert_eq!(next, "  - a\n  - b\nplain\n  - c");
+        // The selection still covers the same words.
+        assert_eq!(anchor.map(|at| &next[at..=at]), Some("a"));
+        assert_eq!(&next[caret - 1..caret], "c");
+        // Taking them out again gets back to the start.
+        let change = super::shift_items(
+            &next,
+            &selecting(&next, anchor.expect("anchor"), caret),
+            true,
+        )
+        .expect("back");
+        assert_eq!(after(&next, &change).0, text);
+        // A selection that ends at the start of a line leaves that line alone.
+        let two = "- a\n- b";
+        let change = super::shift_items(two, &selecting(two, 0, 4), false).expect("first only");
+        assert_eq!(after(two, &change).0, "  - a\n- b");
+    }
+
     fn flagged(text: &str) -> Vec<String> {
         super::misspellings(text).into_iter().collect()
     }
@@ -6612,10 +7300,11 @@ mod tests {
         let (nested, _, _) = entered("  - child", 0, 9).unwrap();
         assert_eq!(nested, "  - child\n  - ");
 
+        // Enter on an empty item ends the list. It no longer adds another empty item.
         let (blank, _, _) = entered("- ", 0, 2).unwrap();
-        assert_eq!(blank, "- \n- ");
+        assert_eq!(blank, "");
         let (blank_task, _, _) = entered("- [ ] ", 0, 6).unwrap();
-        assert_eq!(blank_task, "- [ ] \n- [ ] ");
+        assert_eq!(blank_task, "");
 
         let mid = "- a\n- b\n- c";
         let (kept, _, _) = entered(mid, 1, 3).unwrap();
@@ -6882,20 +7571,73 @@ mod tests {
 
     #[test]
     fn a_settled_word_leaves_the_caret() {
+        let none = Carry::default();
         let closed = "**bold**";
-        assert_eq!(
-            super::edit_window(closed, closed.len(), Carry::default()),
-            8..8
-        );
-        assert_eq!(super::edit_window(closed, 4, Carry::default()), 2..6);
-        assert_eq!(super::edit_window(closed, 6, Carry::default()), 2..6);
-        assert_eq!(super::edit_window(closed, 7, Carry::default()), 0..8);
-        assert_eq!(super::edit_window("**bold", 6, Carry::default()), 0..6);
-        assert_eq!(super::edit_window("Hello", 5, Carry::default()), 0..5);
-        assert_eq!(super::edit_window("Hello ", 6, Carry::default()), 6..6);
+        // Typing the closing mark settles the word at once: the caret is outside.
+        assert_eq!(super::edit_window(closed, closed.len(), none, false), 8..8);
+        // The caret inside shows the whole run, so the marks can be read and changed.
+        assert_eq!(super::edit_window(closed, 4, none, false), 0..8);
+        assert_eq!(super::edit_window(closed, 6, none, false), 0..8);
+        assert_eq!(super::edit_window(closed, 7, none, false), 0..8);
+        assert_eq!(super::edit_window(closed, 0, none, false), 0..8);
+        assert_eq!(super::edit_window("**bold", 6, none, false), 0..6);
+        assert_eq!(super::edit_window("Hello", 5, none, false), 0..5);
+        assert_eq!(super::edit_window("Hello ", 6, none, false), 6..6);
         let mixed = "**bold** next";
-        assert_eq!(super::edit_window(mixed, 8, Carry::default()), 8..8);
-        assert_eq!(super::edit_window(mixed, 13, Carry::default()), 9..13);
+        assert_eq!(super::edit_window(mixed, 8, none, false), 8..8);
+        assert_eq!(super::edit_window(mixed, 13, none, false), 9..13);
+    }
+
+    #[test]
+    fn a_caret_moved_to_the_end_of_a_run_shows_it() {
+        let none = Carry::default();
+        // Arrowing or clicking to just after a closing mark touches the run, so a Backspace
+        // there acts on marks that are on the screen.
+        assert_eq!(super::edit_window("**bold**", 8, none, true), 0..8);
+        let mixed = "**bold** next";
+        assert_eq!(super::edit_window(mixed, 8, none, true), 0..8);
+        // Past the space it is the next word again.
+        assert_eq!(super::edit_window(mixed, 11, none, true), 9..13);
+    }
+
+    #[test]
+    fn the_whole_outer_run_shows_when_the_caret_is_in_a_nested_one() {
+        let none = Carry::default();
+        let nested = "**bold *and italic* too**";
+        // In the italic part, every mark of the bold run around it shows as well.
+        assert_eq!(super::edit_window(nested, 10, none, false), 0..nested.len());
+        // In the bold part outside the italic, the same.
+        assert_eq!(super::edit_window(nested, 3, none, false), 0..nested.len());
+        // Two runs side by side do not join.
+        let apart = "**one** and **two**";
+        assert_eq!(super::edit_window(apart, 3, none, false), 0..7);
+        assert_eq!(super::edit_window(apart, 15, none, false), 12..19);
+        assert_eq!(super::edit_window(apart, 9, none, false), 8..11);
+    }
+
+    #[test]
+    fn a_link_shows_whole_when_the_caret_is_in_it() {
+        let none = Carry::default();
+        let text = "see [two words](https://example.com/a) now";
+        let whole = 4..38;
+        assert_eq!(&text[whole.clone()], "[two words](https://example.com/a)");
+        // In the text, in the address, and on a bracket: the whole link.
+        for at in [5, 9, 12, 20, 36, 4] {
+            assert_eq!(super::edit_window(text, at, none, false), whole, "at {at}");
+        }
+        // Just after it, it settles when typing and shows when moved to.
+        assert_eq!(super::edit_window(text, 38, none, false), 38..38);
+        assert_eq!(super::edit_window(text, 38, none, true), whole);
+        // A note link is the same.
+        let wiki = "go to [[Daily|today]] soon";
+        assert_eq!(super::edit_window(wiki, 12, none, false), 6..21);
+    }
+
+    #[test]
+    fn a_run_inside_a_link_or_a_link_inside_a_run_shows_as_the_larger() {
+        let none = Carry::default();
+        let line = "**read [this](https://x.io) now**";
+        assert_eq!(super::edit_window(line, 10, none, false), 0..line.len());
     }
 
     #[test]

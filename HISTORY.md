@@ -4,6 +4,14 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-20 — the page parses and measures only what changed, and its marks can be reached
+
+Typing felt late in a note of any length. Every key re-parsed the whole page, `follow` measured every line again to find the caret, and `view` shaped every paragraph again to wrap it. At 13 KB a key cost about 12 ms to parse, 25 ms to follow, and the view on top of that. Now the parse restarts from the line that changed and stops as soon as the marks open at the top of a line match what they were. A test checks it against a full parse over thousands of random edits. Wrap widths and wraps are remembered, since they depend only on the text, the width, and the font. The start of each line is a running sum and no longer a scan from the top. The desktop crate and the crates on the saving path are built with optimizations in a dev build too. A key plus its view is now about 0.6 ms at 2.5 KB, 3 ms at 13 KB, and 12 ms at 51 KB. It was about 7, 36, and 130 ms.
+
+The caret used to open only the word it was in, so the `**` around a bold phrase stayed hidden until the caret landed exactly on them. It now opens the whole construct: the outermost run of marks around the caret, or a whole link, image, or note link. A caret moved to just after a construct, by a key or the pointer, shows it too, so a Backspace there acts on marks that are on the screen. A caret that got there by typing does not, so the closing mark still settles at once. A link with spaces in it also settles when its last mark is typed.
+
+Bold and italic together, as in `***both***`, now toggle one layer at a time. They used to add a second layer. The underscore spelling, `_em_` and `__bold__`, is taken off too. Enter on an empty list item ends the list, and on a nested one steps out a level. This replaces the earlier rule that it added another empty item. A quote continues on Enter and ends the same way. Tab nests the list items under the caret or a selection and Shift+Tab brings them out. Ctrl or Cmd with B, I, K, or E is bold, italic, link, or code, and with Shift and X or H is strike or highlight.
+
 ## 2026-11-20 — dev builds optimize dependencies, and the lints pass
 
 A plain `cargo run` builds in the dev profile, which ran the crypto crates, SQLCipher, and Iced unoptimized. Checking a signature took about 170 times as long as in a release build, and the window felt slow. The workspace manifest now builds dependencies with `opt-level = 3` in the dev profile. The workspace's own crates stay unoptimized. The first build after this is slower, and every build after is not. In a debug build a save with 400 notes is now about 115 ms and the reload after it about 2 ms.
