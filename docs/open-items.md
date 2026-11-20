@@ -16,7 +16,8 @@ These are not for an agent to settle.
 | 4 | **Merging `test` into `trunk`.** `test` is 66 commits ahead. `trunk` stopped on 2026-10-29. The branch `claude/gifted-euler-jlqp2a` was only a session branch, equals `trunk`, and can be deleted. | Nothing here is merged. | `git log origin/trunk..origin/test` |
 | 5 | **The dependency bumps.** Dependabot branches for `ed25519-dalek` 3.0.0, `chacha20poly1305` 0.11, `hkdf` 0.13, `sha2` 0.11, `getrandom` 0.4, and one Actions bump. | They are crypto crates, two of them major versions, and they were cut on 2026-11-04 from the old `trunk`. Nobody has built or reviewed them, and they would have to be redone against `test`. | `origin/dependabot/*` |
 | 6 | **Two editing rules changed and may not be what you want.** Enter on an empty list item now ends the list. It used to add another empty item. Tab does nothing in a paragraph. | Taste. Both are one line to reverse. | `continue_enter` and `binding()` in the desktop crate |
-| 7 | **Whether dev builds should optimize the crates on the typing path.** | It makes the window fast and it makes those crates harder to step through. | `Cargo.toml`, [ADR-0003](adr/0003-workspace-and-tooling.md) |
+| 7 | **There is no off-device copy of the notes in v0.1.** The recovery phrase brings back the identity, and the notes only from a copy on a relay that can be reached. A lost disk is lost notes. | v0.1 is a daily driver, and a daily driver should not lose a week of notes to one failure. A "back up this folder" action, or a plain export, would not need a relay. A full export is v0.5 on the roadmap. | [ROADMAP.md](../ROADMAP.md) v0.1, [THREAT_MODEL.md](../THREAT_MODEL.md) |
+| 8 | **Whether dev builds should optimize the crates on the typing path.** | It makes the window fast and it makes those crates harder to step through. | `Cargo.toml`, [ADR-0003](adr/0003-workspace-and-tooling.md) |
 
 ## Asked for, not built
 
@@ -72,4 +73,4 @@ Measured on 2026-11-19 and 2026-11-20. See the numbers in the session record.
 
 ## Still scaffolds
 
-`ambient-core`, `ambient-sync`, `ambient-capabilities`, `ambient-docs`, and `ambient-ffi` have no behavior. The v0.1 exit in [ROADMAP.md](../ROADMAP.md) is not met: the owner on a second computer for real notes, one 1:1 with one other person, an offline gap, and one restore from the phrase. A green test run is not that.
+`ambient-core`, `ambient-sync`, `ambient-capabilities`, `ambient-docs`, and `ambient-ffi` have no behavior. The v0.1 exit in [ROADMAP.md](../ROADMAP.md) is the owner using it daily on one computer. It was declared on 2026-11-20 and that use has started. The first v0.2 exit is not met: the owner on a second computer for real notes, one 1:1 with one other person, an offline gap, and one restore from the phrase. A green test run is not that.

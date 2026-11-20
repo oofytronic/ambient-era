@@ -1,6 +1,6 @@
 # Connection
 
-The network track inside this repo. The notebook is the app. This is how a device reaches another device.
+The network track inside this repo. It is v0.2 work. The notebook is the app, and v0.1 is that notebook on one computer. This is how a device reaches another device.
 
 The protocol of a network is already here: an identity, a Space, sealed logs, and a mailbox id that is the only capability. What is not here is a connection. The relay on this computer is cleartext, in memory, and the window only dials itself. Two folders on one machine is not a network.
 

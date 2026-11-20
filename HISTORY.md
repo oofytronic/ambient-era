@@ -4,6 +4,14 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-20 — v0.1 is notes on one computer, and the second computer is v0.2
+
+The owner declared v0.1 and moved the exit. v0.1 is notes on one computer, and its exit is the owner using it daily. The second computer, the relay, 1:1 chat, device revoke, and recovery restore move to v0.2, with the exit test they had: the notes on a second computer for real work, one 1:1, an offline gap, and a restore from the phrase. The old v0.2, small private groups with encrypted attachments and content-free push, is folded into v0.2 as a second stage that does not start until the 1:1 is in use. Every later version keeps its number.
+
+All of that code is already in the app and tested, on two folders on one computer. Moving the exit does not remove it. It changes what v0.1 promises. v0.1 promises notes on one disk, sealed, with no network. It does not promise a second device or any traffic. [THREAT_MODEL.md](THREAT_MODEL.md) now says T0 and T1 are v0.2 promises, and says plainly that v0.1 has no copy of the notes off the computer. The recovery phrase brings back the identity, and brings back the notes only from a relay copy that can be reached. [ROADMAP.md](ROADMAP.md), the README, [ARCHITECTURE.md](ARCHITECTURE.md), the network track, the spec index, and a dated note on [ADR-0005](docs/adr/0005-private-space-encryption.md) say the same.
+
+The workspace version is 0.1.0. No tag was made. `trunk` was fast-forwarded to `test` on the same day, and work on v0.2 continues on `test`.
+
 ## 2026-11-20 — the log of the last two days, in one place
 
 [docs/session-2026-11-19-to-20.md](docs/session-2026-11-19-to-20.md) is the story of 2026-11-19 and 2026-11-20 in order, with every commit, what was measured, and the mistakes. [docs/open-items.md](docs/open-items.md) is what is still open. [ADR-0006](docs/adr/0006-wait-for-enrollment.md) records the merge-order decision and is Proposed, waiting for owner review. Entries below are in the order they were written, newest first.

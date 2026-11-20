@@ -4,7 +4,7 @@
 
 > Signal's privacy, X's surface, AnyType's ownership — with an identity you hold as a key.
 
-**Status:** Pre-0.1. The Linux window, Aerodash, does notes, tasks, a second folder, one 1:1 through a loopback relay, and device revoke from the root window. The note list shows which device wrote each note. The relay is cleartext on `127.0.0.1` and is not a public deployment. The recovery seal is implemented. The window shows the BIP39 phrase and can restore from it. Contact invites are a link or a QR. Chat lines show the advisory time from the event envelope. The key file can be wrapped with a passphrase; that is a local unlock, not a platform passkey. Native search is a SQLCipher FTS5 index beside the sealed log. Spelling checks against a bundled English dictionary and a personal one that stays on this computer. A focus mode hides everything but the writing. What changed most recently, and what is still open, is in [docs/session-2026-11-19-to-20.md](docs/session-2026-11-19-to-20.md) and [docs/open-items.md](docs/open-items.md). Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
+**Status:** v0.1, declared by the owner on 2026-11-20: notes on one computer. The Linux window, Aerodash, does notes, tasks, tags, search, and spelling with no network. A second folder, one 1:1 through a loopback relay, and device revoke are built and tested, and they are v0.2, not what v0.1 promises. The note list shows which device wrote each note. The relay is cleartext on `127.0.0.1` and is not a public deployment. The recovery seal is implemented. The window shows the BIP39 phrase and can restore from it. Contact invites are a link or a QR. Chat lines show the advisory time from the event envelope. The key file can be wrapped with a passphrase; that is a local unlock, not a platform passkey. Native search is a SQLCipher FTS5 index beside the sealed log. Spelling checks against a bundled English dictionary and a personal one that stays on this computer. A focus mode hides everything but the writing. What changed most recently, and what is still open, is in [docs/session-2026-11-19-to-20.md](docs/session-2026-11-19-to-20.md) and [docs/open-items.md](docs/open-items.md). Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
 
 ---
 
@@ -36,8 +36,8 @@ Each release is a usable product on its own. The order, the exit test for v0.1, 
 
 | Version | Ships |
 |:--|:--|
-| **v0.1** | Key identity, a personal Notes space, relay sync across the owner's devices, 1:1 E2EE chat (a Space of two), local search. Desktop first. |
-| **v0.2** | Small private groups on the same sealing (not MLS), encrypted media, member management, abuse controls. Content-free push arrives with the first phone client. |
+| **v0.1** | Key identity, a personal Notes space, tasks and tags, local search, spelling, a recovery phrase. One computer, no network. Desktop first. |
+| **v0.2** | A second computer through a relay, and 1:1 E2EE chat (a Space of two). Then small private groups on the same sealing (not MLS), encrypted media, member management, abuse controls. Content-free push arrives with the first phone client. |
 | **v0.3** | **Write:** long-form creations (books, series, newsletters), each its own Space. Markdown editor, media embeds, versions, links and backlinks, export. Short notes already exist from v0.1. |
 | **v0.4** | **Weave:** chat about any creation, a creation-to-conversation sidebar, share a version into a conversation, capability-scoped local API |
 | **v0.5** | One-command self-hostable relay, multi-relay redundancy, full data export and import |
@@ -46,16 +46,23 @@ Each release is a usable product on its own. The order, the exit test for v0.1, 
 | **v0.9** | Independent crypto and protocol review |
 | **v1.0** | Local agent as a delegated key, tipping via external wallets, stable versioned protocol |
 
-### v0.1 — notes and a private 1:1
+### v0.1 — notes on one computer
 
-v0.1 is **not** an everything app, and it does not run an agent. It is the owner's daily driver on desktop:
+v0.1 is **not** an everything app, and it does not run an agent. It is the owner's daily driver on one desktop:
 
-1. Create an identity. A passkey unlocks it. The recovery phrase is the backup.
-2. Write notes in one Notes space. They work with no network.
-3. Add the owner's other computer. Notes sync through a relay the owner runs.
-4. Add one contact by link or QR and chat. The chat is a Space of two.
+1. Create an identity. A passphrase can lock the key file on this computer. The recovery phrase is the backup of the identity.
+2. Write notes in one Notes space. Tasks are lines in notes. Tags, search, and spelling work. Nothing needs a network.
+3. Use it every day. That is the exit.
 
-No groups, no feed, no P2P, no phone push yet. The relay is untrusted and self-hostable. What "encrypted" means, and what it does not mean, is [THREAT_MODEL.md](THREAT_MODEL.md).
+**There is no copy of the notes off this computer in v0.1.** The recovery phrase brings back the identity. It brings back the notes only from a copy held by a relay that can be reached, and a relay that sends the owner's notes elsewhere is v0.2. Until then a lost disk is lost notes unless the owner copies the folder.
+
+The second computer, the relay, 1:1 chat, device revoke, and recovery restore are built and tested in the app. They are not v0.1. They are the first half of v0.2, and they are not what v0.1 promises.
+
+### v0.2 — a second computer and a private 1:1, then groups
+
+First the second computer and the 1:1: a relay the owner can reach, a second folder paired to the first, one conversation with one contact by link or QR, an offline gap, and a restore from the recovery phrase. Then small private groups on the same sealing, encrypted media, and member management. The groups do not start until the 1:1 is in use. The relay is untrusted and self-hostable. What "encrypted" means, and what it does not mean, is [THREAT_MODEL.md](THREAT_MODEL.md).
+
+No feed, no P2P, no phone push yet.
 
 ### v0.3–v0.4 — long-form writing, then weave
 

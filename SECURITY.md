@@ -1,6 +1,6 @@
 # Security policy
 
-**Status: pre-0.1 and unaudited.** Nothing here should be trusted with a real secret yet. An independent review is planned before v1.0. The promises that review has to measure are in [THREAT_MODEL.md](THREAT_MODEL.md), not in this file.
+**Status: v0.1 and unaudited.** Nothing here should be trusted with a real secret yet. An independent review is planned before v1.0. The promises that review has to measure are in [THREAT_MODEL.md](THREAT_MODEL.md), not in this file.
 
 ## Reporting a vulnerability
 

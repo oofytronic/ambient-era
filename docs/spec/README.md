@@ -2,7 +2,7 @@
 
 Normative specifications for the wire formats and protocols. Code conforms to these documents, and [conformance vectors](../../conformance/README.md) check that it does.
 
-**Status:** 01 through 04 are version 1, written for v0.1. 05 is not written. `ambient-events` implements the envelope. `ambient-identity` implements derivation and the identity-log rules through revoke. `ambient-spaces` projects notes and a conversation, and opens the published HPKE blob. It does not re-seal that blob's exact ciphertext (see spec 03). `ambient-transport` and `ambient-relay` implement the mailbox operations. The relay another computer can reach is [the connection track](../network/README.md), which does not change these bytes until a spec change says so. The recovery seal is not implemented.
+**Status:** 01 through 04 are version 1. They were written for the first version that sends anything, which is v0.2. v0.1 is one computer and uses 01 through 03 for its own log. 05 is not written. `ambient-events` implements the envelope. `ambient-identity` implements derivation and the identity-log rules through revoke. `ambient-spaces` projects notes and a conversation, and opens the published HPKE blob. It does not re-seal that blob's exact ciphertext (see spec 03). `ambient-transport` and `ambient-relay` implement the mailbox operations. The relay another computer can reach is [the connection track](../network/README.md), which does not change these bytes until a spec change says so. The recovery seal is not implemented.
 
 ## Planned documents
 
@@ -12,7 +12,7 @@ Normative specifications for the wire formats and protocols. Code conforms to th
 | 02 | `02-identity-log.md` | Key-event log, device delegation, rotation, recovery |
 | 03 | `03-spaces.md` | Space membership and role log, HPKE-to-members sealing ([ADR-0005](../adr/0005-private-space-encryption.md)), share Spaces and expiry |
 | 04 | `04-relay-api.md` | Relay put/get/delete/subscribe, mailbox addressing, retention |
-| 05 | `05-creations.md` | Not written. Documents, collections, versions, `CreationRef`, comment anchors. After v0.1. |
+| 05 | `05-creations.md` | Not written. Documents, collections, versions, `CreationRef`, comment anchors. After v0.2. |
 
 ## Conventions
 

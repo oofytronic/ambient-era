@@ -1,6 +1,6 @@
 # ADR-0005: Private Spaces are sealed to member device keys, not MLS groups
 
-**Status:** Accepted
+**Status:** Accepted. Amended 2026-11-20: v0.1 is the Notes space on one computer. The second device and 1:1 Spaces are v0.2. The decision to seal with HPKE is unchanged.
 
 Supersedes the encryption mechanism in [VISION.md](../../VISION.md) §5 and §7, the "MLS for every Space" row in [docs/STACK.md](../STACK.md), the crate rule in `crates/ambient-spaces/AGENTS.md`, and the MLS-epoch sentence in [ADR-0001](0001-creations-as-spaces.md) point 5. Does not supersede ADR-0001's model: a creation is a Space, and access is still a ladder of roles and grants.
 

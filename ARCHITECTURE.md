@@ -4,15 +4,20 @@ The map of the system as it is now. Decisions live in [docs/adr/](docs/adr/). Wi
 
 ## v0.1 fence
 
-v0.1 is a desktop daily driver for one person:
+v0.1 is a desktop daily driver for one person on one computer:
 
 - An identity log, unlocked locally. A passkey is not the root.
+- One Notes space, sealed on disk, with that one device in it.
+- Local search over the decrypted notes.
+- Nothing that needs a network.
+
+v0.1 does not promise a second device, a relay, or a conversation. They are built and tested, and they are v0.2:
+
 - One Notes space containing that person's devices.
 - One conversation space per contact, sealed to per-contact keys.
 - A relay that stores opaque blobs addressed by random mailbox ids.
-- Local search over the decrypted notes.
 
-v0.1 does not include groups beyond a 1:1, public Spaces, phone push, Tor, payments, a CRDT library, or a running agent. Do not scaffold those "so they exist." Reserved names in the specs are rejected on purpose.
+v0.1 and v0.2 do not include groups beyond a 1:1 until the 1:1 is in use, and do not include public Spaces, phone push before a phone client, Tor, payments, a CRDT library, or a running agent. Do not scaffold those "so they exist." Reserved names in the specs are rejected on purpose. [ROADMAP.md](ROADMAP.md) has the order.
 
 ## One primitive
 
