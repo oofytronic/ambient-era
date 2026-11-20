@@ -15,7 +15,7 @@ use ambient_spaces::{
     ChatLine, GenesisMember, conversation_genesis_payload, msg_put_citing, open_blob,
     project_conversation, seal_blob,
 };
-use ambient_store::{read_log, write_log};
+use ambient_store::{StoreError, log_stamp, read_log, write_log, write_log_if};
 use ambient_transport::{Request, Response, decode_response, encode_request};
 use tungstenite::Message;
 
@@ -345,17 +345,17 @@ pub(crate) fn sync_chat(dir: &Path, url: &str, id: &str) -> Result<String, CliEr
             got.push(plain);
         }
     }
-    accept_chat(&mut slots[index].wires, &got);
+    if let Some(slot) = slots.get_mut(index) {
+        accept_chat(&mut slot.wires, &got);
+        slot.arrived = got;
+    }
     if slots[index].wires.len() != before {
         if let Some(parent) = slots[index].log_path.parent() {
             fs::create_dir_all(parent).map_err(|_| CliError::message("could not write chats"))?;
         }
-        write_log(
-            &slots[index].log_path,
-            &local.store_key,
-            &slots[index].wires,
-        )
-        .map_err(|_| CliError::message("could not write chats"))?;
+        if let Some(slot) = slots.get_mut(index) {
+            write_slot(slot, &local.store_key)?;
+        }
     }
     let state = state_dir(dir, url);
     fs::create_dir_all(&state).map_err(|_| CliError::message("could not write cursor"))?;
@@ -583,30 +583,39 @@ pub(crate) fn say_citing(
     cite: Option<&str>,
 ) -> Result<(), CliError> {
     let local = keys::open(dir)?;
-    let mut slots = load_slots(dir, &local.store_key)?;
-    let slot = slots
-        .iter_mut()
-        .find(|slot| slot.space_id().as_deref() == Some(id))
-        .ok_or_else(|| CliError::message("no such conversation"))?;
-    let view = conversation(&slot.wires)?;
     let note = match cite {
         Some(id) => Some(parse_note_id(id)?),
         None => None,
     };
     let payload = msg_put_citing(text, note.as_ref())
         .map_err(|_| CliError::message("message is too long"))?;
-    let prev = view.tip.get(&slot.card.signing_key).copied();
-    slot.wires.push(sign_as(
-        &slot.card,
-        prev,
-        Some(view.space_id),
-        now_ms(),
-        "msg.put",
-        &payload,
-    )?);
-    write_log(&slot.log_path, &local.store_key, &slot.wires)
-        .map_err(|_| CliError::message("could not write chats"))?;
-    Ok(())
+    // The message links to the last one this device wrote. If a sync filed new messages while
+    // this was being signed, read the log again and sign against what is there.
+    for _ in 0..MERGE_TRIES {
+        let mut slots = load_slots(dir, &local.store_key)?;
+        let slot = slots
+            .iter_mut()
+            .find(|slot| slot.space_id().as_deref() == Some(id))
+            .ok_or_else(|| CliError::message("no such conversation"))?;
+        let view = conversation(&slot.wires)?;
+        let prev = view.tip.get(&slot.card.signing_key).copied();
+        slot.wires.push(sign_as(
+            &slot.card,
+            prev,
+            Some(view.space_id),
+            now_ms(),
+            "msg.put",
+            &payload,
+        )?);
+        match write_log_if(&slot.log_path, &local.store_key, slot.stamp, &slot.wires) {
+            Ok(_) => return Ok(()),
+            Err(StoreError::Stale) => {}
+            Err(_) => return Err(CliError::message("could not write chats")),
+        }
+    }
+    Err(CliError::message(
+        "the chat changed while sending. Try again",
+    ))
 }
 
 pub(crate) fn hear(dir: &Path) -> Result<String, CliError> {
@@ -646,6 +655,9 @@ pub(crate) fn sync_except(dir: &Path, url: &str, skip: Option<&str>) -> Result<S
     check_relay_url(url)?;
     let mut local = keys::open(dir)?;
     let notes_path = local.notes_path.clone();
+    // Stamp first, then read. See `open_slot`.
+    let mut notes_stamp =
+        log_stamp(&notes_path).map_err(|_| CliError::message("could not open notes file"))?;
     let mut notes = read_wires(&notes_path, &local.store_key)?;
     let mut slots = load_slots(dir, &local.store_key)?;
     for slot in &mut slots {
@@ -732,7 +744,7 @@ pub(crate) fn sync_except(dir: &Path, url: &str, skip: Option<&str>) -> Result<S
             arrived.push(plain);
         }
     }
-    let notes_before = notes.len();
+    let mut notes_before = notes.len();
     let wire_counts: Vec<(usize, usize)> = chat_at
         .iter()
         .map(|index| (*index, slots[*index].wires.len()))
@@ -757,22 +769,47 @@ pub(crate) fn sync_except(dir: &Path, url: &str, skip: Option<&str>) -> Result<S
             }
         }
         accept_chat(&mut slot.wires, &got);
+        slot.arrived = got;
     }
     if notes.len() != notes_before {
-        write_log(&notes_path, &local.store_key, &notes)
-            .map_err(|_| CliError::message("could not write notes file"))?;
+        // If the notes moved while this waited on the relay, take what is there now and file
+        // what arrived into it again, so neither side's events are lost.
+        let mut written = false;
+        for _ in 0..MERGE_TRIES {
+            match write_log_if(&notes_path, &local.store_key, notes_stamp, &notes) {
+                Ok(_) => {
+                    written = true;
+                    break;
+                }
+                Err(StoreError::Stale) => {
+                    notes_stamp = log_stamp(&notes_path)
+                        .map_err(|_| CliError::message("could not open notes file"))?;
+                    notes = read_wires(&notes_path, &local.store_key)?;
+                    notes_before = notes.len();
+                    let mut elsewhere = Vec::new();
+                    file_incoming(&mut local, &mut notes, &mut elsewhere, &arrived)?;
+                }
+                Err(_) => return Err(CliError::message("could not write notes file")),
+            }
+        }
+        if !written {
+            return Err(CliError::message(
+                "the notes changed while syncing. Try again",
+            ));
+        }
     }
     let state = state_dir(dir, url);
     fs::create_dir_all(&state).map_err(|_| CliError::message("could not write cursor"))?;
     for (index, before) in wire_counts {
-        let slot = &slots[index];
+        let Some(slot) = slots.get_mut(index) else {
+            continue;
+        };
         if slot.wires.len() != before {
             if let Some(parent) = slot.log_path.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|_| CliError::message("could not write chats"))?;
             }
-            write_log(&slot.log_path, &local.store_key, &slot.wires)
-                .map_err(|_| CliError::message("could not write chats"))?;
+            write_slot(slot, &local.store_key)?;
         }
         write_cursor(&slot.cursor_path, slot.cursor)?;
     }
@@ -1096,6 +1133,11 @@ struct Slot {
     log_path: PathBuf,
     cursor_path: PathBuf,
     wires: Vec<Vec<u8>>,
+    /// The stamp the log had when `wires` was read. A write is refused if the file moved since.
+    stamp: Option<(u64, u64)>,
+    /// What the relay delivered for this conversation, kept until the write so it can be merged
+    /// again into a log that changed while the sync was waiting on the relay.
+    arrived: Vec<Vec<u8>>,
     cursor: u64,
 }
 
@@ -1279,9 +1321,14 @@ fn open_slot(
     let card_path = card_path.as_ref();
     let log_path = log_path.as_ref();
     let cursor_path = cursor_path.as_ref();
+    // The stamp is read first. If the file moves between the two reads the stamp is the older
+    // one, and the write is refused and merged again. The other order could lose an event.
+    let stamp = log_stamp(log_path).map_err(|_| CliError::message("could not open chats"))?;
     Ok(Slot {
         card: read_card_file(card_path)?,
         wires: read_wires(log_path, key)?,
+        stamp,
+        arrived: Vec::new(),
         cursor: read_cursor(cursor_path)?,
         log_path: log_path.to_path_buf(),
         cursor_path: cursor_path.to_path_buf(),
@@ -1352,6 +1399,38 @@ fn accept_chat(wires: &mut Vec<Vec<u8>>, arrived: &[Vec<u8>]) {
             }
         }
     }
+}
+
+/// How many times a write that found its file changed is merged again. Two writers colliding is
+/// rare and a run of eight losses is not a thing that happens.
+const MERGE_TRIES: usize = 8;
+
+/// Write a conversation's log only if it is still the file that was read.
+///
+/// If a message was written while the sync waited on the relay, the log is read again, what the
+/// relay delivered is merged into it again, and the write is retried. Nothing either side added
+/// is lost. A message said in the meantime is pushed by the next sync, as any unsent one is.
+fn write_slot(slot: &mut Slot, key: &[u8; 32]) -> Result<(), CliError> {
+    for _ in 0..MERGE_TRIES {
+        match write_log_if(&slot.log_path, key, slot.stamp, &slot.wires) {
+            Ok(stamp) => {
+                slot.stamp = Some(stamp);
+                return Ok(());
+            }
+            Err(StoreError::Stale) => {
+                slot.stamp = log_stamp(&slot.log_path)
+                    .map_err(|_| CliError::message("could not write chats"))?;
+                slot.wires = read_wires(&slot.log_path, key)?;
+                let arrived = std::mem::take(&mut slot.arrived);
+                accept_chat(&mut slot.wires, &arrived);
+                slot.arrived = arrived;
+            }
+            Err(_) => return Err(CliError::message("could not write chats")),
+        }
+    }
+    Err(CliError::message(
+        "the chat changed while syncing. Try again",
+    ))
 }
 
 fn parse_note_id(text: &str) -> Result<[u8; 32], CliError> {

@@ -663,54 +663,53 @@ impl Notebook {
             .identity
             .as_ref()
             .ok_or_else(|| CliError::message("only the root folder can enroll a device"))?;
-        let mut wires = load(&self.local)?;
-        let log = project_log(
-            &self.local.identity_public,
-            &identity_wires(&self.local, &wires)?,
-        )
-        .map_err(|_| CliError::message("identity log rejected"))?;
-        let mut head = log.head;
-        if !log.devices.contains_key(&self.local.device.signing_key) {
-            let payload = device_add_payload(
-                &self.local.device.signing_key,
-                &self.local.device.encryption_key,
-                &self.local.device.label,
-                &self.local.device.mailbox,
+        self.rewrite(|mut wires| {
+            let log = project_log(
+                &self.local.identity_public,
+                &identity_wires(&self.local, &wires)?,
             )
-            .map_err(|_| CliError::message("could not encode device"))?;
-            let add = identity
-                .sign_log(head, "id.device-add", &payload)
-                .map_err(|_| CliError::message("could not sign device"))?;
-            let event = verify(&add).map_err(|_| CliError::message("could not sign device"))?;
-            head = Some(event.id);
-            wires.push(add);
-        }
-        let view = view_notes(&self.local, &wires)?;
-        if !view.members.contains_key(&self.local.device.signing_key) {
-            let member = GenesisMember {
-                signing_key: self.local.device.signing_key,
-                encryption_key: self.local.device.encryption_key,
-                role: 1,
-                mailbox: self.local.device.mailbox,
-            };
-            let payload = member_add_payload(&member)
+            .map_err(|_| CliError::message("identity log rejected"))?;
+            let mut head = log.head;
+            if !log.devices.contains_key(&self.local.device.signing_key) {
+                let payload = device_add_payload(
+                    &self.local.device.signing_key,
+                    &self.local.device.encryption_key,
+                    &self.local.device.label,
+                    &self.local.device.mailbox,
+                )
+                .map_err(|_| CliError::message("could not encode device"))?;
+                let add = identity
+                    .sign_log(head, "id.device-add", &payload)
+                    .map_err(|_| CliError::message("could not sign device"))?;
+                let event = verify(&add).map_err(|_| CliError::message("could not sign device"))?;
+                head = Some(event.id);
+                wires.push(add);
+            }
+            let view = view_notes(&self.local, &wires)?;
+            if !view.members.contains_key(&self.local.device.signing_key) {
+                let member = GenesisMember {
+                    signing_key: self.local.device.signing_key,
+                    encryption_key: self.local.device.encryption_key,
+                    role: 1,
+                    mailbox: self.local.device.mailbox,
+                };
+                let payload = member_add_payload(&member)
+                    .map_err(|_| CliError::message("could not encode member"))?;
+                let unsigned = encode_unsigned(
+                    &identity.signing_key,
+                    head.map(|id| id.0),
+                    None,
+                    Some(view.space_id.0),
+                    "space.member-add",
+                    &payload,
+                )
                 .map_err(|_| CliError::message("could not encode member"))?;
-            let unsigned = encode_unsigned(
-                &identity.signing_key,
-                head.map(|id| id.0),
-                None,
-                Some(view.space_id.0),
-                "space.member-add",
-                &payload,
-            )
-            .map_err(|_| CliError::message("could not encode member"))?;
-            let add = sign_wire(&unsigned, identity.signing_seed())
-                .map_err(|_| CliError::message("could not sign member"))?;
-            wires.push(add);
-        }
-        write_log(&self.local.notes_path, &self.local.store_key, &wires)
-            .map_err(|_| CliError::message("could not write notes file"))?;
-        Ok(())
+                let add = sign_wire(&unsigned, identity.signing_seed())
+                    .map_err(|_| CliError::message("could not sign member"))?;
+                wires.push(add);
+            }
+            Ok(wires)
+        })
     }
 
     /// Authorize a device from its offer and add it to the Notes space.
@@ -728,46 +727,47 @@ impl Notebook {
         }
         let offer = decode_pair_offer_text(offer_text.trim())
             .map_err(|_| CliError::message("offer rejected"))?;
-        let mut wires = load(&self.local)?;
-        let identity_wires = identity_wires(&self.local, &wires)?;
-        let head = project_log(&self.local.identity_public, &identity_wires)
-            .map_err(|_| CliError::message("identity log rejected"))?
-            .head;
-        let payload = device_add_payload(
-            &offer.signing_key,
-            &offer.encryption_key,
-            label,
-            &offer.mailbox,
-        )
-        .map_err(|_| CliError::message("label must be 1 to 32 bytes"))?;
-        let add = self
-            .local
-            .identity
-            .as_ref()
-            .ok_or_else(|| CliError::message("only the folder with the root can pair a device"))?
-            .sign_log(head, "id.device-add", &payload)
-            .map_err(|_| CliError::message("could not sign device"))?;
-        wires.push(add);
-        let view = view_notes(&self.local, &wires)?;
-        let member = ambient_spaces::GenesisMember {
-            signing_key: offer.signing_key,
-            encryption_key: offer.encryption_key,
-            role: 2,
-            mailbox: offer.mailbox,
-        };
-        let payload = member_add_payload(&member)
-            .map_err(|_| CliError::message("could not encode member"))?;
-        let prev = view.tip.get(&self.local.device.signing_key).copied();
-        wires.push(sign_device(
-            &self.local,
-            prev,
-            Some(view.space_id),
-            "space.member-add",
-            &payload,
-        )?);
-        write_log(&self.local.notes_path, &self.local.store_key, &wires)
-            .map_err(|_| CliError::message("could not write notes file"))?;
-        Ok(())
+        self.rewrite(|mut wires| {
+            let identity_wires = identity_wires(&self.local, &wires)?;
+            let head = project_log(&self.local.identity_public, &identity_wires)
+                .map_err(|_| CliError::message("identity log rejected"))?
+                .head;
+            let payload = device_add_payload(
+                &offer.signing_key,
+                &offer.encryption_key,
+                label,
+                &offer.mailbox,
+            )
+            .map_err(|_| CliError::message("label must be 1 to 32 bytes"))?;
+            let add = self
+                .local
+                .identity
+                .as_ref()
+                .ok_or_else(|| {
+                    CliError::message("only the folder with the root can pair a device")
+                })?
+                .sign_log(head, "id.device-add", &payload)
+                .map_err(|_| CliError::message("could not sign device"))?;
+            wires.push(add);
+            let view = view_notes(&self.local, &wires)?;
+            let member = ambient_spaces::GenesisMember {
+                signing_key: offer.signing_key,
+                encryption_key: offer.encryption_key,
+                role: 2,
+                mailbox: offer.mailbox,
+            };
+            let payload = member_add_payload(&member)
+                .map_err(|_| CliError::message("could not encode member"))?;
+            let prev = view.tip.get(&self.local.device.signing_key).copied();
+            wires.push(sign_device(
+                &self.local,
+                prev,
+                Some(view.space_id),
+                "space.member-add",
+                &payload,
+            )?);
+            Ok(wires)
+        })
     }
 
     /// Current Notes-space members. Empty when this folder has no events yet.
@@ -822,45 +822,71 @@ impl Notebook {
         if key == self.local.device.signing_key {
             return Err(CliError::message("this device cannot revoke itself"));
         }
-        let mut wires = load(&self.local)?;
-        let log = project_log(
-            &self.local.identity_public,
-            &identity_wires(&self.local, &wires)?,
-        )
-        .map_err(|_| CliError::message("identity log rejected"))?;
-        match log.devices.get(&key) {
-            Some(DeviceState::Active { .. }) => {}
-            Some(DeviceState::Revoked { .. }) => {
-                return Err(CliError::message("that device is already revoked"));
+        self.rewrite(|mut wires| {
+            let log = project_log(
+                &self.local.identity_public,
+                &identity_wires(&self.local, &wires)?,
+            )
+            .map_err(|_| CliError::message("identity log rejected"))?;
+            match log.devices.get(&key) {
+                Some(DeviceState::Active { .. }) => {}
+                Some(DeviceState::Revoked { .. }) => {
+                    return Err(CliError::message("that device is already revoked"));
+                }
+                None => return Err(CliError::message("no such device")),
             }
-            None => return Err(CliError::message("no such device")),
+            let view = view_notes(&self.local, &wires)?;
+            let payload = revoke_payload(&key, view.tip.get(&key).copied())
+                .map_err(|_| CliError::message("could not encode revoke"))?;
+            let revoke = self
+                .local
+                .identity
+                .as_ref()
+                .ok_or_else(|| {
+                    CliError::message("only the folder with the root can revoke a device")
+                })?
+                .sign_log(log.head, "id.device-revoke", &payload)
+                .map_err(|_| CliError::message("could not sign revoke"))?;
+            wires.push(revoke);
+            if view.members.contains_key(&key) {
+                let payload = member_remove_payload(&key)
+                    .map_err(|_| CliError::message("could not encode member remove"))?;
+                let prev = view.tip.get(&self.local.device.signing_key).copied();
+                wires.push(sign_device(
+                    &self.local,
+                    prev,
+                    Some(view.space_id),
+                    "space.member-remove",
+                    &payload,
+                )?);
+            }
+            Ok(wires)
+        })
+    }
+
+    /// Change the notes file as it is now, and write the result only if the file did not move.
+    ///
+    /// `build` gets the wires just read and returns the wires to write. If another writer
+    /// changed the file in between, nothing is written and `build` runs again on what is
+    /// there now, so nothing that writer appended is lost. For changes that touch the identity
+    /// log as well as the notes, which [`Self::append`] does not cover.
+    fn rewrite(
+        &self,
+        build: impl Fn(Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, CliError>,
+    ) -> Result<(), CliError> {
+        for _ in 0..APPEND_TRIES {
+            let stamp = ambient_store::log_stamp(&self.local.notes_path)
+                .map_err(|_| CliError::message("could not open notes file"))?;
+            let wires = build(load(&self.local)?)?;
+            match write_log_if(&self.local.notes_path, &self.local.store_key, stamp, &wires) {
+                Ok(_) => return Ok(()),
+                Err(StoreError::Stale) => {}
+                Err(_) => return Err(CliError::message("could not write notes file")),
+            }
         }
-        let view = view_notes(&self.local, &wires)?;
-        let payload = revoke_payload(&key, view.tip.get(&key).copied())
-            .map_err(|_| CliError::message("could not encode revoke"))?;
-        let revoke = self
-            .local
-            .identity
-            .as_ref()
-            .ok_or_else(|| CliError::message("only the folder with the root can revoke a device"))?
-            .sign_log(log.head, "id.device-revoke", &payload)
-            .map_err(|_| CliError::message("could not sign revoke"))?;
-        wires.push(revoke);
-        if view.members.contains_key(&key) {
-            let payload = member_remove_payload(&key)
-                .map_err(|_| CliError::message("could not encode member remove"))?;
-            let prev = view.tip.get(&self.local.device.signing_key).copied();
-            wires.push(sign_device(
-                &self.local,
-                prev,
-                Some(view.space_id),
-                "space.member-remove",
-                &payload,
-            )?);
-        }
-        write_log(&self.local.notes_path, &self.local.store_key, &wires)
-            .map_err(|_| CliError::message("could not write notes file"))?;
-        Ok(())
+        Err(CliError::message(
+            "the notes changed while saving. Try again",
+        ))
     }
 
     fn ensure(&self) -> Result<(), CliError> {

@@ -89,13 +89,11 @@ fn rebuild(conn: &Connection, rows: &[(String, String, String)]) -> Result<(), C
         }
         Ok::<(), rusqlite::Error>(())
     })();
-    match filled.and_then(|()| conn.execute_batch("COMMIT")) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(CliError::message("could not build search index"))
-        }
+    if filled.and_then(|()| conn.execute_batch("COMMIT")).is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(CliError::message("could not build search index"));
     }
+    Ok(())
 }
 
 fn query_ids(conn: &Connection, match_query: &str) -> Result<Vec<String>, CliError> {
