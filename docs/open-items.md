@@ -21,8 +21,14 @@ These are not for an agent to settle.
 ## Asked for, not built
 
 - **Spotlight the paragraph being written** in focus mode. Focus is the place for it. Nothing else in the page changes.
-- **An info or settings icon on each note.** It is where the device that wrote the note goes. The "Written by" line is gone from the page and `note_writer` is kept for it. The note list still shows the writer.
-- **Focus mode for a narrow window.** It is only for the wide layout today. The panels collapse at once and do not slide. There is no key to leave it other than the icon and Ctrl or Cmd + a full stop.
+- **Focus mode for a narrow window.** It is only for the wide layout today. There is no key to leave it other than the icon and Ctrl or Cmd + a full stop.
+
+## Asked for, not built (2026-11-20, second list)
+
+- **Transitions between tabs, and on hover.** Only focus mode eases. Iced has no animation layer: a tab change would need the old view kept to fade out, and a hover color would need a widget that holds its own state. Both are a small widget each.
+- **The tag field with nothing typed** offers nothing. There is no focus event on a text field to show the list on. Typing one letter shows it.
+- **A scroll speed setting.** The wheel follows a page step now. Nothing reads a system wheel setting, because Linux has none to read: the system sends the notches already scaled or it does not.
+- **Settings in the note's panel** show only the home device, send, and delete. Tags and the note's id are not there yet.
 
 ## Offered, not built
 
@@ -64,7 +70,7 @@ Measured on 2026-11-19 and 2026-11-20. See the numbers in the session record.
 
 ## Not verified
 
-- **Nothing in the window was seen.** There was no display. Covered by tests of state and of pure functions, not by eyes: when the scrollbar appears and for how long, the focus slides, where the delete card sits, the pencil, how the revealed marks look, and Tab on a selection. Look at these first.
+- **Nothing in the window was seen.** That includes everything from the 2026-11-20 second list: the settings panel and its gear, the hover delete, the Tasks card, Send in the pill, the tag offers, the scrollbar room, the wheel step, and the panel slide. While a panel slides it is squeezed, not moved, and may look like it rewraps. Look at these first. Also: There was no display. Covered by tests of state and of pure functions, not by eyes: when the scrollbar appears and for how long, the focus slides, where the delete card sits, the pencil, how the revealed marks look, and Tab on a selection. Look at these first.
 - The slow scrolling was reported once and was fixed by removing a message per scroll tick. It was reported fine afterward, with other changes in the same build. It has not been confirmed on its own.
 - `just deny` was not run. `just`, `nextest`, and `cargo-deny` were not installed where this was done. No dependency was added. The equivalent `cargo` commands passed.
 - GitHub Actions was not looked at.

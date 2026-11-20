@@ -381,3 +381,17 @@ Changed:
 Not done yet:
 
 - The normative specs in `docs/spec/` (events, identity log, Spaces, mailbox API) and their conformance vectors. No crate behavior until those exist.
+
+## 2026-11-20 — The second list from daily use
+
+The owner used v0.1 for a short time and asked for nine small things. No locked choice changed. Recorded here because they change where things are.
+
+- A key the editor does not take, while the page is up, is typed into the page by the window. Fast typing lost letters when the page moved in the widget tree and the editor lost focus until a task gave it back. The state-level test never dropped one, so the loss was in the gap, not in the text.
+- New note is at the bottom of the left list. Delete is on a row under the pointer. Send to a chat and Delete are in the note's settings, which the gear in the right panel switches to. Links and backlinks stay the default.
+- The Tasks note is not in the notes list. The Tasks tab opens it in a card.
+- Select words and Send in the pill sends those words, quoted, with the title, the lines, and the writing device, and cites the note.
+- The tag field offers tags used before and narrows as you type.
+- A scrollbar has ten pixels of room. A wheel notch is a page step, not 60 pixels.
+- The side panels ease in and out of focus.
+
+Not done, and why: [open-items.md](docs/open-items.md). Nothing was seen in a window.
