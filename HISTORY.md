@@ -6,7 +6,9 @@ When a turn changes direction, scope, or a locked design choice, add an entry he
 
 ## 2026-11-20 — scrollbars are hidden
 
-Every scrollable in the window goes through `vscroll` and `hscroll`, so they share one rule. A scrollbar is no longer drawn at rest. Scrolling a pane shows a faint thin thumb for about 0.7 seconds, only on the pane under the pointer, and then it goes. A clear thumb shows while the pointer is on the bar itself, so a person who wants to drag it still can. Hovering a pane does not show it. Scrolling is how the bar is asked for, so typing does not draw it and does not start a timer. The scroll arms the same one-shot wake the pause and the search use, and the wake only redraws.
+Every scrollable in the window goes through `vscroll` and `hscroll`, so they share one rule. A scrollbar is no longer drawn at rest. Scrolling a pane shows a faint thin thumb for about 0.7 seconds, only on the pane under the pointer, and then it goes. A clear thumb shows while the pointer is on the bar itself, so a person who wants to drag it still can. Hovering a pane does not show it. Scrolling is how the bar is asked for, so typing does not draw it and does not start a timer.
+
+The first version sent a message for every scroll tick. Each one went through `update` and rebuilt the whole view, and it restarted a subscription, so scrolling was slow and jerky. A scroll must never go through `update`. A wheel tick now only records the time, which is one atomic store. The first tick of a burst sends one message, which arms the same one-shot wake the pause and the search use. The wake only redraws, and looks again later if the pane is still moving.
 
 ## 2026-11-20 — a new device's first note is not dropped, and a sync no longer overwrites a write
 

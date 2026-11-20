@@ -384,7 +384,7 @@ enum Message {
     CancelSend,
     Breeze,
     Woke(Wake),
-    /// A pane was scrolled. Only records that, so the scrollbar can show for a moment.
+    /// The first wheel tick of a burst. Starts the wake that hides the scrollbar again.
     Scrolled,
     Opened(Result<(), String>),
     Saved(
@@ -865,6 +865,7 @@ impl App {
                     shift: mods.shift(),
                 })
             }
+            iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. }) => scroll_seen(),
             iced::Event::Mouse(
                 iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)
                 | iced::mouse::Event::CursorLeft,
@@ -1483,15 +1484,19 @@ impl App {
                     Task::none()
                 }
                 Wake::Scroll(token) if self.scroll_armed && token == self.scroll_token => {
-                    // Nothing to change. Handling the wake redraws, and the style now sees that
-                    // the last scroll is old, so the thumb goes.
-                    self.scroll_armed = false;
+                    // Handling the wake redraws, and the style sees whether the last scroll is
+                    // old, so the thumb goes. If the pane is still moving, look again later.
+                    if scrolled_recently() {
+                        self.scroll_token = self.scroll_token.wrapping_add(1);
+                    } else {
+                        self.scroll_armed = false;
+                        SCROLL_WAKE.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
                     Task::none()
                 }
                 Wake::Pause(_) | Wake::Search(_) | Wake::Scroll(_) => Task::none(),
             },
             Message::Scrolled => {
-                note_scroll();
                 self.scroll_token = self.scroll_token.wrapping_add(1);
                 self.scroll_armed = true;
                 Task::none()
@@ -7327,14 +7332,12 @@ fn slim_bar() -> scrollable::Scrollbar {
 fn vscroll<'a>(content: impl Into<Element<'a, Message>>) -> scrollable::Scrollable<'a, Message> {
     scrollable(content)
         .direction(scrollable::Direction::Vertical(slim_bar()))
-        .on_scroll(|_| Message::Scrolled)
         .style(scroll_style)
 }
 
 fn hscroll<'a>(content: impl Into<Element<'a, Message>>) -> scrollable::Scrollable<'a, Message> {
     scrollable(content)
         .direction(scrollable::Direction::Horizontal(slim_bar()))
-        .on_scroll(|_| Message::Scrolled)
         .style(scroll_style)
 }
 
@@ -7347,6 +7350,20 @@ static LAST_SCROLL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 fn since_start() -> Duration {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     START.get_or_init(Instant::now).elapsed()
+}
+
+/// Whether a wake to hide the scrollbar is already waiting. A burst of wheel ticks asks for one.
+static SCROLL_WAKE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A wheel tick. It costs one atomic store, so scrolling never goes through `update` or rebuilds
+/// the view. Only the first tick of a burst sends a message, to start the wake that hides the bar.
+fn scroll_seen() -> Option<Message> {
+    note_scroll();
+    if SCROLL_WAKE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        None
+    } else {
+        Some(Message::Scrolled)
+    }
 }
 
 fn note_scroll() {
@@ -8618,7 +8635,7 @@ mod history_tests {
 mod scrollbar_tests {
     use iced::widget::scrollable::Status;
 
-    use super::{scroll_hot, thumb_alpha};
+    use super::{SCROLL_WAKE, scroll_hot, scroll_seen, scrolled_recently, thumb_alpha};
 
     fn resting() -> Status {
         Status::Active {
@@ -8678,5 +8695,20 @@ mod scrollbar_tests {
         assert!(!scroll_hot(over_pane()) && !scroll_hot(resting()));
         assert!(thumb_alpha(over_bar(), false) > thumb_alpha(over_pane(), true));
         assert!(thumb_alpha(dragging(), false) > 0.5);
+    }
+
+    #[test]
+    fn a_burst_of_wheel_ticks_sends_one_message() {
+        // Scrolling must not go through `update`, which rebuilds the whole view. A tick only
+        // records the time. The first tick of a burst asks for the wake that hides the bar.
+        SCROLL_WAKE.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(scroll_seen().is_some(), "the first tick starts the wake");
+        for _ in 0..500 {
+            assert!(scroll_seen().is_none(), "a later tick sent a message");
+        }
+        assert!(scrolled_recently());
+        // Once the wake has run, the next burst starts a new one.
+        SCROLL_WAKE.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(scroll_seen().is_some());
     }
 }
