@@ -213,6 +213,8 @@ struct App {
     focus: bool,
     /// The right panel shows this note's settings, not its links.
     note_panel: bool,
+    /// A selection waiting for a chat to be chosen: its words and the lines it covers.
+    send_part: Option<(String, usize, usize)>,
     /// The note whose row the pointer is over, so its delete button shows.
     hover_row: Option<String>,
     /// The formatting bar, while writing in focus. Hidden until pulled in.
@@ -444,6 +446,8 @@ enum Message {
     BackUp,
     /// A copy finished, or failed.
     BackedUp(Result<profile::BackupReport, String>),
+    /// The Send button in the bar over a selection: send only those words, with where they are from.
+    SendSelection,
     /// Show or close the Tasks note over the Tasks tab.
     ToggleTasksNote,
     /// The icon at the top of the right panel: this note's settings, or its links.
@@ -865,6 +869,7 @@ impl App {
             focus: false,
             note_panel: false,
             hover_row: None,
+            send_part: None,
             slide_bar: Slide::settled(true),
             alias_editing: None,
             invite_pick: None,
@@ -1576,6 +1581,7 @@ impl App {
             }
             Message::CancelSend => {
                 self.send_open = false;
+                self.send_part = None;
                 Task::none()
             }
             Message::Breeze => {
@@ -1684,6 +1690,10 @@ impl App {
             Message::BackUp => self.start_backup(),
             Message::BackedUp(result) => {
                 self.finish_backup(result);
+                Task::none()
+            }
+            Message::SendSelection => {
+                self.send_selection();
                 Task::none()
             }
             Message::ToggleTasksNote => {
@@ -5312,6 +5322,11 @@ impl App {
                 pill_button("Copy", "Copy", Message::CopyNote),
                 pill_button("Cut", "Cut", Message::CutNote),
                 pill_button("Paste", "Paste", Message::PasteNote),
+                pill_button(
+                    "Send",
+                    "Send this selection to a chat",
+                    Message::SendSelection
+                ),
             ]
             .spacing(2)
             .align_y(iced::Alignment::Center),
@@ -6234,7 +6249,29 @@ impl App {
         }
     }
 
+    fn send_selection(&mut self) {
+        let Some((from, to)) = self.body.selection_bounds() else {
+            self.say("Select some words first.");
+            return;
+        };
+        let text = self.body.text();
+        let Some(words) = text.get(from..to) else {
+            return;
+        };
+        let line_of = |at: usize| {
+            text.get(..at)
+                .map_or(0, |head| head.matches('\n').count())
+                .saturating_add(1)
+        };
+        let part = (words.to_owned(), line_of(from), line_of(to));
+        self.send_note_to_chat();
+        if self.send_open {
+            self.send_part = Some(part);
+        }
+    }
+
     fn send_note_to_chat(&mut self) {
+        self.send_part = None;
         if self.title_text.trim().is_empty() && self.body.text().trim().is_empty() {
             self.say("Write a note first.");
             return;
@@ -6270,11 +6307,20 @@ impl App {
             return;
         }
         let mut text = String::new();
-        if !self.title_text.is_empty() {
-            text.push_str(&self.title_text);
-            text.push_str("\n\n");
+        if let Some((words, first, last)) = self.send_part.take() {
+            let home = if self.selected.is_some() {
+                self.note_writer.as_str()
+            } else {
+                ""
+            };
+            text = selection_message(&self.title_text, (first, last), home, &words);
+        } else {
+            if !self.title_text.is_empty() {
+                text.push_str(&self.title_text);
+                text.push_str("\n\n");
+            }
+            text.push_str(&self.body.text());
         }
-        text.push_str(&self.body.text());
         let label = self
             .chats
             .iter()
@@ -7708,6 +7754,36 @@ fn surface_pane(theme: &Theme) -> container::Style {
         text_color: Some(ink.text),
         ..Default::default()
     }
+}
+
+/// A selection as a chat line: the words quoted, then where they came from. The note itself goes
+/// along as the line's cite, so the message links back to it.
+fn selection_message(title: &str, lines: (usize, usize), home: &str, words: &str) -> String {
+    let mut out = String::new();
+    for line in words.trim_end().lines() {
+        out.push_str("> ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    let name = if title.trim().is_empty() {
+        "Untitled"
+    } else {
+        title.trim()
+    };
+    let place = if lines.0 == lines.1 {
+        format!("line {}", lines.0)
+    } else {
+        format!("lines {}–{}", lines.0, lines.1)
+    };
+    out.push_str("\n— ");
+    out.push_str(name);
+    out.push_str(", ");
+    out.push_str(&place);
+    if !home.is_empty() {
+        out.push_str(", written on ");
+        out.push_str(home);
+    }
+    out
 }
 
 fn is_tasks_note(note: &NoteSummary) -> bool {
@@ -9855,6 +9931,18 @@ mod app_tests {
         let _ = app.update(Message::ShowTasks);
         assert!(!app.tasks_note_open, "it is shut on the way back");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_selection_goes_to_a_chat_with_where_it_is_from() {
+        assert_eq!(
+            super::selection_message("Plan", (3, 3), "", "one idea"),
+            "> one idea\n\n— Plan, line 3"
+        );
+        assert_eq!(
+            super::selection_message("", (2, 4), "Laptop", "a\nb\n"),
+            "> a\n> b\n\n— Untitled, lines 2–4, written on Laptop"
+        );
     }
 
     #[test]
