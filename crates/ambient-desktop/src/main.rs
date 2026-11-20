@@ -5311,7 +5311,7 @@ impl App {
                 );
             }
             page = page.push(
-                vscroll(self.editor_page())
+                vscroll_flush(self.editor_page())
                     .id(iced::widget::Id::new("note-scroll"))
                     .height(Fill),
             );
@@ -8177,16 +8177,37 @@ fn slim_bar() -> scrollable::Scrollbar {
         .margin(2.0)
 }
 
+/// Room between content and the bar. The bar is drawn over the content, so without this it sits
+/// on the edge of a button or a line of text.
+const BAR_ROOM: f32 = 10.0;
+
 fn vscroll<'a>(content: impl Into<Element<'a, Message>>) -> scrollable::Scrollable<'a, Message> {
+    vscroll_flush(container(content).width(Fill).padding(iced::Padding {
+        top: 0.0,
+        right: BAR_ROOM,
+        bottom: 0.0,
+        left: 0.0,
+    }))
+}
+
+/// A vertical scroll with no room kept for the bar, for a page that has made its own.
+fn vscroll_flush<'a>(
+    content: impl Into<Element<'a, Message>>,
+) -> scrollable::Scrollable<'a, Message> {
     scrollable(content)
         .direction(scrollable::Direction::Vertical(slim_bar()))
         .style(scroll_style)
 }
 
 fn hscroll<'a>(content: impl Into<Element<'a, Message>>) -> scrollable::Scrollable<'a, Message> {
-    scrollable(content)
-        .direction(scrollable::Direction::Horizontal(slim_bar()))
-        .style(scroll_style)
+    scrollable(container(content).padding(iced::Padding {
+        top: 0.0,
+        right: 0.0,
+        bottom: BAR_ROOM,
+        left: 0.0,
+    }))
+    .direction(scrollable::Direction::Horizontal(slim_bar()))
+    .style(scroll_style)
 }
 
 /// How long a scrollbar stays visible after the last scroll.
