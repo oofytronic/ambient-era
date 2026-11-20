@@ -129,9 +129,18 @@ struct Projected {
     snaps: HashMap<[u8; 32], usize>,
 }
 
-/// How many times a save runs again after another writer got in first. Two writers
-/// colliding is rare, and a third in a row almost never happens, so a small number is plenty.
-const APPEND_TRIES: usize = 8;
+/// How many times a write that found its file changed runs again, for a save, a sync, and the
+/// writers that rebuild the notes. One collision is normal when two writers are active. The
+/// bound is generous because the lock is not first come, first served: a writer in a tight loop
+/// can win again and again for a few milliseconds while another waits.
+pub(crate) const WRITE_TRIES: usize = 32;
+
+/// Wait a little before a writer that lost a race tries again, longer each time up to 8 ms. Without
+/// it the loser's retry costs microseconds and runs into the same winner again.
+pub(crate) fn pause_before_retry(attempt: usize) {
+    let millis = u64::try_from(attempt.saturating_add(1).min(8)).unwrap_or(8);
+    std::thread::sleep(std::time::Duration::from_millis(millis));
+}
 
 /// Which notebook a cache belongs to: the notes file, the identity, and this device.
 type ShareKey = (PathBuf, [u8; 32], [u8; 32]);
@@ -300,8 +309,8 @@ impl Notebook {
                 continue;
             }
             let hex_id = hex(id);
-            let title = heads.first().map(|head| head.title.as_str()).unwrap_or("");
-            let body = heads.first().map(|head| head.body.as_str()).unwrap_or("");
+            let title = heads.first().map_or("", |head| head.title.as_str());
+            let body = heads.first().map_or("", |head| head.body.as_str());
             visit(&hex_id, title, body, heads.len() > 1);
         }
         Ok(())
@@ -332,12 +341,12 @@ impl Notebook {
             notes_stamp(view)
         };
         let Some(dir) = self.local.key_path.parent() else {
-            return self.search_cloned(query);
+            return Ok(self.search_cloned(query));
         };
         if let Some(found) = crate::index::match_fresh(dir, stamp, query) {
             return match found {
-                Ok(ids) => self.summaries_for(ids),
-                Err(_) => self.search_cloned(query),
+                Ok(ids) => Ok(self.summaries_for(ids)),
+                Err(_) => Ok(self.search_cloned(query)),
             };
         }
         let (view, names) = {
@@ -376,32 +385,31 @@ impl Notebook {
         }
     }
 
-    fn search_cloned(&self, query: &str) -> Result<Vec<NoteSummary>, CliError> {
+    fn search_cloned(&self, query: &str) -> Vec<NoteSummary> {
         let guard = self.cache.borrow();
         let Some(item) = guard.as_ref() else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
         let Some(view) = item.projected.view.as_ref() else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
-        Ok(search_scan(view, query, &item.projected.names))
+        search_scan(view, query, &item.projected.names)
     }
 
-    fn summaries_for(&self, ids: Vec<String>) -> Result<Vec<NoteSummary>, CliError> {
+    fn summaries_for(&self, ids: Vec<String>) -> Vec<NoteSummary> {
         let wanted: BTreeSet<String> = ids.into_iter().collect();
         let guard = self.cache.borrow();
         let Some(item) = guard.as_ref() else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
         let Some(view) = item.projected.view.as_ref() else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
-        Ok(view
-            .notes
+        view.notes
             .iter()
             .filter(|(id, heads)| wanted.contains(&hex(*id)) && !heads_are_deleted(heads))
             .map(|(id, heads)| summary(id, heads, &item.projected.names))
-            .collect())
+            .collect()
     }
 
     /// Open one note, including every conflicting head.
@@ -572,7 +580,7 @@ impl Notebook {
         &self,
         build: impl Fn(&NoteCache) -> Result<Vec<u8>, CliError>,
     ) -> Result<(), CliError> {
-        for _ in 0..APPEND_TRIES {
+        for attempt in 0..WRITE_TRIES {
             self.ensure()?;
             let Some(held) = self.cache.borrow_mut().take() else {
                 return Err(CliError::message("could not open notes file"));
@@ -600,6 +608,7 @@ impl Notebook {
                 }
                 Err(StoreError::Stale) => {
                     // The cache was consumed. The next pass loads what the other writer wrote.
+                    pause_before_retry(attempt);
                 }
                 Err(_) => {
                     next.wires.pop();
@@ -874,13 +883,13 @@ impl Notebook {
         &self,
         build: impl Fn(Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>, CliError>,
     ) -> Result<(), CliError> {
-        for _ in 0..APPEND_TRIES {
+        for attempt in 0..WRITE_TRIES {
             let stamp = ambient_store::log_stamp(&self.local.notes_path)
                 .map_err(|_| CliError::message("could not open notes file"))?;
             let wires = build(load(&self.local)?)?;
             match write_log_if(&self.local.notes_path, &self.local.store_key, stamp, &wires) {
                 Ok(_) => return Ok(()),
-                Err(StoreError::Stale) => {}
+                Err(StoreError::Stale) => pause_before_retry(attempt),
                 Err(_) => return Err(CliError::message("could not write notes file")),
             }
         }

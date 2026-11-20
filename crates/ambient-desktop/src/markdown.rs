@@ -7137,7 +7137,7 @@ mod tests {
     #[test]
     fn a_paragraph_wraps_before_the_measure() {
         let rows = super::wrap_by("one two three", 7.0, 0..0, |text, _exact| {
-            text.chars().count() as f32
+            f32::from(u16::try_from(text.chars().count()).unwrap_or(u16::MAX))
         });
         assert_eq!(rows, vec![0..7, 8..13]);
         let wide = super::wrap_ranges(

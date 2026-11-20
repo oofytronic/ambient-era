@@ -64,11 +64,7 @@ fn edited_note_reaches_the_second_device() -> Result<(), String> {
         return Err(format!("second device missed a note: {notes:?}"));
     }
     let shown = book.show(id).map_err(|err| err.to_string())?;
-    let body = shown
-        .heads
-        .first()
-        .map(|head| head.body.as_str())
-        .unwrap_or("");
+    let body = shown.heads.first().map_or("", |head| head.body.as_str());
     if body != "buy milk and bread" {
         return Err(format!("edit did not arrive: {body}"));
     }

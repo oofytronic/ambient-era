@@ -300,10 +300,6 @@ pub(crate) fn root_from_phrase(phrase: &str) -> Result<[u8; 32], CliError> {
     Ok(root)
 }
 
-pub(crate) fn store_key_from_root(root: &[u8; 32]) -> [u8; 32] {
-    store_key(root)
-}
-
 pub(crate) fn v1_bytes_for_restore(
     root: &[u8; 32],
     sign: &[u8; 32],

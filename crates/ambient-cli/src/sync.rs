@@ -24,6 +24,7 @@ use sha2::{Digest, Sha256};
 use crate::keys::{self, Local};
 use crate::notes::CliError;
 use crate::session::Notebook;
+use crate::session::{WRITE_TRIES, pause_before_retry};
 
 pub(crate) fn start_loopback() -> Result<(), CliError> {
     let dir = loopback_store();
@@ -290,34 +291,31 @@ pub(crate) fn sync_chat(dir: &Path, url: &str, id: &str) -> Result<String, CliEr
     check_relay_url(url)?;
     let local = keys::open(dir)?;
     let mut slots = load_slots(dir, &local.store_key)?;
-    let Some(index) = slots
-        .iter()
-        .position(|slot| slot.space_id().as_deref() == Some(id))
+    let Some(slot) = slots
+        .iter_mut()
+        .find(|slot| slot.space_id().as_deref() == Some(id))
     else {
         return Err(CliError::message("no such conversation"));
     };
-    {
-        let slot = &mut slots[index];
-        let name = hex_id(&slot.card.mailbox);
-        let legacy = slot.cursor_path.clone();
-        slot.cursor = read_cursor_for(dir, url, &name, &legacy)?;
-        slot.cursor_path = state_dir(dir, url).join(name);
-    }
+    let name = hex_id(&slot.card.mailbox);
+    let legacy = slot.cursor_path.clone();
+    slot.cursor = read_cursor_for(dir, url, &name, &legacy)?;
+    slot.cursor_path = state_dir(dir, url).join(name);
     let mut requests = Vec::new();
     let mut pushed = read_pushed_for(dir, url)?;
-    let before = slots[index].wires.len();
-    let members = chat_members(&slots[index].wires)?;
+    let before = slot.wires.len();
+    let members = chat_members(&slot.wires)?;
     queue_pushes(
-        &slots[index].card.mailbox,
-        &slots[index].wires,
+        &slot.card.mailbox,
+        &slot.wires,
         &members,
         &mut pushed,
         &mut requests,
     )?;
     let push_count = requests.len();
     requests.push(encode_request(&Request::Get {
-        mailbox: slots[index].card.mailbox,
-        since: slots[index].cursor,
+        mailbox: slot.card.mailbox,
+        since: slot.cursor,
         limit: 200,
     }));
     let replies = exchange(url, &requests)?;
@@ -336,32 +334,28 @@ pub(crate) fn sync_chat(dir: &Path, url: &str, id: &str) -> Result<String, CliEr
         .ok_or_else(|| CliError::message("relay reply missing"))?;
     let mut got = Vec::new();
     for item in blobs_from(reply)? {
-        slots[index].cursor = item.cursor;
+        slot.cursor = item.cursor;
         if let Ok(plain) = open_blob(
-            slots[index].card.encryption_secret(),
-            &slots[index].card.mailbox,
+            slot.card.encryption_secret(),
+            &slot.card.mailbox,
             &item.blob,
         ) {
             got.push(plain);
         }
     }
-    if let Some(slot) = slots.get_mut(index) {
-        accept_chat(&mut slot.wires, &got);
-        slot.arrived = got;
-    }
-    if slots[index].wires.len() != before {
-        if let Some(parent) = slots[index].log_path.parent() {
+    accept_chat(&mut slot.wires, &got);
+    slot.arrived = got;
+    if slot.wires.len() != before {
+        if let Some(parent) = slot.log_path.parent() {
             fs::create_dir_all(parent).map_err(|_| CliError::message("could not write chats"))?;
         }
-        if let Some(slot) = slots.get_mut(index) {
-            write_slot(slot, &local.store_key)?;
-        }
+        write_slot(slot, &local.store_key)?;
     }
     let state = state_dir(dir, url);
     fs::create_dir_all(&state).map_err(|_| CliError::message("could not write cursor"))?;
-    write_cursor(&slots[index].cursor_path, slots[index].cursor)?;
+    write_cursor(&slot.cursor_path, slot.cursor)?;
     write_pushed_for(dir, url, &pushed)?;
-    let chats_in = slots[index].wires.len().saturating_sub(before);
+    let chats_in = slot.wires.len().saturating_sub(before);
     if push_count == 0 && chats_in == 0 {
         return Ok("Nothing new.".to_owned());
     }
@@ -591,7 +585,7 @@ pub(crate) fn say_citing(
         .map_err(|_| CliError::message("message is too long"))?;
     // The message links to the last one this device wrote. If a sync filed new messages while
     // this was being signed, read the log again and sign against what is there.
-    for _ in 0..MERGE_TRIES {
+    for attempt in 0..WRITE_TRIES {
         let mut slots = load_slots(dir, &local.store_key)?;
         let slot = slots
             .iter_mut()
@@ -609,7 +603,7 @@ pub(crate) fn say_citing(
         )?);
         match write_log_if(&slot.log_path, &local.store_key, slot.stamp, &slot.wires) {
             Ok(_) => return Ok(()),
-            Err(StoreError::Stale) => {}
+            Err(StoreError::Stale) => pause_before_retry(attempt),
             Err(_) => return Err(CliError::message("could not write chats")),
         }
     }
@@ -646,7 +640,6 @@ pub(crate) fn conversations(dir: &Path) -> Result<Vec<(String, String, String)>,
     Ok(chat_snap(dir)?.listed)
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) fn sync(dir: &Path, url: &str) -> Result<String, CliError> {
     sync_except(dir, url, None)
 }
@@ -665,42 +658,19 @@ pub(crate) fn sync_except(dir: &Path, url: &str, skip: Option<&str>) -> Result<S
         let legacy = slot.cursor_path.clone();
         slot.cursor = read_cursor_for(dir, url, &name, &legacy)?;
         slot.cursor_path = state_dir(dir, url).join(name);
-    }
-    let chat_at: Vec<usize> = slots
-        .iter()
-        .enumerate()
-        .filter(|(_, slot)| match skip {
+        slot.active = match skip {
             Some(id) => slot.space_id().as_deref() != Some(id),
             None => true,
-        })
-        .map(|(index, _)| index)
-        .collect();
-    let mut requests = Vec::new();
+        };
+        slot.before = slot.wires.len();
+    }
     let mut pushed = read_pushed_for(dir, url)?;
     let recipients = if notes.is_empty() {
         Vec::new()
     } else {
         Notebook::open(dir)?.recipients()?
     };
-    queue_pushes(
-        &local.device.mailbox,
-        &notes,
-        &recipients,
-        &mut pushed,
-        &mut requests,
-    )?;
-    queue_recovery(&local, &notes, &mut pushed, &mut requests)?;
-    for index in &chat_at {
-        let slot = &slots[*index];
-        let members = chat_members(&slot.wires)?;
-        queue_pushes(
-            &slot.card.mailbox,
-            &slot.wires,
-            &members,
-            &mut pushed,
-            &mut requests,
-        )?;
-    }
+    let mut requests = queue_all(&local, &notes, &recipients, &slots, &mut pushed)?;
     let push_count = requests.len();
     let device_since = read_cursor_for(dir, url, "device", &dir.join("cursor-device"))?;
     requests.push(encode_request(&Request::Get {
@@ -708,18 +678,100 @@ pub(crate) fn sync_except(dir: &Path, url: &str, skip: Option<&str>) -> Result<S
         since: device_since,
         limit: 500,
     }));
-    for index in &chat_at {
-        let slot = &slots[*index];
+    for slot in slots.iter().filter(|slot| slot.active) {
         requests.push(encode_request(&Request::Get {
             mailbox: slot.card.mailbox,
             since: slot.cursor,
             limit: 500,
         }));
     }
+    let active = slots.iter().filter(|slot| slot.active).count();
     let replies = exchange(url, &requests)?;
-    if replies.len() < push_count.saturating_add(1).saturating_add(chat_at.len()) {
+    if replies.len() < push_count.saturating_add(1).saturating_add(active) {
         return Err(CliError::message("relay reply missing"));
     }
+    check_pushes(&replies, push_count)?;
+    let (device_cursor, arrived) = read_device_inbox(
+        &local,
+        replies
+            .get(push_count)
+            .ok_or_else(|| CliError::message("relay reply missing"))?,
+        device_since,
+    )?;
+    let notes_before = notes.len();
+    let wires_before: usize = slots
+        .iter()
+        .filter(|slot| slot.active)
+        .map(|slot| slot.before)
+        .sum();
+    let mut dropped = Vec::new();
+    file_incoming(&mut local, &mut notes, &mut dropped, &arrived)?;
+    take_chat_replies(&mut slots, &replies, push_count.saturating_add(1))?;
+    let notes_before = if notes.len() == notes_before {
+        notes_before
+    } else {
+        write_notes(
+            &mut local,
+            &notes_path,
+            &mut notes_stamp,
+            &mut notes,
+            &arrived,
+            notes_before,
+        )?
+    };
+    let state = state_dir(dir, url);
+    fs::create_dir_all(&state).map_err(|_| CliError::message("could not write cursor"))?;
+    write_chat_slots(&mut slots, &local.store_key)?;
+    write_cursor(&state.join("device"), device_cursor)?;
+    write_pushed_for(dir, url, &pushed)?;
+    let notes_in = notes.len().saturating_sub(notes_before);
+    let chats_in: usize = slots
+        .iter()
+        .filter(|slot| slot.active)
+        .map(|slot| slot.wires.len())
+        .sum::<usize>()
+        .saturating_sub(wires_before);
+    if push_count == 0 && notes_in == 0 && chats_in == 0 {
+        return Ok("Nothing new.".to_owned());
+    }
+    Ok(format!(
+        "{push_count} sent, {notes_in} notes in, {chats_in} messages in"
+    ))
+}
+
+/// Everything this device has not sent yet: its notes, the recovery copy, and each conversation
+/// that is part of this sync. Returns the put requests.
+fn queue_all(
+    local: &Local,
+    notes: &[Vec<u8>],
+    recipients: &[ambient_spaces::MemberInfo],
+    slots: &[Slot],
+    pushed: &mut PushSet,
+) -> Result<Vec<String>, CliError> {
+    let mut requests = Vec::new();
+    queue_pushes(
+        &local.device.mailbox,
+        notes,
+        recipients,
+        pushed,
+        &mut requests,
+    )?;
+    queue_recovery(local, notes, pushed, &mut requests)?;
+    for slot in slots.iter().filter(|slot| slot.active) {
+        let members = chat_members(&slot.wires)?;
+        queue_pushes(
+            &slot.card.mailbox,
+            &slot.wires,
+            &members,
+            pushed,
+            &mut requests,
+        )?;
+    }
+    Ok(requests)
+}
+
+/// The relay's answers to the pushes. Any refusal stops the sync.
+fn check_pushes(replies: &[String], push_count: usize) -> Result<(), CliError> {
     for reply in replies.get(..push_count).unwrap_or(&[]) {
         match decode_response(reply) {
             Some(Response::Ok { .. }) => {}
@@ -727,15 +779,19 @@ pub(crate) fn sync_except(dir: &Path, url: &str, skip: Option<&str>) -> Result<S
             _ => return Err(CliError::message("relay reply rejected")),
         }
     }
-    let device_blobs = blobs_from(
-        replies
-            .get(push_count)
-            .ok_or_else(|| CliError::message("relay reply missing"))?,
-    )?;
-    let mut device_cursor = device_since;
+    Ok(())
+}
+
+/// Open what the relay holds for this device. Returns the new cursor and the wires.
+fn read_device_inbox(
+    local: &Local,
+    reply: &str,
+    since: u64,
+) -> Result<(u64, Vec<Vec<u8>>), CliError> {
+    let mut cursor = since;
     let mut arrived = Vec::new();
-    for item in device_blobs {
-        device_cursor = item.cursor;
+    for item in blobs_from(reply)? {
+        cursor = item.cursor;
         if let Ok(plain) = open_blob(
             local.device.encryption_secret(),
             &local.device.mailbox,
@@ -744,18 +800,15 @@ pub(crate) fn sync_except(dir: &Path, url: &str, skip: Option<&str>) -> Result<S
             arrived.push(plain);
         }
     }
-    let mut notes_before = notes.len();
-    let wire_counts: Vec<(usize, usize)> = chat_at
-        .iter()
-        .map(|index| (*index, slots[*index].wires.len()))
-        .collect();
-    let wires_before: usize = wire_counts.iter().map(|(_, count)| *count).sum();
-    let mut dropped = Vec::new();
-    file_incoming(&mut local, &mut notes, &mut dropped, &arrived)?;
-    for (nth, index) in chat_at.iter().enumerate() {
-        let slot = &mut slots[*index];
+    Ok((cursor, arrived))
+}
+
+/// File what the relay delivered into each conversation that is part of this sync. The replies
+/// come in the order the requests were made, which is the order of the active slots.
+fn take_chat_replies(slots: &mut [Slot], replies: &[String], first: usize) -> Result<(), CliError> {
+    for (nth, slot) in slots.iter_mut().filter(|slot| slot.active).enumerate() {
         let reply = replies
-            .get(push_count.saturating_add(1).saturating_add(nth))
+            .get(first.saturating_add(nth))
             .ok_or_else(|| CliError::message("relay reply missing"))?;
         let mut got = Vec::new();
         for item in blobs_from(reply)? {
@@ -771,62 +824,53 @@ pub(crate) fn sync_except(dir: &Path, url: &str, skip: Option<&str>) -> Result<S
         accept_chat(&mut slot.wires, &got);
         slot.arrived = got;
     }
-    if notes.len() != notes_before {
-        // If the notes moved while this waited on the relay, take what is there now and file
-        // what arrived into it again, so neither side's events are lost.
-        let mut written = false;
-        for _ in 0..MERGE_TRIES {
-            match write_log_if(&notes_path, &local.store_key, notes_stamp, &notes) {
-                Ok(_) => {
-                    written = true;
-                    break;
-                }
-                Err(StoreError::Stale) => {
-                    notes_stamp = log_stamp(&notes_path)
-                        .map_err(|_| CliError::message("could not open notes file"))?;
-                    notes = read_wires(&notes_path, &local.store_key)?;
-                    notes_before = notes.len();
-                    let mut elsewhere = Vec::new();
-                    file_incoming(&mut local, &mut notes, &mut elsewhere, &arrived)?;
-                }
-                Err(_) => return Err(CliError::message("could not write notes file")),
+    Ok(())
+}
+
+/// Write the notes file with what arrived. If the notes moved while this waited on the relay,
+/// take what is there now and file what arrived into it again, so neither side's events are
+/// lost. Returns the length to count "notes in" from, which is the new base after a merge.
+fn write_notes(
+    local: &mut Local,
+    path: &Path,
+    stamp: &mut Option<(u64, u64)>,
+    notes: &mut Vec<Vec<u8>>,
+    arrived: &[Vec<u8>],
+    mut base: usize,
+) -> Result<usize, CliError> {
+    for attempt in 0..WRITE_TRIES {
+        match write_log_if(path, &local.store_key, *stamp, notes) {
+            Ok(_) => return Ok(base),
+            Err(StoreError::Stale) => {
+                pause_before_retry(attempt);
+                *stamp =
+                    log_stamp(path).map_err(|_| CliError::message("could not open notes file"))?;
+                *notes = read_wires(path, &local.store_key)?;
+                base = notes.len();
+                let mut elsewhere = Vec::new();
+                file_incoming(local, notes, &mut elsewhere, arrived)?;
             }
-        }
-        if !written {
-            return Err(CliError::message(
-                "the notes changed while syncing. Try again",
-            ));
+            Err(_) => return Err(CliError::message("could not write notes file")),
         }
     }
-    let state = state_dir(dir, url);
-    fs::create_dir_all(&state).map_err(|_| CliError::message("could not write cursor"))?;
-    for (index, before) in wire_counts {
-        let Some(slot) = slots.get_mut(index) else {
-            continue;
-        };
-        if slot.wires.len() != before {
+    Err(CliError::message(
+        "the notes changed while syncing. Try again",
+    ))
+}
+
+/// Write each conversation log that changed, and every cursor.
+fn write_chat_slots(slots: &mut [Slot], key: &[u8; 32]) -> Result<(), CliError> {
+    for slot in slots.iter_mut().filter(|slot| slot.active) {
+        if slot.wires.len() != slot.before {
             if let Some(parent) = slot.log_path.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|_| CliError::message("could not write chats"))?;
             }
-            write_slot(slot, &local.store_key)?;
+            write_slot(slot, key)?;
         }
         write_cursor(&slot.cursor_path, slot.cursor)?;
     }
-    write_cursor(&state.join("device"), device_cursor)?;
-    write_pushed_for(dir, url, &pushed)?;
-    let notes_in = notes.len().saturating_sub(notes_before);
-    let chats_in: usize = chat_at
-        .iter()
-        .map(|index| slots[*index].wires.len())
-        .sum::<usize>()
-        .saturating_sub(wires_before);
-    if push_count == 0 && notes_in == 0 && chats_in == 0 {
-        return Ok("Nothing new.".to_owned());
-    }
-    Ok(format!(
-        "{push_count} sent, {notes_in} notes in, {chats_in} messages in"
-    ))
+    Ok(())
 }
 
 fn queue_pushes(
@@ -1139,6 +1183,11 @@ struct Slot {
     /// again into a log that changed while the sync was waiting on the relay.
     arrived: Vec<Vec<u8>>,
     cursor: u64,
+    /// Set for a whole sync: whether this conversation is part of it. One can be left out
+    /// because the window pulls it faster on its own.
+    active: bool,
+    /// How many wires the log had when the sync began.
+    before: usize,
 }
 
 impl Slot {
@@ -1254,22 +1303,26 @@ fn chat_stamps(dir: &Path) -> Option<Vec<(PathBuf, u64, u64)>> {
     Some(stamps)
 }
 
+// FNV-1a over the paths and stamps. It only has to change when a log changes.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0100_0000_01b3;
+
 /// A number that changes when a conversation log changes.
 ///
 /// It only stats the logs. It does not open them. `None` means a log could not be stated.
 #[must_use]
 pub(crate) fn conversation_generation(dir: &Path) -> Option<u64> {
     let stamps = chat_stamps(dir)?;
-    let mut hash = 0xcbf29ce484222325_u64;
+    let mut hash = FNV_OFFSET;
     for (path, counter, len) in stamps {
         for byte in path.to_string_lossy().as_bytes() {
             hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
+            hash = hash.wrapping_mul(FNV_PRIME);
         }
         hash ^= counter;
-        hash = hash.wrapping_mul(0x100000001b3);
+        hash = hash.wrapping_mul(FNV_PRIME);
         hash ^= len;
-        hash = hash.wrapping_mul(0x100000001b3);
+        hash = hash.wrapping_mul(FNV_PRIME);
     }
     Some(hash)
 }
@@ -1329,6 +1382,8 @@ fn open_slot(
         wires: read_wires(log_path, key)?,
         stamp,
         arrived: Vec::new(),
+        active: false,
+        before: 0,
         cursor: read_cursor(cursor_path)?,
         log_path: log_path.to_path_buf(),
         cursor_path: cursor_path.to_path_buf(),
@@ -1401,23 +1456,20 @@ fn accept_chat(wires: &mut Vec<Vec<u8>>, arrived: &[Vec<u8>]) {
     }
 }
 
-/// How many times a write that found its file changed is merged again. Two writers colliding is
-/// rare and a run of eight losses is not a thing that happens.
-const MERGE_TRIES: usize = 8;
-
 /// Write a conversation's log only if it is still the file that was read.
 ///
 /// If a message was written while the sync waited on the relay, the log is read again, what the
 /// relay delivered is merged into it again, and the write is retried. Nothing either side added
 /// is lost. A message said in the meantime is pushed by the next sync, as any unsent one is.
 fn write_slot(slot: &mut Slot, key: &[u8; 32]) -> Result<(), CliError> {
-    for _ in 0..MERGE_TRIES {
+    for attempt in 0..WRITE_TRIES {
         match write_log_if(&slot.log_path, key, slot.stamp, &slot.wires) {
             Ok(stamp) => {
                 slot.stamp = Some(stamp);
                 return Ok(());
             }
             Err(StoreError::Stale) => {
+                pause_before_retry(attempt);
                 slot.stamp = log_stamp(&slot.log_path)
                     .map_err(|_| CliError::message("could not write chats"))?;
                 slot.wires = read_wires(&slot.log_path, key)?;
