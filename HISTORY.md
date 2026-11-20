@@ -4,6 +4,12 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-20 — small things for daily use
+
+Enter in a note's title moves to the writing. The Tasks tab puts the cursor in the add field when it opens and keeps it there after a task is added. Ctrl or Cmd with a full stop turns focus on and off. A Keys card in settings lists every key, because most have no button to find them by.
+
+Ctrl or Cmd with Shift and D adds the word at the caret to a personal dictionary, so a name or a term of the trade stops being underlined. It is a plain file, `dictionary`, in the notebook folder, one lowercase word per line. It stays on this computer, like the names and the reading marks, and it is not sent. Its plurals and possessives are fine too.
+
 ## 2026-11-20 — writing with nothing else in view
 
 An icon at the top right of a note turns on focus. Both panels go away, and the title shrinks to a small field at the top right with a button beside it that brings the formatting bar in. The round buttons at the lower right slide off to the right and leave a handle to pull them back, and the bar slides up out of sight. The tags and the note warning line go too. The panels' open or closed state is not changed, so leaving focus puts everything back at once. Focus is for the wide layout and a note being written. It is not for reading a book or an older version.

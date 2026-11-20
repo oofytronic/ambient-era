@@ -137,6 +137,8 @@ struct App {
     call_draft: String,
     wipe_draft: String,
     aliases: BTreeMap<String, String>,
+    /// Words this person added to the spellchecker. Kept on this computer, in `dictionary`.
+    my_words: BTreeSet<String>,
     syncing: bool,
     edited_at: Option<Instant>,
     /// Bumps when the pause wait starts over, so a late wake cannot save another note.
@@ -417,6 +419,10 @@ enum Message {
     FinishAlias,
     /// The icon at the top right of a note: write with nothing else in view, or come back.
     ToggleFocus,
+    /// Enter in the title: start writing.
+    TitleSubmit,
+    /// Ctrl or Cmd + Shift + D: tell the spellchecker the word at the caret is fine.
+    AddWord,
     /// The handle at the lower right in focus: pull the round buttons in, or send them away.
     FocusTools,
     /// The button beside the small title in focus: pull the formatting bar in, or send it away.
@@ -778,6 +784,7 @@ impl App {
             call_draft: String::new(),
             wipe_draft: String::new(),
             aliases: BTreeMap::new(),
+            my_words: BTreeSet::new(),
             syncing: false,
             edited_at: None,
             pause_token: 0,
@@ -870,6 +877,10 @@ impl App {
         for (id, name) in profile::load_names(&app.dir) {
             app.aliases.insert(id, name);
         }
+        app.my_words = profile::load_words(&app.dir).into_iter().collect();
+        if !app.my_words.is_empty() {
+            app.share_words();
+        }
         for (id, count) in profile::load_seen(&app.dir) {
             app.seen_count.insert(id, count);
         }
@@ -912,6 +923,13 @@ impl App {
                     && matches!(key.as_ref(), Key::Character(text) if text.eq_ignore_ascii_case("f")) =>
             {
                 Some(Message::FindOpen)
+            }
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
+                if status == iced::event::Status::Ignored
+                    && (modifiers.control() || modifiers.command())
+                    && matches!(key.as_ref(), Key::Character(".")) =>
+            {
+                Some(Message::ToggleFocus)
             }
             _ => None,
         });
@@ -1170,7 +1188,7 @@ impl App {
                 self.sheet = Sheet::None;
                 self.detail = false;
                 self.sync_watch();
-                Task::none()
+                focus_named("task-input")
             }
             Message::ShowChat => {
                 if self.compact()
@@ -1485,10 +1503,12 @@ impl App {
             }
             Message::AddTask => {
                 let follow = self.add_loose_task();
+                // The cursor stays in the field, so the next task can be typed at once.
+                let back = focus_named("task-input");
                 if self.editor_dirty() {
-                    Task::batch([follow, self.start_save(true)])
+                    Task::batch([follow, self.start_save(true), back])
                 } else {
-                    follow
+                    Task::batch([follow, back])
                 }
             }
             Message::AskDelete => {
@@ -1596,6 +1616,10 @@ impl App {
                 None => Task::none(),
             },
             Message::ToggleFocus => {
+                // Focus is for writing a note in the wide layout. Elsewhere there is nothing to turn on.
+                if !self.focus && (!self.editing_note() || self.compact()) {
+                    return Task::none();
+                }
                 self.focus = !self.focus;
                 // Going in, the buttons and the bar slide away. Coming out they are back at once.
                 self.slide_tools.set(!self.focus);
@@ -1604,6 +1628,11 @@ impl App {
                     self.slide_tools.jump(true);
                     self.slide_bar.jump(true);
                 }
+                Task::none()
+            }
+            Message::TitleSubmit => focus_named("note-body"),
+            Message::AddWord => {
+                self.add_word();
                 Task::none()
             }
             Message::FocusTools => {
@@ -2212,6 +2241,7 @@ impl App {
         let ink = self.ink();
         let add = row![
             text_input("Add a task", &self.task_draft)
+                .id(iced::widget::Id::new("task-input"))
                 .on_input(Message::TaskDraft)
                 .on_submit(Message::AddTask)
                 .padding(10)
@@ -2896,6 +2926,7 @@ impl App {
                     text_input("Title", &self.title_text)
                         .id(iced::widget::Id::new("note-title"))
                         .on_input(Message::TitleChanged)
+                        .on_submit(Message::TitleSubmit)
                         .font(serif())
                         .size(15)
                         .padding([2.0, 0.0])
@@ -5043,6 +5074,7 @@ impl App {
                     text_input("Title", &self.title_text)
                         .id(iced::widget::Id::new("note-title"))
                         .on_input(Message::TitleChanged)
+                        .on_submit(Message::TitleSubmit)
                         .font(serif())
                         .size(if self.compact() { 32.0 } else { 36.0 })
                         .padding([2.0, 0.0])
@@ -5572,6 +5604,35 @@ impl App {
             ]);
         }
         focus
+    }
+
+    fn share_words(&self) {
+        let words: Vec<String> = self.my_words.iter().cloned().collect();
+        markdown::set_personal_words(&words);
+    }
+
+    /// Add the word at the caret to the dictionary, and check the page again so its underline goes.
+    fn add_word(&mut self) {
+        if !self.editing_note() {
+            return;
+        }
+        let Some(word) = markdown::word_at(&self.body.text(), self.body.caret_byte()) else {
+            self.say("Put the cursor in a word first.");
+            return;
+        };
+        if !self.my_words.insert(word.clone()) {
+            self.say("That word is already in your dictionary.");
+            return;
+        }
+        let words: Vec<String> = self.my_words.iter().cloned().collect();
+        if let Err(err) = profile::store_words(&self.dir, &words) {
+            self.message = err;
+            return;
+        }
+        self.share_words();
+        self.proof_body.clear();
+        self.maybe_proof();
+        self.say(&format!("Added {word} to your dictionary."));
     }
 
     fn say(&mut self, text: &str) {
@@ -6706,6 +6767,7 @@ impl App {
                         self.recovery_sheet(),
                         self.people_section(),
                         self.data_section(),
+                        Self::keys_section(),
                     ]
                     .spacing(16)
                     .width(width)
@@ -6724,6 +6786,46 @@ impl App {
         .width(Fill)
         .height(Fill)
         .into()
+    }
+
+    /// The keys, since most of them have no button to find them by.
+    fn keys_section() -> Element<'static, Message> {
+        const KEYS: [(&str, &str); 17] = [
+            ("Ctrl or Cmd + S", "Save the note now"),
+            ("Ctrl or Cmd + N", "A new note"),
+            ("Ctrl or Cmd + F", "Find in the note"),
+            ("Ctrl or Cmd + .", "Write without distractions, or leave it"),
+            ("Ctrl or Cmd + Z", "Undo"),
+            ("Ctrl or Cmd + Shift + Z", "Redo"),
+            ("Ctrl or Cmd + B", "Bold"),
+            ("Ctrl or Cmd + I", "Italic"),
+            ("Ctrl or Cmd + K", "Link"),
+            ("Ctrl or Cmd + E", "Code"),
+            ("Ctrl or Cmd + Shift + X", "Strike"),
+            ("Ctrl or Cmd + Shift + H", "Highlight"),
+            ("Tab", "Nest a list item, or every one you have selected"),
+            ("Shift + Tab", "Bring a list item out one level"),
+            (
+                "Enter on an empty item",
+                "End the list, or step a nested item out",
+            ),
+            (
+                "Ctrl or Cmd + Shift + D",
+                "Add the underlined word to your dictionary",
+            ),
+            ("Enter in the title", "Start writing"),
+        ];
+        let mut rows = column![].spacing(8);
+        for (keys, does) in KEYS {
+            rows = rows.push(
+                row![
+                    text(keys).size(14).width(210),
+                    text(does).size(14).width(Fill),
+                ]
+                .spacing(12),
+            );
+        }
+        settings_card("Keys", rows.into())
     }
 
     fn you_section(&self) -> Element<'_, Message> {
@@ -8422,6 +8524,7 @@ fn binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>
         (Some("e" | "E"), true, false) => Some(format_binding(FormatKind::Code)),
         (Some("x" | "X"), true, true) => Some(format_binding(FormatKind::Strike)),
         (Some("h" | "H"), true, true) => Some(format_binding(FormatKind::Highlight)),
+        (Some("d" | "D"), true, true) => Some(text_editor::Binding::Custom(Message::AddWord)),
         (Some("z" | "Z"), true, false) => Some(text_editor::Binding::Custom(Message::Undo)),
         (Some("f" | "F"), true, _) => Some(text_editor::Binding::Custom(Message::FindOpen)),
         (Some("s"), true, _) => Some(text_editor::Binding::Custom(Message::Save)),
@@ -9073,21 +9176,22 @@ mod tests_support {
     pub(super) fn take_writes() -> Vec<Write> {
         WRITES.with(|writes| std::mem::take(&mut *writes.borrow_mut()))
     }
+
+    /// The published notebook and the personal dictionary are each one per process, so the
+    /// tests that touch them take turns.
+    pub(crate) fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        TURN.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// Tests that drive a real `App` on a real folder, through the same `update` the window uses.
 #[cfg(test)]
 mod app_tests {
-    use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, MutexGuard, PoisonError};
-
+    use super::tests_support::one_at_a_time;
     use super::{App, Message, Notebook, tests_support, write_snapshot};
-
-    /// The published notebook is one slot per process, so these tests take turns.
-    fn one_at_a_time() -> MutexGuard<'static, ()> {
-        static TURN: Mutex<()> = Mutex::new(());
-        TURN.lock().unwrap_or_else(PoisonError::into_inner)
-    }
+    use std::path::{Path, PathBuf};
 
     fn folder(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("aerodash-{name}-{}", std::process::id()));
@@ -9312,5 +9416,49 @@ mod app_tests {
         assert_eq!(slide.since, before);
         slide.jump(false);
         assert!(slide.shown() < f32::EPSILON && !slide.moving());
+    }
+
+    #[test]
+    fn a_word_is_added_to_the_dictionary_from_the_caret() {
+        let _turn = one_at_a_time();
+        let dir = folder("dictionary");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        app.body.load("a zzquuxword here");
+        app.body.place_byte(5);
+        let _ = app.update(Message::AddWord);
+        assert!(app.my_words.contains("zzquuxword"), "{}", app.message);
+        assert!(app.message.contains("zzquuxword"));
+        assert_eq!(super::profile::load_words(&dir), ["zzquuxword"]);
+
+        // Again says so, and does not write twice.
+        let _ = app.update(Message::AddWord);
+        assert!(app.message.contains("already"), "{}", app.message);
+        assert_eq!(app.my_words.len(), 1);
+
+        // Between words there is nothing to add.
+        app.body.place_byte(1);
+        let _ = app.update(Message::AddWord);
+        assert!(app.message.contains("cursor"), "{}", app.message);
+        assert_eq!(app.my_words.len(), 1);
+
+        // A new session reads the file back.
+        let (again, _) = App::at(dir.clone());
+        assert!(again.my_words.contains("zzquuxword"));
+        super::markdown::set_personal_words(&[]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_dictionary_file_ignores_what_is_not_a_word() {
+        let dir = folder("dictionary-file");
+        std::fs::create_dir_all(&dir).expect("dir");
+        std::fs::write(
+            dir.join("dictionary"),
+            "good\nNo\nab\nhas space\n123\nfine'ish\n\n",
+        )
+        .expect("write");
+        assert_eq!(super::profile::load_words(&dir), ["good", "fine'ish"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

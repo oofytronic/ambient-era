@@ -3452,12 +3452,47 @@ fn clitic_spelled(dict: &HashSet<&'static str>, head: &str, tail: &str) -> bool 
     }
 }
 
+/// Words the person added to their own dictionary. The proof runs on its own thread, so this is
+/// shared and not kept on the window.
+static PERSONAL: std::sync::RwLock<BTreeSet<String>> = std::sync::RwLock::new(BTreeSet::new());
+
+/// Replace the personal words. Each is lowercase letters.
+pub(crate) fn set_personal_words(words: &[String]) {
+    let mut held = PERSONAL
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *held = words.iter().cloned().collect();
+}
+
+fn is_personal(bare: &str) -> bool {
+    PERSONAL
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(bare)
+}
+
+/// The word at a byte, as it would go in the dictionary: lowercase letters, three or more.
+/// `None` when the caret is not in a word, or the word has a digit or a symbol in it.
+pub(super) fn word_at(text: &str, byte: usize) -> Option<String> {
+    let (start, end) = word_bounds(text, byte);
+    let word = text.get(start..end)?.trim_matches('\'');
+    if word.len() < 3
+        || !word
+            .bytes()
+            .all(|ch| ch.is_ascii_alphabetic() || ch == b'\'')
+    {
+        return None;
+    }
+    Some(word.to_ascii_lowercase())
+}
+
 fn spelled(dict: &HashSet<&'static str>, bare: &str) -> bool {
     dict.contains(bare)
+        || is_personal(bare)
         || contraction(bare)
         || bare
             .strip_suffix('s')
-            .is_some_and(|stem| stem.len() >= 3 && dict.contains(stem))
+            .is_some_and(|stem| stem.len() >= 3 && (dict.contains(stem) || is_personal(stem)))
 }
 
 fn contraction(bare: &str) -> bool {
@@ -6849,6 +6884,41 @@ mod tests {
         let two = "- a\n- b";
         let change = super::shift_items(two, &selecting(two, 0, 4), false).expect("first only");
         assert_eq!(after(two, &change).0, "  - a\n- b");
+    }
+
+    #[test]
+    fn a_word_in_the_personal_dictionary_is_not_underlined() {
+        let _turn = crate::tests_support::one_at_a_time();
+        let word = "zzqxfrobnicate";
+        let line = format!("we {word} now");
+        assert_eq!(flagged(&line), vec![word.to_owned()]);
+        super::set_personal_words(&[word.to_owned()]);
+        assert_eq!(flagged(&line), Vec::<String>::new());
+        // Its endings are fine too.
+        assert_eq!(
+            flagged(&format!("{word}s and {word}'s")),
+            Vec::<String>::new()
+        );
+        super::set_personal_words(&[]);
+        assert_eq!(flagged(&line), vec![word.to_owned()]);
+    }
+
+    #[test]
+    fn the_word_to_add_is_the_one_at_the_caret() {
+        assert_eq!(
+            super::word_at("a keypair here", 4),
+            Some("keypair".to_owned())
+        );
+        // At the end of a word counts.
+        assert_eq!(
+            super::word_at("a keypair here", 9),
+            Some("keypair".to_owned())
+        );
+        assert_eq!(super::word_at("Sam's", 2), Some("sam's".to_owned()));
+        assert_eq!(super::word_at("a  b", 2), None);
+        assert_eq!(super::word_at("ab", 1), None, "too short");
+        assert_eq!(super::word_at("h264 codec", 2), None, "has a digit");
+        assert_eq!(super::word_at("snake_case", 3), None, "has a symbol");
     }
 
     fn flagged(text: &str) -> Vec<String> {

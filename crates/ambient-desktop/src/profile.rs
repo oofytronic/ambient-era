@@ -89,6 +89,34 @@ pub(super) fn store_names(dir: &Path, names: &[(String, String)]) -> Result<(), 
     fs::write(dir.join("names"), text).map_err(|_| "could not write names".to_owned())
 }
 
+/// Words this person told the spellchecker are fine. One per line, lowercase letters. Not
+/// sealed and not sent. It is a list of words, not notes, and it stays on this computer.
+pub(super) fn load_words(dir: &Path) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(dir.join("dictionary")) else {
+        return Vec::new();
+    };
+    text.lines()
+        .map(str::trim)
+        .filter(|word| {
+            word.len() >= 3
+                && word
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'\'')
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+pub(super) fn store_words(dir: &Path, words: &[String]) -> Result<(), String> {
+    let mut text = String::new();
+    for word in words {
+        text.push_str(word);
+        text.push('\n');
+    }
+    fs::write(dir.join("dictionary"), text)
+        .map_err(|_| "could not write your dictionary".to_owned())
+}
+
 /// How far this computer has read each conversation. Not sealed. Not sent.
 pub(super) fn load_seen(dir: &Path) -> Vec<(String, usize)> {
     let Ok(text) = fs::read_to_string(dir.join("seen")) else {
