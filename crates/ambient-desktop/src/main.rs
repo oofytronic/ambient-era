@@ -6531,6 +6531,13 @@ impl App {
     }
 
     fn reset_after_wipe(&mut self) {
+        // The words in the personal dictionary are from the notes that were just erased. They
+        // must not be written back into the next notebook's file.
+        self.my_words.clear();
+        self.share_words();
+        self.focus = false;
+        self.slide_tools.jump(true);
+        self.slide_bar.jump(true);
         self.catalog.clear();
         self.notes.clear();
         self.tasks.clear();
@@ -9459,6 +9466,28 @@ mod app_tests {
         )
         .expect("write");
         assert_eq!(super::profile::load_words(&dir), ["good", "fine'ish"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn erasing_the_notebook_erases_the_dictionary_too() {
+        let _turn = one_at_a_time();
+        let dir = folder("wipe-dictionary");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        app.body.load("a zzquuxwipe here");
+        app.body.place_byte(5);
+        let _ = app.update(Message::AddWord);
+        assert!(dir.join("dictionary").is_file());
+        assert!(app.my_words.contains("zzquuxwipe"));
+
+        let _ = app.update(Message::WipeDraft("delete".to_owned()));
+        let _ = app.update(Message::ConfirmWipe);
+        assert!(!dir.join("dictionary").exists(), "the file is gone");
+        assert!(app.my_words.is_empty(), "and so are the words in memory");
+        // A word added to the next notebook does not bring the old one back.
+        assert!(super::profile::load_words(&dir).is_empty());
+        super::markdown::set_personal_words(&[]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
