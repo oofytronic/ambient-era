@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-20 — scrollbars are hidden
+
+Every scrollable in the window goes through `vscroll` and `hscroll`, so they share one rule. A scrollbar is no longer drawn at rest. Scrolling a pane shows a faint thin thumb for about 0.7 seconds, only on the pane under the pointer, and then it goes. A clear thumb shows while the pointer is on the bar itself, so a person who wants to drag it still can. Hovering a pane does not show it. Scrolling is how the bar is asked for, so typing does not draw it and does not start a timer. The scroll arms the same one-shot wake the pause and the search use, and the wake only redraws.
+
 ## 2026-11-20 — a new device's first note is not dropped, and a sync no longer overwrites a write
 
 A note written on a newly enrolled device could vanish from every other device, about four runs in ten in `restored_folder_writes_back`. The note was never lost from the log, but the projection refused it. A device becomes a member when a `space.member-add` is applied. Its first note has no earlier event, so it is ready at once, and events were applied in the order of their random ids. When the note came first its signer was not a member yet, so it was skipped as `NotMember`, and the skip moved that signer's chain past it for good.

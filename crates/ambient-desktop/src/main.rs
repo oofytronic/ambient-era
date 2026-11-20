@@ -145,6 +145,8 @@ struct App {
     /// Bumps when the search wait starts over. Only the latest query is run.
     search_token: u64,
     search_armed: bool,
+    scroll_token: u64,
+    scroll_armed: bool,
     writes: u64,
     size: Size,
     detail: bool,
@@ -265,6 +267,8 @@ enum InvitePick {
 enum Wake {
     Pause(u64),
     Search(u64),
+    /// The last scroll was a moment ago, so the scrollbar can go away.
+    Scroll(u64),
 }
 
 #[derive(Clone, Debug)]
@@ -380,6 +384,8 @@ enum Message {
     CancelSend,
     Breeze,
     Woke(Wake),
+    /// A pane was scrolled. Only records that, so the scrollbar can show for a moment.
+    Scrolled,
     Opened(Result<(), String>),
     Saved(
         u64,
@@ -750,6 +756,8 @@ impl App {
             pause_armed: false,
             search_token: 0,
             search_armed: false,
+            scroll_token: 0,
+            scroll_armed: false,
             writes: 0,
             size: Size::new(1280.0, 820.0),
             detail: false,
@@ -904,6 +912,12 @@ impl App {
         if app.search_armed {
             parts.push(iced::Subscription::run_with(
                 Wake::Search(app.search_token),
+                wake_stream,
+            ));
+        }
+        if app.scroll_armed {
+            parts.push(iced::Subscription::run_with(
+                Wake::Scroll(app.scroll_token),
                 wake_stream,
             ));
         }
@@ -1468,8 +1482,20 @@ impl App {
                     }
                     Task::none()
                 }
-                Wake::Pause(_) | Wake::Search(_) => Task::none(),
+                Wake::Scroll(token) if self.scroll_armed && token == self.scroll_token => {
+                    // Nothing to change. Handling the wake redraws, and the style now sees that
+                    // the last scroll is old, so the thumb goes.
+                    self.scroll_armed = false;
+                    Task::none()
+                }
+                Wake::Pause(_) | Wake::Search(_) | Wake::Scroll(_) => Task::none(),
             },
+            Message::Scrolled => {
+                note_scroll();
+                self.scroll_token = self.scroll_token.wrapping_add(1);
+                self.scroll_armed = true;
+                Task::none()
+            }
             Message::Opened(result) => self.finish_open(result),
             Message::Saved(token, result, title, body) => {
                 self.finish_save(token, result, title, body)
@@ -6725,6 +6751,7 @@ fn wake_stream(wake: &Wake) -> iced::futures::stream::BoxStream<'static, Message
     let delay = match *wake {
         Wake::Pause(_) => Duration::from_millis(700),
         Wake::Search(_) => Duration::from_millis(200),
+        Wake::Scroll(_) => SCROLL_SHOWN + Duration::from_millis(200),
     };
     let fired = *wake;
     iced::futures::stream::once(async move {
@@ -7300,20 +7327,47 @@ fn slim_bar() -> scrollable::Scrollbar {
 fn vscroll<'a>(content: impl Into<Element<'a, Message>>) -> scrollable::Scrollable<'a, Message> {
     scrollable(content)
         .direction(scrollable::Direction::Vertical(slim_bar()))
+        .on_scroll(|_| Message::Scrolled)
         .style(scroll_style)
 }
 
 fn hscroll<'a>(content: impl Into<Element<'a, Message>>) -> scrollable::Scrollable<'a, Message> {
     scrollable(content)
         .direction(scrollable::Direction::Horizontal(slim_bar()))
+        .on_scroll(|_| Message::Scrolled)
         .style(scroll_style)
 }
 
+/// How long a scrollbar stays visible after the last scroll.
+const SCROLL_SHOWN: Duration = Duration::from_millis(700);
+
+/// Milliseconds since the start of the process at the last scroll, or `u64::MAX` for never.
+static LAST_SCROLL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+fn since_start() -> Duration {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed()
+}
+
+fn note_scroll() {
+    let at = u64::try_from(since_start().as_millis()).unwrap_or(u64::MAX - 1);
+    LAST_SCROLL.store(at, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn scrolled_recently() -> bool {
+    let last = LAST_SCROLL.load(std::sync::atomic::Ordering::Relaxed);
+    let now = u64::try_from(since_start().as_millis()).unwrap_or(u64::MAX - 1);
+    last != u64::MAX
+        && now.saturating_sub(last) < u64::try_from(SCROLL_SHOWN.as_millis()).unwrap_or(0)
+}
+
+/// A scrollbar is not drawn. It shows faintly for a moment after the pane under the pointer is
+/// scrolled, and clearly while the pointer is on the bar itself, so it can still be dragged.
 fn scroll_style(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
     let mut style = scrollable::default(theme, status);
     let ink = ink_of(theme);
     let thumb = Color {
-        a: if scroll_hot(status) { 0.62 } else { 0.22 },
+        a: thumb_alpha(status, scrolled_recently()),
         ..ink.muted
     };
     let rail = scrollable::Rail {
@@ -7336,6 +7390,22 @@ fn scroll_style(theme: &Theme, status: scrollable::Status) -> scrollable::Style 
     style.horizontal_rail = rail;
     style.gap = None;
     style
+}
+
+/// Opacity of the thumb. `recent` is whether the last scroll was a moment ago.
+fn thumb_alpha(status: scrollable::Status, recent: bool) -> f32 {
+    if scroll_hot(status) {
+        0.62
+    } else if recent
+        && matches!(
+            status,
+            scrollable::Status::Hovered { .. } | scrollable::Status::Dragged { .. }
+        )
+    {
+        0.32
+    } else {
+        0.0
+    }
 }
 
 fn scroll_hot(status: scrollable::Status) -> bool {
@@ -8541,5 +8611,72 @@ mod history_tests {
         assert_eq!(edit_burst(&pasted), Some(Burst::Break));
         let typed = text_editor::Action::Edit(text_editor::Edit::Insert('a'));
         assert_eq!(edit_burst(&typed), Some(Burst::Type));
+    }
+}
+
+#[cfg(test)]
+mod scrollbar_tests {
+    use iced::widget::scrollable::Status;
+
+    use super::{scroll_hot, thumb_alpha};
+
+    fn resting() -> Status {
+        Status::Active {
+            is_horizontal_scrollbar_disabled: false,
+            is_vertical_scrollbar_disabled: false,
+        }
+    }
+
+    fn over_pane() -> Status {
+        Status::Hovered {
+            is_horizontal_scrollbar_hovered: false,
+            is_vertical_scrollbar_hovered: false,
+            is_horizontal_scrollbar_disabled: false,
+            is_vertical_scrollbar_disabled: false,
+        }
+    }
+
+    fn over_bar() -> Status {
+        Status::Hovered {
+            is_horizontal_scrollbar_hovered: false,
+            is_vertical_scrollbar_hovered: true,
+            is_horizontal_scrollbar_disabled: false,
+            is_vertical_scrollbar_disabled: false,
+        }
+    }
+
+    fn dragging() -> Status {
+        Status::Dragged {
+            is_horizontal_scrollbar_dragged: false,
+            is_vertical_scrollbar_dragged: true,
+            is_horizontal_scrollbar_disabled: false,
+            is_vertical_scrollbar_disabled: false,
+        }
+    }
+
+    #[test]
+    fn a_scrollbar_is_not_drawn_at_rest() {
+        assert!(thumb_alpha(resting(), false) < f32::EPSILON);
+        // Hovering a pane is not scrolling it.
+        assert!(thumb_alpha(over_pane(), false) < f32::EPSILON);
+        // A pane the pointer is not over stays bare even right after another one scrolled.
+        assert!(thumb_alpha(resting(), true) < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_scrollbar_shows_for_a_moment_after_the_pane_under_the_pointer_scrolls() {
+        let shown = thumb_alpha(over_pane(), true);
+        assert!(
+            shown > 0.0 && shown < 0.62,
+            "faint, not the full thumb: {shown}"
+        );
+    }
+
+    #[test]
+    fn the_bar_can_still_be_found_and_dragged() {
+        assert!(scroll_hot(over_bar()) && scroll_hot(dragging()));
+        assert!(!scroll_hot(over_pane()) && !scroll_hot(resting()));
+        assert!(thumb_alpha(over_bar(), false) > thumb_alpha(over_pane(), true));
+        assert!(thumb_alpha(dragging(), false) > 0.5);
     }
 }
