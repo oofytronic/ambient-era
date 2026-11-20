@@ -188,6 +188,8 @@ struct App {
     chat_query: String,
     hide_done: bool,
     confirm_clear: bool,
+    /// The Tasks note is shown over the Tasks tab.
+    tasks_note_open: bool,
     task_due_text: String,
     find_open: bool,
     find_query: String,
@@ -442,6 +444,8 @@ enum Message {
     BackUp,
     /// A copy finished, or failed.
     BackedUp(Result<profile::BackupReport, String>),
+    /// Show or close the Tasks note over the Tasks tab.
+    ToggleTasksNote,
     /// The icon at the top of the right panel: this note's settings, or its links.
     ToggleNoteSettings,
     /// The pointer went onto (true) or off (false) a note's row.
@@ -843,6 +847,7 @@ impl App {
             chat_query: String::new(),
             hide_done: false,
             confirm_clear: false,
+            tasks_note_open: false,
             task_due_text: String::new(),
             find_open: false,
             find_query: String::new(),
@@ -1220,6 +1225,7 @@ impl App {
                 Task::none()
             }
             Message::ShowTasks => {
+                self.tasks_note_open = false;
                 self.rebuild_tasks();
                 self.screen = Screen::Tasks;
                 self.sheet = Sheet::None;
@@ -1678,6 +1684,10 @@ impl App {
             Message::BackUp => self.start_backup(),
             Message::BackedUp(result) => {
                 self.finish_backup(result);
+                Task::none()
+            }
+            Message::ToggleTasksNote => {
+                self.tasks_note_open = !self.tasks_note_open;
                 Task::none()
             }
             Message::ToggleNoteSettings => {
@@ -2161,9 +2171,17 @@ impl App {
         let mut list = column![].spacing(2).width(Fill);
         let tagged = self.catalog.iter().any(|note| !note.tags.is_empty());
         if tagged {
-            list = list.push(self.tag_row(None, self.catalog.len()));
+            list = list.push(
+                self.tag_row(
+                    None,
+                    self.catalog
+                        .iter()
+                        .filter(|note| !is_tasks_note(note))
+                        .count(),
+                ),
+            );
             let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-            for note in &self.catalog {
+            for note in self.catalog.iter().filter(|note| !is_tasks_note(note)) {
                 for tag in &note.tags {
                     *counts.entry(tag.as_str()).or_default() += 1;
                 }
@@ -2368,6 +2386,9 @@ impl App {
         if self.tasks.iter().any(|task| task.done) {
             tools = tools.push(ghost_label("Clear done", Message::AskClearDone));
         }
+        if self.catalog.iter().any(is_tasks_note) {
+            tools = tools.push(ghost_label("The Tasks note", Message::ToggleTasksNote));
+        }
         let list = self.task_groups(&ink);
         let mut page = column![add].spacing(12).width(Fill).height(Fill);
         if let Some((_, title)) = &self.task_cite {
@@ -2399,7 +2420,21 @@ impl App {
         if self.confirm_clear {
             page = page.push(self.clear_confirm());
         }
-        page.push(vscroll(list).height(Fill).width(Fill)).into()
+        let page = page.push(vscroll(list).height(Fill).width(Fill));
+        if self.tasks_note_open {
+            return stack![
+                page,
+                container(self.tasks_note_card())
+                    .width(Fill)
+                    .height(Fill)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .align_y(iced::alignment::Vertical::Center),
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into();
+        }
+        page.into()
     }
 
     fn task_groups(&self, ink: &Ink) -> Element<'_, Message> {
@@ -3612,13 +3647,56 @@ impl App {
                 .cloned()
                 .collect()
         };
+        // The Tasks note is the Tasks tab's. It is not in the list of notes.
+        let base = base.into_iter().filter(|note| !is_tasks_note(note));
         self.notes = match &self.tag {
             Some(tag) => base
-                .into_iter()
                 .filter(|note| note.tags.iter().any(|item| item == tag))
                 .collect(),
-            None => base,
+            None => base.collect(),
         };
+    }
+
+    /// The Tasks note's words, for showing it over the Tasks tab.
+    fn tasks_note_text(&self) -> Option<String> {
+        let id = self
+            .catalog
+            .iter()
+            .find(|note| is_tasks_note(note))
+            .map(|note| note.id.clone())?;
+        self.task_source(&id).map(|(body, _, _)| body)
+    }
+
+    fn tasks_note_card(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let body = self.tasks_note_text().unwrap_or_default();
+        let shown = if body.trim().is_empty() {
+            "Nothing in it yet.".to_owned()
+        } else {
+            body
+        };
+        container(
+            column![
+                row![
+                    text("The Tasks note").font(serif()).size(18),
+                    space().width(Fill),
+                    ghost_label("Close", Message::ToggleTasksNote),
+                ]
+                .align_y(iced::Alignment::Center),
+                text("Every task added here is a line in it. Check one in the list, not here.")
+                    .size(12)
+                    .color(ink.muted),
+                vscroll(text(shown).size(14).width(Fill))
+                    .height(Fill)
+                    .width(Fill),
+            ]
+            .spacing(10),
+        )
+        .width(460)
+        .height(360)
+        .padding(16)
+        .style(card_style)
+        .into()
     }
 
     fn reading_chat(&self) -> bool {
@@ -7632,6 +7710,10 @@ fn surface_pane(theme: &Theme) -> container::Style {
     }
 }
 
+fn is_tasks_note(note: &NoteSummary) -> bool {
+    note.title == "Tasks" && !note.conflict
+}
+
 fn card_style(theme: &Theme) -> container::Style {
     let ink = ink_of(theme);
     container::Style {
@@ -9745,6 +9827,33 @@ mod app_tests {
         let _ = app.update(Message::CancelDelete);
         let _ = app.update(Message::ToggleFocus);
         drop(app.view());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_tasks_note_is_not_in_the_notes_list_and_opens_over_the_tasks_tab() {
+        let _turn = one_at_a_time();
+        let dir = folder("tasks-note-hidden");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::ShowTasks);
+        let _ = app.update(Message::TaskDraft("buy milk".to_owned()));
+        let _ = app.update(Message::AddTask);
+        settle(&mut app);
+        assert!(app.catalog.iter().any(|note| note.title == "Tasks"));
+        assert!(
+            app.notes.iter().all(|note| note.title != "Tasks"),
+            "the notes list does not show it"
+        );
+        let _ = app.update(Message::ToggleTasksNote);
+        assert!(
+            app.tasks_note_text()
+                .is_some_and(|text| text.contains("buy milk"))
+        );
+        drop(app.view());
+        let _ = app.update(Message::ShowNotes);
+        let _ = app.update(Message::ShowTasks);
+        assert!(!app.tasks_note_open, "it is shut on the way back");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
