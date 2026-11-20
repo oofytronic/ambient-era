@@ -429,6 +429,11 @@ enum Message {
     TitleSubmit,
     /// Ctrl or Cmd + Shift + D: tell the spellchecker the word at the caret is fine.
     AddWord,
+    /// Enter in a field that has nothing to submit. It exists so the key is taken by the field and
+    /// does not fall through to the page.
+    FieldDone,
+    /// A key that nothing handled, while the writing page is up. See `ignored_key`.
+    TypedIgnored(Typed),
     /// The text in the box that says where a backup goes.
     BackupTo(String),
     /// Copy this notebook's folder to another place.
@@ -947,6 +952,14 @@ impl App {
                     && matches!(key.as_ref(), Key::Character(".")) =>
             {
                 Some(Message::ToggleFocus)
+            }
+            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key,
+                modifiers,
+                text,
+                ..
+            }) if status == iced::event::Status::Ignored => {
+                ignored_key(&key, text.as_deref(), modifiers).map(Message::TypedIgnored)
             }
             _ => None,
         });
@@ -1497,7 +1510,7 @@ impl App {
                 self.note_follow(true)
             }
             // A paste that was handled elsewhere, and a frame of a slide: handling them redraws.
-            Message::Pasted(_) | Message::SlideTick => Task::none(),
+            Message::Pasted(_) | Message::SlideTick | Message::FieldDone => Task::none(),
             Message::ClearSelect => {
                 let cursor = self.body.cursor();
                 self.body.place(text_editor::Cursor {
@@ -1652,6 +1665,7 @@ impl App {
                 self.add_word();
                 Task::none()
             }
+            Message::TypedIgnored(typed) => self.type_ignored(&typed),
             Message::BackupTo(text) => {
                 self.backup_to = text;
                 Task::none()
@@ -2106,6 +2120,7 @@ impl App {
                 text_input("Search notes", &self.query)
                     .id(iced::widget::Id::new("note-search"))
                     .on_input(Message::QueryChanged)
+                    .on_submit(Message::FieldDone)
                     .padding(10)
                     .size(14)
                     .style(field_style),
@@ -5699,6 +5714,35 @@ impl App {
         }
     }
 
+    /// Type a key that the editor ignored. Only while the writing page is the thing on screen and
+    /// nothing else, such as a popup, wants keys. A field that has focus takes its own keys, so
+    /// those never get here.
+    fn type_ignored(&mut self, typed: &Typed) -> Task<Message> {
+        let writing = self.notebook.is_some()
+            && self.welcome.is_none()
+            && !self.breeze_on()
+            && self.editing_note()
+            && !self.reading
+            && self.older.is_none()
+            && !self.confirm_delete
+            && !self.send_open
+            && self.conflicts.is_empty();
+        if !writing {
+            return Task::none();
+        }
+        let edit = |edit: text_editor::Edit| Message::BodyEdited(text_editor::Action::Edit(edit));
+        let messages: Vec<Message> = match typed {
+            Typed::Text(text) => text
+                .chars()
+                .map(|ch| edit(text_editor::Edit::Insert(ch)))
+                .collect(),
+            Typed::Enter => vec![edit(text_editor::Edit::Enter)],
+            Typed::Backspace => vec![edit(text_editor::Edit::Backspace)],
+            Typed::Delete => vec![edit(text_editor::Edit::Delete)],
+        };
+        Task::batch(messages.into_iter().map(|message| self.update(message)))
+    }
+
     fn share_words(&self) {
         let words: Vec<String> = self.my_words.iter().cloned().collect();
         markdown::set_personal_words(&words);
@@ -8235,6 +8279,44 @@ fn size_label(bytes: u64) -> String {
     }
 }
 
+/// A key the editor did not take. It is put into the page here, so it is not lost.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Typed {
+    Text(String),
+    Enter,
+    Backspace,
+    Delete,
+}
+
+/// What a key that no widget handled should type, if anything.
+///
+/// The live editor is a widget whose focus lives in its place in the tree. When it moves, as it
+/// does after Enter or when a space wraps a word onto another row, the new one starts without
+/// focus, and the app asks for focus again a moment later. A key pressed in that moment is
+/// ignored by the editor and is gone. The window sees every key an editor ignored, so it can
+/// type them. A key the editor did take is captured, and is not seen here, so nothing is typed
+/// twice. A key with Ctrl, Cmd, Alt, or the Super key is a shortcut and is left alone.
+fn ignored_key(
+    key: &Key,
+    text: Option<&str>,
+    modifiers: iced::keyboard::Modifiers,
+) -> Option<Typed> {
+    use iced::keyboard::key::Named;
+    if modifiers.control() || modifiers.command() || modifiers.alt() || modifiers.logo() {
+        return None;
+    }
+    match key.as_ref() {
+        Key::Named(Named::Enter) => Some(Typed::Enter),
+        Key::Named(Named::Backspace) => Some(Typed::Backspace),
+        Key::Named(Named::Delete) => Some(Typed::Delete),
+        Key::Named(Named::Space) => Some(Typed::Text(" ".to_owned())),
+        _ => {
+            let typed: String = text?.chars().filter(|ch| !ch.is_control()).collect();
+            (!typed.is_empty()).then_some(Typed::Text(typed))
+        }
+    }
+}
+
 fn focus_named(name: &'static str) -> Task<Message> {
     iced::widget::operation::focus(iced::widget::Id::new(name))
 }
@@ -9361,6 +9443,7 @@ mod app_tests {
     use super::tests_support::one_at_a_time;
     use super::{App, Message, Notebook, tests_support, write_snapshot};
     use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
 
     fn folder(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("aerodash-{name}-{}", std::process::id()));
@@ -9372,6 +9455,10 @@ mod app_tests {
         Notebook::create(dir).expect("create");
         let (mut app, _) = App::at(dir.to_path_buf());
         app.loaded = true;
+        // The splash is over, so the window takes keys.
+        app.boot_at = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .unwrap_or_else(Instant::now);
         app.adopt_open_book(Notebook::open(dir).expect("open"));
         let _ = tests_support::take_writes();
         app
@@ -9773,5 +9860,165 @@ mod app_tests {
             );
             assert_eq!(super::profile::expand_home("~"), PathBuf::from(home));
         }
+    }
+
+    /// Type `text` the way a person does: one key at a time through `update`, with the pause that
+    /// follows a key allowed to fire now and then. After every key the page must hold exactly what
+    /// was typed and the caret must sit just after it.
+    fn type_through(app: &mut App, text: &str, wake_every: usize) {
+        let mut typed = String::new();
+        for (index, ch) in text.chars().enumerate() {
+            let action = if ch == '\n' {
+                iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Enter)
+            } else {
+                iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert(ch))
+            };
+            let _ = app.update(Message::BodyEdited(action));
+            typed.push(ch);
+            if wake_every > 0 && index % wake_every == wake_every - 1 {
+                let _ = app.update(Message::Woke(super::Wake::Pause(app.pause_token)));
+                settle(app);
+            }
+            let shown = app.body.text();
+            assert_eq!(
+                shown, typed,
+                "after {index} keys, the page lost or moved a character"
+            );
+            assert_eq!(
+                app.body.caret_byte(),
+                typed.len(),
+                "after {index} keys ({:?}), the caret is not just after what was typed",
+                &typed[typed.len().saturating_sub(12)..]
+            );
+        }
+    }
+
+    #[test]
+    fn fast_typing_keeps_every_character_and_the_caret_at_the_end() {
+        let _turn = one_at_a_time();
+        let dir = folder("typing");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::NewNote);
+        let passage = "The **quick** brown fox jumpd over ==the== lazy dog, and ~~then~~ it did not.\n\
+A second paragraph with a [link](https://example.com/a) in it, and a # that is not a heading.\n\
+Some `code` and *an em* and __strong__ words. Done.\n- last, a list item with no Enter after it";
+        type_through(&mut app, passage, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typing_while_saves_come_back_keeps_every_character() {
+        let _turn = one_at_a_time();
+        let dir = folder("typing-saves");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::NewNote);
+        let passage = "A line of words typed with a pause that fires every few keys, so a save is \
+always on its way back while the next letters arrive. **Bold ones** too, and a misspeling.";
+        type_through(&mut app, passage, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_key_nothing_took_is_typed_and_a_shortcut_is_not() {
+        use iced::keyboard::key::Named;
+        use iced::keyboard::{Key, Modifiers};
+        let plain = Modifiers::empty();
+        let letter =
+            |text: &str| super::ignored_key(&Key::Character(text.into()), Some(text), plain);
+        assert_eq!(letter("a"), Some(super::Typed::Text("a".to_owned())));
+        assert_eq!(letter("é"), Some(super::Typed::Text("é".to_owned())));
+        assert_eq!(
+            super::ignored_key(&Key::Named(Named::Space), None, plain),
+            Some(super::Typed::Text(" ".to_owned()))
+        );
+        assert_eq!(
+            super::ignored_key(&Key::Named(Named::Enter), Some("\r"), plain),
+            Some(super::Typed::Enter)
+        );
+        assert_eq!(
+            super::ignored_key(&Key::Named(Named::Backspace), None, plain),
+            Some(super::Typed::Backspace)
+        );
+        assert_eq!(
+            super::ignored_key(&Key::Named(Named::Delete), None, plain),
+            Some(super::Typed::Delete)
+        );
+        // A key that types nothing, and a key with a shortcut modifier, are left alone.
+        assert_eq!(
+            super::ignored_key(&Key::Named(Named::ArrowLeft), None, plain),
+            None
+        );
+        assert_eq!(
+            super::ignored_key(&Key::Named(Named::F5), None, plain),
+            None
+        );
+        assert_eq!(
+            super::ignored_key(&Key::Named(Named::Shift), None, plain),
+            None
+        );
+        for held in [Modifiers::CTRL, Modifiers::LOGO, Modifiers::ALT] {
+            assert_eq!(
+                super::ignored_key(&Key::Character("b".into()), Some("b"), held),
+                None
+            );
+        }
+        // A control character in the text is not typed.
+        assert_eq!(
+            super::ignored_key(&Key::Character("x".into()), Some("\u{7}"), plain),
+            None
+        );
+    }
+
+    #[test]
+    fn a_key_the_editor_dropped_is_typed_into_the_page_in_order() {
+        let _turn = one_at_a_time();
+        let dir = folder("dropped-keys");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::NewNote);
+        for typed in [
+            super::Typed::Text("hello".to_owned()),
+            super::Typed::Text(" ".to_owned()),
+            super::Typed::Text("wor".to_owned()),
+            super::Typed::Backspace,
+            super::Typed::Text("rld".to_owned()),
+            super::Typed::Enter,
+            super::Typed::Text("next".to_owned()),
+        ] {
+            let _ = app.update(Message::TypedIgnored(typed));
+        }
+        assert_eq!(app.body.text(), "hello world\nnext");
+        assert_eq!(app.body.caret_byte(), app.body.text().len());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dropped_key_is_not_typed_when_something_else_is_up() {
+        let _turn = one_at_a_time();
+        let dir = folder("dropped-keys-guard");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::NewNote);
+        let typed = || super::Typed::Text("x".to_owned());
+        // The settings page, another tab, and the delete question each have their own keys.
+        let _ = app.update(Message::ShowSettings);
+        let _ = app.update(Message::TypedIgnored(typed()));
+        let _ = app.update(Message::ShowTasks);
+        let _ = app.update(Message::TypedIgnored(typed()));
+        let _ = app.update(Message::ShowNotes);
+        app.confirm_delete = true;
+        let _ = app.update(Message::TypedIgnored(typed()));
+        app.confirm_delete = false;
+        assert_eq!(
+            app.body.text(),
+            "",
+            "a key was typed into a page that was not up"
+        );
+        // And with the page up, it is.
+        let _ = app.update(Message::TypedIgnored(typed()));
+        assert_eq!(app.body.text(), "x");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
