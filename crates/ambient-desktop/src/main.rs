@@ -17,8 +17,8 @@ use iced::keyboard::Key;
 use iced::widget::canvas;
 use iced::widget::image as iced_image;
 use iced::widget::{
-    button, checkbox, column, container, row, scrollable, space, stack, text, text_editor,
-    text_input, tooltip,
+    button, checkbox, column, container, mouse_area, row, scrollable, space, stack, text,
+    text_editor, text_input, tooltip,
 };
 use iced::{Color, Element, Fill, Font, Size, Task, Theme};
 use image::ImageEncoder;
@@ -209,8 +209,10 @@ struct App {
     chat_search: bool,
     /// Writing with nothing else in view: the panels are away and the title is small.
     focus: bool,
-    /// The round buttons at the lower right, while writing in focus. Hidden until pulled in.
-    slide_tools: Slide,
+    /// The right panel shows this note's settings, not its links.
+    note_panel: bool,
+    /// The note whose row the pointer is over, so its delete button shows.
+    hover_row: Option<String>,
     /// The formatting bar, while writing in focus. Hidden until pulled in.
     slide_bar: Slide,
     /// The conversation whose name is being typed. Otherwise the name is plain text.
@@ -440,8 +442,12 @@ enum Message {
     BackUp,
     /// A copy finished, or failed.
     BackedUp(Result<profile::BackupReport, String>),
-    /// The handle at the lower right in focus: pull the round buttons in, or send them away.
-    FocusTools,
+    /// The icon at the top of the right panel: this note's settings, or its links.
+    ToggleNoteSettings,
+    /// The pointer went onto (true) or off (false) a note's row.
+    RowHover(String, bool),
+    /// The delete button on a note's row.
+    AskDeleteNote(String),
     /// The button beside the small title in focus: pull the formatting bar in, or send it away.
     FocusBar,
     /// A frame of a slide. It changes nothing. Handling it redraws.
@@ -852,7 +858,8 @@ impl App {
             task_search: false,
             chat_search: false,
             focus: false,
-            slide_tools: Slide::settled(true),
+            note_panel: false,
+            hover_row: None,
             slide_bar: Slide::settled(true),
             alias_editing: None,
             invite_pick: None,
@@ -996,7 +1003,7 @@ impl App {
                 wake_stream,
             ));
         }
-        if app.slide_tools.moving() || app.slide_bar.moving() {
+        if app.slide_bar.moving() {
             parts.push(
                 iced::time::every(std::time::Duration::from_millis(16)).map(|_| Message::SlideTick),
             );
@@ -1651,11 +1658,9 @@ impl App {
                     return Task::none();
                 }
                 self.focus = !self.focus;
-                // Going in, the buttons and the bar slide away. Coming out they are back at once.
-                self.slide_tools.set(!self.focus);
+                // Going in, the bar slides away. Coming out it is back at once.
                 self.slide_bar.set(!self.focus);
                 if !self.focus {
-                    self.slide_tools.jump(true);
                     self.slide_bar.jump(true);
                 }
                 Task::none()
@@ -1675,8 +1680,27 @@ impl App {
                 self.finish_backup(result);
                 Task::none()
             }
-            Message::FocusTools => {
-                self.slide_tools.set(!self.slide_tools.open);
+            Message::ToggleNoteSettings => {
+                self.note_panel = !self.note_panel;
+                self.show_context = true;
+                self.context_shut = false;
+                Task::none()
+            }
+            Message::RowHover(id, over) => {
+                if over {
+                    self.hover_row = Some(id);
+                } else if self.hover_row.as_deref() == Some(id.as_str()) {
+                    self.hover_row = None;
+                }
+                Task::none()
+            }
+            Message::AskDeleteNote(id) => {
+                if self.selected.as_deref() != Some(id.as_str()) {
+                    self.show_note(&id);
+                }
+                if self.selected.as_deref() == Some(id.as_str()) {
+                    self.confirm_delete = true;
+                }
                 Task::none()
             }
             Message::FocusBar => {
@@ -2181,7 +2205,10 @@ impl App {
                 list = list.push(self.chat_hit_row(chat));
             }
         }
-        block.push(vscroll(list).height(Fill).width(Fill)).into()
+        block
+            .push(vscroll(list).height(Fill).width(Fill))
+            .push(action_fill("New note", Message::NewNote))
+            .into()
     }
 
     fn tag_row(&self, tag: Option<&str>, count: usize) -> Element<'_, Message> {
@@ -2242,7 +2269,7 @@ impl App {
         if !meta.is_empty() {
             lines = lines.push(text(meta).size(12).color(ink.muted).width(Fill));
         }
-        button(lines)
+        let face = button(lines)
             .width(Fill)
             .padding(iced::Padding {
                 top: 8.0,
@@ -2251,7 +2278,26 @@ impl App {
                 left: 10.0 + indent,
             })
             .on_press(Message::Select(note.id.clone()))
-            .style(list_row(selected))
+            .style(list_row(selected));
+        let over = self.hover_row.as_deref() == Some(note.id.as_str());
+        let mut layers = stack![face];
+        if over {
+            layers = layers.push(
+                container(mini_button(
+                    mini_handle(Mini::Trash, self.is_dark()),
+                    "Delete this note",
+                    Message::AskDeleteNote(note.id.clone()),
+                ))
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Right)
+                .align_y(iced::alignment::Vertical::Center)
+                .padding([0.0, 4.0]),
+            );
+        }
+        mouse_area(layers)
+            .on_enter(Message::RowHover(note.id.clone(), true))
+            .on_exit(Message::RowHover(note.id.clone(), false))
             .into()
     }
 
@@ -2948,8 +2994,10 @@ impl App {
             body.into()
         } else if self.confirm_delete {
             Self::overlay_corner(body.into(), self.delete_confirm())
-        } else {
+        } else if self.compact() {
             self.overlay_tools(body.into(), true)
+        } else {
+            body.into()
         };
         self.focus_chrome(page)
     }
@@ -3030,36 +3078,15 @@ impl App {
         .into()
     }
 
+    /// The round buttons, on a narrow screen. A wide window has the same things in the left
+    /// panel (add, delete on a row) and the note's settings (send to a chat).
     fn overlay_tools<'a>(
         &'a self,
         page: Element<'a, Message>,
         editing: bool,
     ) -> Element<'a, Message> {
-        let (cluster, count) = self.tool_cluster(editing);
-        if !self.focused() {
-            return Self::overlay_corner(page, cluster);
-        }
-        // In focus the buttons slide off to the right and a handle stays to pull them back.
-        let shown = self.slide_tools.shown();
-        let buttons = f32::from(u8::try_from(count).unwrap_or(3));
-        let width = buttons * 40.0 + (buttons - 1.0).max(0.0) * 8.0;
-        let mut tray = row![].spacing(8).align_y(iced::Alignment::Center);
-        if shown > 0.0 {
-            // Clipped to a width that grows, with the buttons kept against the right edge, so
-            // they come in from the side. They are left out when hidden, so nothing unseen
-            // can be pressed.
-            tray = tray.push(
-                container(cluster)
-                    .width(width * shown)
-                    .align_x(iced::alignment::Horizontal::Right)
-                    .clip(true),
-            );
-        }
-        tray = tray.push(ghost_label(
-            if self.slide_tools.open { "›" } else { "‹" },
-            Message::FocusTools,
-        ));
-        Self::overlay_corner(page, tray.into())
+        let (cluster, _) = self.tool_cluster(editing);
+        Self::overlay_corner(page, cluster)
     }
 
     /// The round buttons, and how many there are.
@@ -4618,7 +4645,7 @@ impl App {
     }
 
     fn note_browser(&self) -> Element<'_, Message> {
-        self.overlay_tools(self.note_index(), false)
+        self.note_index()
     }
 
     fn chat_browser(&self) -> Element<'_, Message> {
@@ -5315,6 +5342,35 @@ impl App {
         let ink = self.ink();
         let chapters = &self.cached_chapters;
         let mut block = column![].spacing(10).padding(16).width(Fill).height(Fill);
+        block = block.push(
+            row![
+                text(if self.note_panel {
+                    "This note"
+                } else {
+                    "Links"
+                })
+                .size(12)
+                .color(ink.muted),
+                space().width(Fill),
+                mini_button(
+                    mini_handle(Mini::Gear, self.is_dark()),
+                    if self.note_panel {
+                        "Links and backlinks"
+                    } else {
+                        "Note settings"
+                    },
+                    Message::ToggleNoteSettings,
+                ),
+            ]
+            .align_y(iced::Alignment::Center),
+        );
+        if self.note_panel {
+            return container(self.note_settings(block))
+                .width(240)
+                .height(Fill)
+                .style(surface_pane)
+                .into();
+        }
         if let Some(rail) = self.chapter_rail(chapters) {
             block = block.push(rail);
         } else if self.cached_backlinks.is_empty() {
@@ -5342,6 +5398,37 @@ impl App {
             .height(Fill)
             .style(surface_pane)
             .into()
+    }
+
+    /// What belongs to this one note and not to the page: where it was written, and what can be
+    /// done with it as a whole.
+    fn note_settings<'a>(
+        &'a self,
+        mut block: iced::widget::Column<'a, Message>,
+    ) -> iced::widget::Column<'a, Message> {
+        let ink = self.ink();
+        let saved = self.selected.is_some();
+        block = block.push(text("Home device").size(12).color(ink.muted));
+        let home = if !saved {
+            "Not saved yet.".to_owned()
+        } else if self.note_writer.is_empty() {
+            "This computer.".to_owned()
+        } else {
+            self.note_writer.clone()
+        };
+        block = block.push(text(home).size(14));
+        let has_words = saved || !self.body.text().is_empty() || !self.title_text.is_empty();
+        if has_words {
+            block = block.push(space().height(6));
+            block = block.push(action_fill("Send to a chat", Message::SendNoteToChat));
+        }
+        if saved || self.editor_dirty() {
+            block = block.push(ghost_label(
+                if saved { "Delete note" } else { "Discard" },
+                Message::AskDelete,
+            ));
+        }
+        block
     }
 
     fn edge_toggle(&self, list: bool) -> Element<'_, Message> {
@@ -6675,8 +6762,8 @@ impl App {
         self.my_words.clear();
         self.share_words();
         self.focus = false;
-        self.slide_tools.jump(true);
         self.slide_bar.jump(true);
+        self.note_panel = false;
         self.catalog.clear();
         self.notes.clear();
         self.tasks.clear();
@@ -8329,6 +8416,7 @@ enum Mini {
     Up,
     Down,
     Focus,
+    Gear,
 }
 
 fn mini_button(
@@ -8345,7 +8433,7 @@ fn mini_button(
 
 fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
     use std::sync::OnceLock;
-    static HANDLES: OnceLock<[iced_image::Handle; 12]> = OnceLock::new();
+    static HANDLES: OnceLock<[iced_image::Handle; 14]> = OnceLock::new();
     let handles = HANDLES.get_or_init(|| {
         let ink = [0xED, 0xEA, 0xDE];
         let day = [0x1C, 0x19, 0x17];
@@ -8362,6 +8450,8 @@ fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
             iced_image::Handle::from_bytes(icon_png(day, down_ink)),
             iced_image::Handle::from_bytes(icon_png(ink, focus_ink)),
             iced_image::Handle::from_bytes(icon_png(day, focus_ink)),
+            iced_image::Handle::from_bytes(icon_png(ink, gear_ink)),
+            iced_image::Handle::from_bytes(icon_png(day, gear_ink)),
         ]
     });
     let index = match kind {
@@ -8371,6 +8461,7 @@ fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
         Mini::Up => 6,
         Mini::Down => 8,
         Mini::Focus => 10,
+        Mini::Gear => 12,
     } + usize::from(!dark);
     handles
         .get(index)
@@ -8432,6 +8523,16 @@ fn focus_ink(dx: f64, dy: f64) -> bool {
     let upright = (16.0..20.5).contains(&x) && (8.0..=20.5).contains(&y);
     let across = (16.0..20.5).contains(&y) && (8.0..=20.5).contains(&x);
     upright || across || x.hypot(y) < 4.5
+}
+
+/// A ring with eight teeth and a hole: settings.
+fn gear_ink(dx: f64, dy: f64) -> bool {
+    let radius = dx.hypot(dy);
+    if !(6.5..=19.5).contains(&radius) {
+        return false;
+    }
+    let tooth = (dy.atan2(dx) * 8.0).cos() > -0.1;
+    radius <= 14.5 || (tooth && radius <= 19.5)
 }
 
 fn up_ink(dx: f64, dy: f64) -> bool {
@@ -9575,35 +9676,30 @@ mod app_tests {
     }
 
     #[test]
-    fn focus_hides_the_panels_and_sends_the_buttons_and_the_bar_away() {
+    fn focus_hides_the_panels_and_sends_the_bar_away() {
         let _turn = one_at_a_time();
         let dir = folder("focus");
         let mut app = open_app(&dir);
         wide(&mut app);
         assert!(!app.focused(), "focus starts off");
-        assert!(app.slide_tools.open && app.slide_bar.open);
+        assert!(app.slide_bar.open);
 
         let _ = app.update(Message::ToggleFocus);
         assert!(app.focused());
-        assert!(!app.slide_tools.open, "the buttons slide away");
         assert!(!app.slide_bar.open, "the bar slides away");
-        assert!(app.slide_tools.moving(), "and they move, not jump");
+        assert!(app.slide_bar.moving(), "and it moves, not jumps");
 
-        // The handle and the Aa button bring them back, and send them away again.
-        let _ = app.update(Message::FocusTools);
-        assert!(app.slide_tools.open);
+        // The Aa button brings it back, and sends it away again.
         let _ = app.update(Message::FocusBar);
         assert!(app.slide_bar.open);
-        let _ = app.update(Message::FocusTools);
-        assert!(!app.slide_tools.open);
+        let _ = app.update(Message::FocusBar);
+        assert!(!app.slide_bar.open);
 
         // Leaving puts everything back at once, so nothing is left hidden.
         let _ = app.update(Message::ToggleFocus);
         assert!(!app.focused());
-        assert!(app.slide_tools.open && app.slide_bar.open);
-        assert!((app.slide_tools.shown() - 1.0).abs() < f32::EPSILON);
+        assert!(app.slide_bar.open);
         assert!((app.slide_bar.shown() - 1.0).abs() < f32::EPSILON);
-        assert!(!app.slide_tools.moving());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9639,12 +9735,9 @@ mod app_tests {
         drop(app.view());
         let _ = app.update(Message::ToggleFocus);
         drop(app.view());
-        let _ = app.update(Message::FocusTools);
-        drop(app.view());
         let _ = app.update(Message::FocusBar);
         drop(app.view());
         let _ = app.update(Message::FocusBar);
-        let _ = app.update(Message::FocusTools);
         drop(app.view());
         // With the delete question open, which is drawn in the corner where the buttons were.
         let _ = app.update(Message::AskDelete);
@@ -9652,6 +9745,57 @@ mod app_tests {
         let _ = app.update(Message::CancelDelete);
         let _ = app.update(Message::ToggleFocus);
         drop(app.view());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_settings_icon_switches_the_right_panel_and_back() {
+        let _turn = one_at_a_time();
+        let dir = folder("note-settings");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::TitleChanged("A note".to_owned()));
+        assert!(!app.note_panel, "links and backlinks are the default");
+        drop(app.view());
+        let _ = app.update(Message::ToggleNoteSettings);
+        assert!(
+            app.note_panel && app.show_context,
+            "the panel opens on settings"
+        );
+        drop(app.view());
+        let _ = app.update(Message::ToggleNoteSettings);
+        assert!(!app.note_panel);
+        drop(app.view());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_row_shows_delete_under_the_pointer_and_asks_before_deleting() {
+        let _turn = one_at_a_time();
+        let dir = folder("row-delete");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::TitleChanged("First".to_owned()));
+        let _ = app.update(Message::Save);
+        let id = app.selected.clone();
+        let Some(id) = id else {
+            // The save is a task in the window; nothing to delete in this harness.
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        let _ = app.update(Message::RowHover(id.clone(), true));
+        assert_eq!(app.hover_row.as_deref(), Some(id.as_str()));
+        drop(app.view());
+        let _ = app.update(Message::RowHover("other".to_owned(), false));
+        assert_eq!(
+            app.hover_row.as_deref(),
+            Some(id.as_str()),
+            "another row leaving changes nothing"
+        );
+        let _ = app.update(Message::RowHover(id.clone(), false));
+        assert!(app.hover_row.is_none());
+        let _ = app.update(Message::AskDeleteNote(id));
+        assert!(app.confirm_delete, "it asks first");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
