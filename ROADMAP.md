@@ -26,7 +26,7 @@ Build in this order. Do not skip ahead.
 | 4 | Desktop app | The Linux window is Iced over the same folder as the CLI. Not the OS keystore. |
 | 5 | Relay and a second device | The window pairs a second folder and a note shows up there. The relay starts with the window and syncs on its own. It stores opaque blobs and binds `127.0.0.1` in the clear, which spec 04 says is not a public deployment. Two folders on one computer, not two machines. |
 | 6 | 1:1 | The window opens a conversation, and can open another. Each one has its own contact key. Text is sealed to that key. The invite is a link or a QR. Messages show up after both windows sync. |
-| 7 | Devices, activity, copy | Revoke a device from the root window. The note list and the editor show which device wrote the current version. Copy a note into a chat as text is in. Recovery restore from the phrase is in the window, and the restored folder enrolls its new device. |
+| 7 | Devices, activity, copy | Revoke a device from the root window. The note list shows which device wrote the current version. The editor's line for it was taken off the page on 2026-11-20 and comes back with a per-note info icon. Copy a note into a chat as text is in. Recovery restore from the phrase is in the window, and the restored folder enrolls its new device. |
 
 **Exit.** The owner uses the notes for real work, and uses 1:1 with at least one person, including an offline gap and one restore from the recovery phrase. A green test run is not the exit.
 

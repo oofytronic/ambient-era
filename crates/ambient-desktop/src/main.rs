@@ -199,6 +199,12 @@ struct App {
     note_search: bool,
     task_search: bool,
     chat_search: bool,
+    /// Writing with nothing else in view: the panels are away and the title is small.
+    focus: bool,
+    /// The round buttons at the lower right, while writing in focus. Hidden until pulled in.
+    slide_tools: Slide,
+    /// The formatting bar, while writing in focus. Hidden until pulled in.
+    slide_bar: Slide,
     /// The conversation whose name is being typed. Otherwise the name is plain text.
     alias_editing: Option<String>,
     invite_pick: Option<InvitePick>,
@@ -409,6 +415,14 @@ enum Message {
     /// The pencil beside a conversation's name: start typing it, or stop.
     EditAlias,
     FinishAlias,
+    /// The icon at the top right of a note: write with nothing else in view, or come back.
+    ToggleFocus,
+    /// The handle at the lower right in focus: pull the round buttons in, or send them away.
+    FocusTools,
+    /// The button beside the small title in focus: pull the formatting bar in, or send it away.
+    FocusBar,
+    /// A frame of a slide. It changes nothing. Handling it redraws.
+    SlideTick,
     WipeDraft(String),
     ExportNotes,
     ConfirmWipe,
@@ -810,6 +824,9 @@ impl App {
             note_search: false,
             task_search: false,
             chat_search: false,
+            focus: false,
+            slide_tools: Slide::settled(true),
+            slide_bar: Slide::settled(true),
             alias_editing: None,
             invite_pick: None,
             histories: BTreeMap::new(),
@@ -930,6 +947,11 @@ impl App {
                 Wake::Search(app.search_token),
                 wake_stream,
             ));
+        }
+        if app.slide_tools.moving() || app.slide_bar.moving() {
+            parts.push(
+                iced::time::every(std::time::Duration::from_millis(16)).map(|_| Message::SlideTick),
+            );
         }
         if app.scroll_armed {
             parts.push(iced::Subscription::run_with(
@@ -1439,7 +1461,8 @@ impl App {
                 });
                 self.note_follow(true)
             }
-            Message::Pasted(_) => Task::none(),
+            // A paste that was handled elsewhere, and a frame of a slide: handling them redraws.
+            Message::Pasted(_) | Message::SlideTick => Task::none(),
             Message::ClearSelect => {
                 let cursor = self.body.cursor();
                 self.body.place(text_editor::Cursor {
@@ -1572,6 +1595,25 @@ impl App {
                 }
                 None => Task::none(),
             },
+            Message::ToggleFocus => {
+                self.focus = !self.focus;
+                // Going in, the buttons and the bar slide away. Coming out they are back at once.
+                self.slide_tools.set(!self.focus);
+                self.slide_bar.set(!self.focus);
+                if !self.focus {
+                    self.slide_tools.jump(true);
+                    self.slide_bar.jump(true);
+                }
+                Task::none()
+            }
+            Message::FocusTools => {
+                self.slide_tools.set(!self.slide_tools.open);
+                Task::none()
+            }
+            Message::FocusBar => {
+                self.slide_bar.set(!self.slide_bar.open);
+                Task::none()
+            }
             Message::FinishAlias => {
                 self.alias_editing = None;
                 Task::none()
@@ -1723,13 +1765,16 @@ impl App {
             .height(Fill)
             .into();
         }
+        let focused = self.focused();
         let mut body = row![].width(Fill).height(Fill);
-        if self.show_list {
+        if self.show_list && !focused {
             body = body.push(self.sidebar()).push(hairline_v());
         }
-        body = body.push(self.edge_toggle(true));
+        if !focused {
+            body = body.push(self.edge_toggle(true));
+        }
         body = body.push(self.main());
-        if self.context_room() {
+        if self.context_room() && !focused {
             body = body.push(self.edge_toggle(false));
             if self.show_context {
                 body = body.push(hairline_v()).push(self.context_pane());
@@ -2801,15 +2846,8 @@ impl App {
             }
             body = body.push(vscroll(versions).height(160));
         }
-        if !self.note_writer.is_empty() && self.conflicts.is_empty() {
-            body = body.push(
-                text(format!("Written by {}", self.note_writer))
-                    .size(13)
-                    .color(ink.muted),
-            );
-        }
         body = body.push(self.note_column());
-        if self.send_open {
+        let page = if self.send_open {
             body = body.push(text("Which chat?").size(13).color(ink.muted));
             let mut choices = column![].spacing(4).width(Fill);
             for chat in &self.chats {
@@ -2836,12 +2874,63 @@ impl App {
                 ]
                 .spacing(8),
             );
-            return body.into();
+            body.into()
+        } else if self.confirm_delete {
+            Self::overlay_corner(body.into(), self.delete_confirm())
+        } else {
+            self.overlay_tools(body.into(), true)
+        };
+        self.focus_chrome(page)
+    }
+
+    /// The icon at the top right of a note that goes in and out of focus. In focus it has the
+    /// small title beside it, and a button that brings the formatting bar in or sends it away.
+    fn focus_chrome<'a>(&'a self, page: Element<'a, Message>) -> Element<'a, Message> {
+        if self.compact() || self.reading || self.older.is_some() || !self.editing_note() {
+            return page;
         }
-        if self.confirm_delete {
-            return Self::overlay_corner(body.into(), self.delete_confirm());
+        let mut corner = row![].spacing(6).align_y(iced::Alignment::Center);
+        if self.focused() {
+            corner = corner
+                .push(
+                    text_input("Title", &self.title_text)
+                        .id(iced::widget::Id::new("note-title"))
+                        .on_input(Message::TitleChanged)
+                        .font(serif())
+                        .size(15)
+                        .padding([2.0, 0.0])
+                        .width(220)
+                        .align_x(iced::alignment::Horizontal::Right)
+                        .style(title_style),
+                )
+                .push(ghost_label("Aa", Message::FocusBar));
         }
-        self.overlay_tools(body.into(), true)
+        corner = corner.push(mini_button(
+            mini_handle(Mini::Focus, self.is_dark()),
+            if self.focus {
+                "Leave focus"
+            } else {
+                "Write without distractions"
+            },
+            Message::ToggleFocus,
+        ));
+        stack![
+            page,
+            container(corner)
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Right)
+                .align_y(iced::alignment::Vertical::Top)
+                .padding(iced::Padding {
+                    top: 0.0,
+                    right: 2.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                }),
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into()
     }
 
     /// Put `card` over the page in the lower right corner, where the round buttons are. A
@@ -2874,11 +2963,37 @@ impl App {
         page: Element<'a, Message>,
         editing: bool,
     ) -> Element<'a, Message> {
-        Self::overlay_corner(page, self.tool_cluster(editing))
+        let (cluster, count) = self.tool_cluster(editing);
+        if !self.focused() {
+            return Self::overlay_corner(page, cluster);
+        }
+        // In focus the buttons slide off to the right and a handle stays to pull them back.
+        let shown = self.slide_tools.shown();
+        let buttons = f32::from(u8::try_from(count).unwrap_or(3));
+        let width = buttons * 40.0 + (buttons - 1.0).max(0.0) * 8.0;
+        let mut tray = row![].spacing(8).align_y(iced::Alignment::Center);
+        if shown > 0.0 {
+            // Clipped to a width that grows, with the buttons kept against the right edge, so
+            // they come in from the side. They are left out when hidden, so nothing unseen
+            // can be pressed.
+            tray = tray.push(
+                container(cluster)
+                    .width(width * shown)
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .clip(true),
+            );
+        }
+        tray = tray.push(ghost_label(
+            if self.slide_tools.open { "›" } else { "‹" },
+            Message::FocusTools,
+        ));
+        Self::overlay_corner(page, tray.into())
     }
 
-    fn tool_cluster(&self, editing: bool) -> Element<'_, Message> {
+    /// The round buttons, and how many there are.
+    fn tool_cluster(&self, editing: bool) -> (Element<'_, Message>, usize) {
         let mut tools = row![circle_button("+", "New note", Message::NewNote)].spacing(8);
+        let mut count = 1;
         if editing && (self.selected.is_some() || self.editor_dirty()) {
             let hint = if self.selected.is_some() {
                 "Delete"
@@ -2886,6 +3001,7 @@ impl App {
                 "Discard"
             };
             tools = tools.push(circle_button("×", hint, Message::AskDelete));
+            count += 1;
         }
         if editing
             && (self.selected.is_some()
@@ -2893,8 +3009,9 @@ impl App {
                 || !self.title_text.is_empty())
         {
             tools = tools.push(circle_button("↗", "Send to chat", Message::SendNoteToChat));
+            count += 1;
         }
-        tools.into()
+        (tools.into(), count)
     }
 
     fn delete_confirm(&self) -> Element<'_, Message> {
@@ -4260,6 +4377,16 @@ impl App {
         }
     }
 
+    /// Writing with nothing else in view. Only in the wide layout, and only for a note being
+    /// written, not a book being read or an older version.
+    fn focused(&self) -> bool {
+        self.focus
+            && self.editing_note()
+            && !self.compact()
+            && !self.reading
+            && self.older.is_none()
+    }
+
     fn editing_note(&self) -> bool {
         self.sheet == Sheet::None
             && self.screen == Screen::Notes
@@ -4283,6 +4410,28 @@ impl App {
     fn bubble_width(&self) -> f32 {
         let inner = self.chat_inner();
         (inner - 36.0).clamp(96.0, 460.0)
+    }
+
+    /// The formatting bar. In focus it slides down from the top edge of the page, or away.
+    fn format_slot(&self) -> Element<'static, Message> {
+        if !self.focused() {
+            return Self::format_bar();
+        }
+        let shown = self.slide_bar.shown();
+        if shown <= 0.0 {
+            return space().height(0).into();
+        }
+        if shown >= 1.0 {
+            return Self::format_bar();
+        }
+        // The bar is kept against the bottom of a box that grows, so it comes down into view.
+        // It is clipped, and it is only in the tree while it is partly or fully shown.
+        container(Self::format_bar())
+            .width(Fill)
+            .height(FORMAT_BAR * shown)
+            .align_y(iced::alignment::Vertical::Bottom)
+            .clip(true)
+            .into()
     }
 
     fn format_bar() -> Element<'static, Message> {
@@ -4884,27 +5033,34 @@ impl App {
             );
             page = page.push(self.read_pages(chapters));
         } else {
-            page = page.push(
-                text_input("Title", &self.title_text)
-                    .id(iced::widget::Id::new("note-title"))
-                    .on_input(Message::TitleChanged)
-                    .font(serif())
-                    .size(if self.compact() { 32.0 } else { 36.0 })
-                    .padding([2.0, 0.0])
-                    .style(title_style),
-            );
-            page = page.push(self.tag_chips());
+            let focused = self.focused();
+            if focused {
+                // The title is small, at the top right of the note, so the writing starts a
+                // little below it. This keeps a line from running under it.
+                page = page.push(space().height(FOCUS_TOP));
+            } else {
+                page = page.push(
+                    text_input("Title", &self.title_text)
+                        .id(iced::widget::Id::new("note-title"))
+                        .on_input(Message::TitleChanged)
+                        .font(serif())
+                        .size(if self.compact() { 32.0 } else { 36.0 })
+                        .padding([2.0, 0.0])
+                        .style(title_style),
+                );
+                page = page.push(self.tag_chips());
+            }
             if self.find_open {
                 page = page.push(self.find_bar());
             }
             if !self.compact() {
-                page = page.push(Self::format_bar());
+                page = page.push(self.format_slot());
             }
             if let Some((_, query)) = markdown::open_wiki(&self.body.text(), self.body.caret_byte())
             {
                 page = page.push(self.link_menu(&query));
             }
-            if !self.proof_warning.is_empty() {
+            if !self.proof_warning.is_empty() && !focused {
                 page = page.push(
                     text(self.proof_warning.clone())
                         .size(12)
@@ -7757,6 +7913,57 @@ fn icon_button(handle: iced_image::Handle, message: Message) -> Element<'static,
         .into()
 }
 
+/// The height of the formatting bar, for sliding it. Close enough that it does not jump.
+const FORMAT_BAR: f32 = 32.0;
+
+/// Room kept above the writing in focus, for the small title and the buttons beside it.
+const FOCUS_TOP: f32 = 34.0;
+
+/// How long a panel takes to slide in or out.
+const SLIDE: Duration = Duration::from_millis(220);
+
+/// Something that slides between shown and hidden. It only moves for a moment after it is set,
+/// and the window only redraws on a timer while it does.
+struct Slide {
+    open: bool,
+    since: Instant,
+}
+
+impl Slide {
+    /// Already in place, with nothing moving.
+    fn settled(open: bool) -> Self {
+        Self {
+            open,
+            since: Instant::now()
+                .checked_sub(SLIDE.saturating_mul(2))
+                .unwrap_or_else(Instant::now),
+        }
+    }
+
+    fn set(&mut self, open: bool) {
+        if self.open != open {
+            self.open = open;
+            self.since = Instant::now();
+        }
+    }
+
+    /// Put it in place at once, with no slide.
+    fn jump(&mut self, open: bool) {
+        *self = Self::settled(open);
+    }
+
+    fn moving(&self) -> bool {
+        self.since.elapsed() < SLIDE
+    }
+
+    /// 0 when hidden and 1 when shown, easing out.
+    fn shown(&self) -> f32 {
+        let t = (self.since.elapsed().as_secs_f32() / SLIDE.as_secs_f32()).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - t).powi(3);
+        if self.open { eased } else { 1.0 - eased }
+    }
+}
+
 fn focus_named(name: &'static str) -> Task<Message> {
     iced::widget::operation::focus(iced::widget::Id::new(name))
 }
@@ -7768,6 +7975,7 @@ enum Mini {
     Trash,
     Up,
     Down,
+    Focus,
 }
 
 fn mini_button(
@@ -7784,7 +7992,7 @@ fn mini_button(
 
 fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
     use std::sync::OnceLock;
-    static HANDLES: OnceLock<[iced_image::Handle; 10]> = OnceLock::new();
+    static HANDLES: OnceLock<[iced_image::Handle; 12]> = OnceLock::new();
     let handles = HANDLES.get_or_init(|| {
         let ink = [0xED, 0xEA, 0xDE];
         let day = [0x1C, 0x19, 0x17];
@@ -7799,6 +8007,8 @@ fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
             iced_image::Handle::from_bytes(icon_png(day, up_ink)),
             iced_image::Handle::from_bytes(icon_png(ink, down_ink)),
             iced_image::Handle::from_bytes(icon_png(day, down_ink)),
+            iced_image::Handle::from_bytes(icon_png(ink, focus_ink)),
+            iced_image::Handle::from_bytes(icon_png(day, focus_ink)),
         ]
     });
     let index = match kind {
@@ -7807,6 +8017,7 @@ fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
         Mini::Trash => 4,
         Mini::Up => 6,
         Mini::Down => 8,
+        Mini::Focus => 10,
     } + usize::from(!dark);
     handles
         .get(index)
@@ -7859,6 +8070,15 @@ fn trash_ink(dx: f64, dy: f64) -> bool {
     let side = (-12.0..15.0).contains(&dy) && (x - 11.0).abs() < 1.7;
     let bottom = (13.0..16.5).contains(&dy) && x < 12.0;
     handle || lid || side || bottom
+}
+
+/// Four corner brackets around a dot: a viewfinder, for writing with nothing else in view.
+fn focus_ink(dx: f64, dy: f64) -> bool {
+    let x = dx.abs();
+    let y = dy.abs();
+    let upright = (16.0..20.5).contains(&x) && (8.0..=20.5).contains(&y);
+    let across = (16.0..20.5).contains(&y) && (8.0..=20.5).contains(&x);
+    upright || across || x.hypot(y) < 4.5
 }
 
 fn up_ink(dx: f64, dy: f64) -> bool {
@@ -8988,5 +9208,109 @@ mod app_tests {
         let _ = app.update(Message::AliasDraft("abc".to_owned(), String::new()));
         assert_eq!(app.chat_name(&chat), "Key 12ab");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn wide(app: &mut App) {
+        let _ = app.update(Message::Resized(iced::Size::new(1100.0, 720.0)));
+    }
+
+    #[test]
+    fn focus_hides_the_panels_and_sends_the_buttons_and_the_bar_away() {
+        let _turn = one_at_a_time();
+        let dir = folder("focus");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        assert!(!app.focused(), "focus starts off");
+        assert!(app.slide_tools.open && app.slide_bar.open);
+
+        let _ = app.update(Message::ToggleFocus);
+        assert!(app.focused());
+        assert!(!app.slide_tools.open, "the buttons slide away");
+        assert!(!app.slide_bar.open, "the bar slides away");
+        assert!(app.slide_tools.moving(), "and they move, not jump");
+
+        // The handle and the Aa button bring them back, and send them away again.
+        let _ = app.update(Message::FocusTools);
+        assert!(app.slide_tools.open);
+        let _ = app.update(Message::FocusBar);
+        assert!(app.slide_bar.open);
+        let _ = app.update(Message::FocusTools);
+        assert!(!app.slide_tools.open);
+
+        // Leaving puts everything back at once, so nothing is left hidden.
+        let _ = app.update(Message::ToggleFocus);
+        assert!(!app.focused());
+        assert!(app.slide_tools.open && app.slide_bar.open);
+        assert!((app.slide_tools.shown() - 1.0).abs() < f32::EPSILON);
+        assert!((app.slide_bar.shown() - 1.0).abs() < f32::EPSILON);
+        assert!(!app.slide_tools.moving());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn focus_only_applies_to_writing_a_note_in_the_wide_layout() {
+        let _turn = one_at_a_time();
+        let dir = folder("focus-where");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::ToggleFocus);
+        assert!(app.focused());
+        // Another screen is not changed by it.
+        let _ = app.update(Message::ShowTasks);
+        assert!(!app.focused());
+        let _ = app.update(Message::ShowNotes);
+        assert!(app.focused(), "it is still on when the notes are back");
+        // A narrow window has its own layout.
+        let _ = app.update(Message::Resized(iced::Size::new(600.0, 700.0)));
+        assert!(!app.focused());
+        let _ = app.update(Message::Resized(iced::Size::new(1100.0, 720.0)));
+        assert!(app.focused());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_window_draws_in_every_state_of_focus() {
+        let _turn = one_at_a_time();
+        let dir = folder("focus-draw");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::TitleChanged("A note".to_owned()));
+        // Normal, going into focus (mid-slide), in focus with each thing pulled in, and out again.
+        drop(app.view());
+        let _ = app.update(Message::ToggleFocus);
+        drop(app.view());
+        let _ = app.update(Message::FocusTools);
+        drop(app.view());
+        let _ = app.update(Message::FocusBar);
+        drop(app.view());
+        let _ = app.update(Message::FocusBar);
+        let _ = app.update(Message::FocusTools);
+        drop(app.view());
+        // With the delete question open, which is drawn in the corner where the buttons were.
+        let _ = app.update(Message::AskDelete);
+        drop(app.view());
+        let _ = app.update(Message::CancelDelete);
+        let _ = app.update(Message::ToggleFocus);
+        drop(app.view());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_slide_eases_between_hidden_and_shown() {
+        use super::Slide;
+        assert!(Slide::settled(false).shown() < f32::EPSILON);
+        assert!((Slide::settled(true).shown() - 1.0).abs() < f32::EPSILON);
+        assert!(!Slide::settled(true).moving());
+        let mut slide = Slide::settled(false);
+        slide.set(true);
+        assert!(slide.moving());
+        let now = slide.shown();
+        assert!((0.0..=1.0).contains(&now), "{now}");
+        // Setting it to what it already is does not restart it.
+        let before = slide.since;
+        slide.set(true);
+        assert_eq!(slide.since, before);
+        slide.jump(false);
+        assert!(slide.shown() < f32::EPSILON && !slide.moving());
     }
 }

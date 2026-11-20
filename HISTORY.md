@@ -4,6 +4,14 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-20 — writing with nothing else in view
+
+An icon at the top right of a note turns on focus. Both panels go away, and the title shrinks to a small field at the top right with a button beside it that brings the formatting bar in. The round buttons at the lower right slide off to the right and leave a handle to pull them back, and the bar slides up out of sight. The tags and the note warning line go too. The panels' open or closed state is not changed, so leaving focus puts everything back at once. Focus is for the wide layout and a note being written. It is not for reading a book or an older version.
+
+The panels, the buttons, and the bar slide for about a fifth of a second. A timer redraws the window only while one of them is moving. Typing does not start it, and neither does scrolling. A later version of focus will spotlight the paragraph being written.
+
+The "Written by" line is off the page. The note list still shows the writer. The writer is kept for a per-note info icon, later.
+
 ## 2026-11-20 — the page parses and measures only what changed, and its marks can be reached
 
 Typing felt late in a note of any length. Every key re-parsed the whole page, `follow` measured every line again to find the caret, and `view` shaped every paragraph again to wrap it. At 13 KB a key cost about 12 ms to parse, 25 ms to follow, and the view on top of that. Now the parse restarts from the line that changed and stops as soon as the marks open at the top of a line match what they were. A test checks it against a full parse over thousands of random edits. Wrap widths and wraps are remembered, since they depend only on the text, the width, and the font. The start of each line is a running sum and no longer a scan from the top. The desktop crate and the crates on the saving path are built with optimizations in a dev build too. A key plus its view is now about 0.6 ms at 2.5 KB, 3 ms at 13 KB, and 12 ms at 51 KB. It was about 7, 36, and 130 ms.
