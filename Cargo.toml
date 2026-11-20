@@ -93,3 +93,10 @@ print_stderr = "warn"
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"
+
+# A plain `cargo run` builds in the dev profile, where the crypto crates, SQLCipher, and Iced
+# would run unoptimized. Signing and verifying then take about 170 times as long, which made the
+# window slow. Dependencies are built with optimizations here. The workspace's own crates stay
+# unoptimized, so stepping through them still works and rebuilding them stays quick.
+[profile.dev.package."*"]
+opt-level = 3

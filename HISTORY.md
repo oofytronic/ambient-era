@@ -4,6 +4,14 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-20 — dev builds optimize dependencies, and the lints pass
+
+A plain `cargo run` builds in the dev profile, which ran the crypto crates, SQLCipher, and Iced unoptimized. Checking a signature took about 170 times as long as in a release build, and the window felt slow. The workspace manifest now builds dependencies with `opt-level = 3` in the dev profile. The workspace's own crates stay unoptimized. The first build after this is slower, and every build after is not. In a debug build a save with 400 notes is now about 115 ms and the reload after it about 2 ms.
+
+`just lint` was failing before this change. It passes now, for the whole workspace and all targets, with warnings denied. Nothing was allowed or silenced to get there. The unchecked indexing in `sync.rs` is gone, because `sync_chat` finds its conversation once and `sync_except` marks each conversation as part of the sync or not instead of keeping a list of positions. `sync_except` is split into small functions. A function with no callers, `store_key_from_root`, was removed.
+
+The retry loops added on 2026-11-20 gave up too soon. A writer in a tight loop can win the lock several times in a row while another waits, and the lock is not first come, first served. Each loop now allows 32 tries and waits a little longer after each one, up to 8 ms. A test with three writers failed every time once the faster build made them collide more.
+
 ## 2026-11-20 — scrollbars are hidden
 
 Every scrollable in the window goes through `vscroll` and `hscroll`, so they share one rule. A scrollbar is no longer drawn at rest. Scrolling a pane shows a faint thin thumb for about 0.7 seconds, only on the pane under the pointer, and then it goes. A clear thumb shows while the pointer is on the bar itself, so a person who wants to drag it still can. Hovering a pane does not show it. Scrolling is how the bar is asked for, so typing does not draw it and does not start a timer.
