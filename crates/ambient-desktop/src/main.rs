@@ -199,6 +199,8 @@ struct App {
     note_search: bool,
     task_search: bool,
     chat_search: bool,
+    /// The conversation whose name is being typed. Otherwise the name is plain text.
+    alias_editing: Option<String>,
     invite_pick: Option<InvitePick>,
     /// Undo for notes that are not on screen. Still memory, still not the log.
     histories: BTreeMap<String, NoteHistory>,
@@ -400,6 +402,9 @@ enum Message {
     PickAppearance(profile::Appearance),
     CallDraft(String),
     AliasDraft(String, String),
+    /// The pencil beside a conversation's name: start typing it, or stop.
+    EditAlias,
+    FinishAlias,
     WipeDraft(String),
     ExportNotes,
     ConfirmWipe,
@@ -801,6 +806,7 @@ impl App {
             note_search: false,
             task_search: false,
             chat_search: false,
+            alias_editing: None,
             invite_pick: None,
             histories: BTreeMap::new(),
             history_order: Vec::new(),
@@ -1140,6 +1146,7 @@ impl App {
                 } else {
                     self.remember_unsaved();
                     self.screen = Screen::Chat;
+                    self.alias_editing = None;
                     self.sheet = Sheet::None;
                     if self.compact() {
                         self.detail = false;
@@ -1538,6 +1545,21 @@ impl App {
                     self.aliases.insert(id, text);
                 }
                 self.persist_names();
+                Task::none()
+            }
+            Message::EditAlias => match self.chat_id.clone() {
+                Some(id) if self.alias_editing.as_deref() == Some(id.as_str()) => {
+                    self.alias_editing = None;
+                    Task::none()
+                }
+                Some(id) => {
+                    self.alias_editing = Some(id);
+                    focus_named("chat-alias")
+                }
+                None => Task::none(),
+            },
+            Message::FinishAlias => {
+                self.alias_editing = None;
                 Task::none()
             }
             Message::WipeDraft(text) => {
@@ -3025,29 +3047,60 @@ impl App {
         let Some(id) = &self.chat_id else {
             return space().height(0).into();
         };
-        let draft = self.aliases.get(id).cloned().unwrap_or_default();
-        let id = id.clone();
+        let editing = self.alias_editing.as_deref() == Some(id.as_str());
         let searching = self.chat_search || !self.chat_query.trim().is_empty();
-        let mut head = column![
-            row![
-                text_input("What do you call them?", &draft)
-                    .on_input(move |text| Message::AliasDraft(id.clone(), text))
-                    .padding(10)
-                    .width(Fill)
-                    .style(field_style),
-                mini_button(
-                    mini_handle(Mini::Search, self.is_dark()),
-                    if searching { "Close search" } else { "Search" },
-                    Message::ToggleChatSearch,
-                ),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-            text("Only this computer remembers it.")
-                .size(12)
-                .color(ink.muted),
-        ]
-        .spacing(4);
+        let search = mini_button(
+            mini_handle(Mini::Search, self.is_dark()),
+            if searching { "Close search" } else { "Search" },
+            Message::ToggleChatSearch,
+        );
+        // The name is plain text. The pencil turns it into a field, so the header does not
+        // look like a form every time the chat is open.
+        let mut head = column![].spacing(4);
+        if editing {
+            let draft = self.aliases.get(id).cloned().unwrap_or_default();
+            let id = id.clone();
+            head = head
+                .push(
+                    row![
+                        text_input("What do you call them?", &draft)
+                            .id(iced::widget::Id::new("chat-alias"))
+                            .on_input(move |text| Message::AliasDraft(id.clone(), text))
+                            .on_submit(Message::FinishAlias)
+                            .padding(10)
+                            .width(Fill)
+                            .style(field_style),
+                        ghost_label("Done", Message::FinishAlias),
+                        search,
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                )
+                .push(
+                    text("Only this computer remembers it.")
+                        .size(12)
+                        .color(ink.muted),
+                );
+        } else {
+            let name = self
+                .chats
+                .iter()
+                .find(|chat| &chat.id == id)
+                .map_or_else(|| "Conversation".to_owned(), |chat| self.chat_name(chat));
+            head = head.push(
+                row![
+                    text(name).font(serif()).size(22).width(Fill),
+                    mini_button(
+                        mini_handle(Mini::Pencil, self.is_dark()),
+                        "Rename",
+                        Message::EditAlias,
+                    ),
+                    search,
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            );
+        }
         if searching {
             head = head.push(
                 text_input("Search this conversation", &self.chat_query)
@@ -8840,6 +8893,48 @@ mod app_tests {
             ["call the clinic"],
             "the removal did not show"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_conversation_name_is_text_until_the_pencil_is_pressed() {
+        let _turn = one_at_a_time();
+        let dir = folder("alias");
+        let mut app = open_app(&dir);
+        app.chats = vec![ambient_cli::ConversationSummary {
+            id: "abc".to_owned(),
+            label: "Key 12ab".to_owned(),
+            other: String::new(),
+        }];
+        app.chat_id = Some("abc".to_owned());
+        assert!(app.alias_editing.is_none(), "the name starts as plain text");
+
+        let _ = app.update(Message::EditAlias);
+        assert_eq!(app.alias_editing.as_deref(), Some("abc"));
+        let _ = app.update(Message::AliasDraft("abc".to_owned(), "Sam".to_owned()));
+        let chat = app.chats[0].clone();
+        assert_eq!(app.chat_name(&chat), "Sam", "typing names them at once");
+
+        // Enter, or Done, puts the plain name back.
+        let _ = app.update(Message::FinishAlias);
+        assert!(app.alias_editing.is_none());
+        assert_eq!(app.chat_name(&chat), "Sam");
+
+        // The pencil again opens it, and pressing it once more closes it.
+        let _ = app.update(Message::EditAlias);
+        assert!(app.alias_editing.is_some());
+        let _ = app.update(Message::EditAlias);
+        assert!(app.alias_editing.is_none());
+
+        // Leaving and coming back does not leave the field open.
+        let _ = app.update(Message::EditAlias);
+        let _ = app.update(Message::ShowNotes);
+        let _ = app.update(Message::ShowChat);
+        assert!(app.alias_editing.is_none());
+
+        // Clearing the name falls back to the label the conversation came with.
+        let _ = app.update(Message::AliasDraft("abc".to_owned(), String::new()));
+        assert_eq!(app.chat_name(&chat), "Key 12ab");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
