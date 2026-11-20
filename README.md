@@ -4,7 +4,7 @@
 
 > Signal's privacy, X's surface, AnyType's ownership — with an identity you hold as a key.
 
-**Status:** Pre-0.1. The Linux window does notes, a second folder, one 1:1 through a loopback relay, device revoke from the root window, and per-note writer labels. The relay is cleartext on `127.0.0.1` and is not a public deployment. The recovery seal is implemented. The window shows the BIP39 phrase and can restore from it. Contact invites are a link or a QR. Chat lines show the advisory time from the event envelope. The key file can be wrapped with a passphrase; that is a local unlock, not a platform passkey. Native search is a SQLCipher FTS5 index beside the sealed log. Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
+**Status:** Pre-0.1. The Linux window, Aerodash, does notes, tasks, a second folder, one 1:1 through a loopback relay, and device revoke from the root window. The note list shows which device wrote each note. The relay is cleartext on `127.0.0.1` and is not a public deployment. The recovery seal is implemented. The window shows the BIP39 phrase and can restore from it. Contact invites are a link or a QR. Chat lines show the advisory time from the event envelope. The key file can be wrapped with a passphrase; that is a local unlock, not a platform passkey. Native search is a SQLCipher FTS5 index beside the sealed log. Spelling checks against a bundled English dictionary and a personal one that stays on this computer. A focus mode hides everything but the writing. What changed most recently, and what is still open, is in [docs/session-2026-11-19-to-20.md](docs/session-2026-11-19-to-20.md) and [docs/open-items.md](docs/open-items.md). Encryption is [ADR-0005](docs/adr/0005-private-space-encryption.md). Promises are [THREAT_MODEL.md](THREAT_MODEL.md). The decision log is [HISTORY.md](HISTORY.md).
 
 ---
 
@@ -71,7 +71,7 @@ The pieces exist. The gap is that no one has put them together under one identit
 
 ## Status of the code
 
-The Rust workspace under `crates/` is what `just ci` builds. Behavior that exists: event envelopes, the identity log through revoke, notes and conversation projection, HPKE seals, the relay JSON codec, an in-memory loopback relay, the `ambient` CLI, and the Linux notes window. `ambient-sync`, `ambient-capabilities`, `ambient-docs`, `ambient-core`, and `ambient-ffi` are still scaffolds. A wire-format change still starts in the spec and the vectors, not in a crate.
+The Rust workspace under `crates/` is what `just ci` builds. Behavior that exists: event envelopes, the identity log through revoke, notes and conversation projection, HPKE seals, the relay JSON codec, a loopback relay with durable mailboxes, TLS to a relay, recovery from the phrase, the `ambient` CLI, and the Linux notes window. A signature is checked once per load or write, a write never replaces a file it did not read, and a sync merges again if the file moved while it waited. `ambient-sync`, `ambient-capabilities`, `ambient-docs`, `ambient-core`, and `ambient-ffi` are still scaffolds. A wire-format change still starts in the spec and the vectors, not in a crate.
 
 ## Layout
 

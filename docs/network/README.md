@@ -71,6 +71,18 @@ ambient-relay --tls fullchain.pem privkey.pem --store /var/lib/ambient-relay --b
 
 This program does not request a certificate. A small VPS is the straightforward machine. A computer at home is the same binary, if the port can be reached and the machine stays up. Neither is a special image. Do not rent one until there is a certificate and the address is put in the introduction list or pinned. Until then the app stays on this computer.
 
+## How a sync writes
+
+Sync reads a log, waits on the relay, then writes. Anything written to that log in the wait must survive.
+
+- Each log has a stamp, its counter and length, read before the log is read. A write passes the stamp it read. If the file has moved, the write is refused and nothing is changed.
+- A refused sync takes what is in the file now and files what the relay delivered into it again, then writes. This runs up to 32 times, with a short pause that grows between tries, because the lock is not first come, first served.
+- A conversation slot keeps what the relay delivered until the write, so it can be merged again.
+- A lock on a sibling `*.lock` file covers the check and the rename. The bytes go to a sibling `*.part` file, are flushed to disk, and are renamed over the log. A reader sees the old file or the new one.
+- Restore writes a folder that has no log yet and does not need this.
+
+The cursor files are written after the logs. If a write fails, the cursor does not move and the same blobs come again.
+
 ## After the MVP, still this track
 
 Not permission to start.

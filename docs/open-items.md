@@ -1,0 +1,75 @@
+# Open items
+
+Everything that is undecided, unbuilt, unverified, or unfixed as of 2026-11-20, in one place. [ROADMAP.md](../ROADMAP.md) is the order of the work. This is the loose ends. When one is closed, delete its line and say so in [HISTORY.md](../HISTORY.md).
+
+How it got here is [session-2026-11-19-to-20.md](session-2026-11-19-to-20.md).
+
+## Needs the owner
+
+These are not for an agent to settle.
+
+| # | What | Why it waits | Where |
+|:--|:--|:--|:--|
+| 1 | **Review and accept the changes to `ambient-spaces`, `ambient-identity`, and `ambient-store`.** The merge now makes a note from a not-yet-enrolled signer wait. There are new `project_log_verified` and `project_notes_verified` functions, and a compare-and-write, `write_log_if`, with a lock. | The repo rules say these crates need owner review. No wire format, key, or signature rule changed. | [ADR-0006](adr/0006-wait-for-enrollment.md) (Proposed), commits `49d82e7` and `398b78c` |
+| 2 | **The recovery mailbox conflicts with the relay spec.** Spec 02 derives it from the root with HKDF so a phrase alone can find the backup. Spec 04 says a mailbox id must never be derived from a key or an identity. Recovery is built and works, so the conflict is live. | It is a privacy question. A stable derived id is exactly what T1 says the relay is not given. Raised twice and not settled. | [spec 02](spec/02-identity-log.md), [spec 04](spec/04-relay-api.md), [THREAT_MODEL.md](../THREAT_MODEL.md) |
+| 3 | **Licensing.** Undecided. The repo now bundles an English dictionary under the SCOWL and Hunspell notice, which is permissive and has to travel with the list, and a font under the OFL. | Needed before the first user who is not the owner. | [ADR-0004](adr/0004-licensing.md), `crates/ambient-desktop/dict/SCOWL-LICENSE.txt` |
+| 4 | **Merging `test` into `trunk`.** `test` is 66 commits ahead. `trunk` stopped on 2026-10-29. The branch `claude/gifted-euler-jlqp2a` was only a session branch, equals `trunk`, and can be deleted. | Nothing here is merged. | `git log origin/trunk..origin/test` |
+| 5 | **The dependency bumps.** Dependabot branches for `ed25519-dalek` 3.0.0, `chacha20poly1305` 0.11, `hkdf` 0.13, `sha2` 0.11, `getrandom` 0.4, and one Actions bump. | They are crypto crates, two of them major versions, and they were cut on 2026-11-04 from the old `trunk`. Nobody has built or reviewed them, and they would have to be redone against `test`. | `origin/dependabot/*` |
+| 6 | **Two editing rules changed and may not be what you want.** Enter on an empty list item now ends the list. It used to add another empty item. Tab does nothing in a paragraph. | Taste. Both are one line to reverse. | `continue_enter` and `binding()` in the desktop crate |
+| 7 | **Whether dev builds should optimize the crates on the typing path.** | It makes the window fast and it makes those crates harder to step through. | `Cargo.toml`, [ADR-0003](adr/0003-workspace-and-tooling.md) |
+
+## Asked for, not built
+
+- **Spotlight the paragraph being written** in focus mode. Focus is the place for it. Nothing else in the page changes.
+- **An info or settings icon on each note.** It is where the device that wrote the note goes. The "Written by" line is gone from the page and `note_writer` is kept for it. The note list still shows the writer.
+- **Focus mode for a narrow window.** It is only for the wide layout today. The panels collapse at once and do not slide. There is no key to leave it other than the icon and Ctrl or Cmd + a full stop.
+
+## Offered, not built
+
+Small things that would help daily use.
+
+- Open the last note again when the app starts.
+- A list of recently deleted notes, with a way to bring one back. A delete is a snapshot whose body is a marker, so the text is still in the log.
+- Remember the window's size and place.
+- A way to see and remove the words in the personal dictionary. There is only an add.
+- Spelling for other languages, and for words with an accent. A word with a non-ASCII letter is never checked.
+
+## Editing gaps found while testing
+
+None is a regression. They were found, and left.
+
+- Bold or italic inside a code span adds literal marks. It should do nothing.
+- Bolding a URL splits it at the colon, `**https**://example.com`.
+- Pressing Enter in the middle of a list item leaves a space at the start of the new item.
+- Nesting an ordered item does not renumber the list.
+- Backspace at the start of a list item's text does not take the item out a level.
+- There is no key for a task's checkbox, and no auto-closing of marks.
+- A capitalized word the dictionary does not know is taken for a name unless it starts a sentence. A capitalized typo in the middle of a sentence is not underlined.
+
+## Performance headroom
+
+Measured on 2026-11-19 and 2026-11-20. See the numbers in the session record.
+
+- The page is still drawn in full on every update. A key plus its view is 3 ms at 13 KB, 12 ms at 51 KB, and 46 ms at 194 KB. A cache of the built lines, or drawing only what is on screen, would make it flat.
+- A save still rewrites the whole sealed log and rebuilds the projection from the verified events. It is 30 ms at a thousand notes. An append-only layout needs a new store format and a nonce scheme, and so an ADR.
+- The search index is rebuilt in full after any change, 65 ms at a thousand notes. Updating only the notes that changed would remove that.
+- A first load verifies every signature, 80 µs each. That is once per run.
+
+## Merge and protocol
+
+- **A removal and a note from the removed member** still depend on event-id order when neither refers to the other. A device revocation has `up_to` for this. A member removal has no such marker. See [ADR-0006](adr/0006-wait-for-enrollment.md).
+- **There is no vector format for a projection.** The merge rule has tests and no conformance vector, so a second implementation could not check itself against it.
+- **Spec 05** (long-form creations) is intentionally unwritten.
+- The relay is cleartext on `127.0.0.1`. TLS to a relay is built. The introduction list is empty, and the replacement test, step 7 of [the network track](network/README.md), has not been run. No public relay exists.
+
+## Not verified
+
+- **Nothing in the window was seen.** There was no display. Covered by tests of state and of pure functions, not by eyes: when the scrollbar appears and for how long, the focus slides, where the delete card sits, the pencil, how the revealed marks look, and Tab on a selection. Look at these first.
+- The slow scrolling was reported once and was fixed by removing a message per scroll tick. It was reported fine afterward, with other changes in the same build. It has not been confirmed on its own.
+- `just deny` was not run. `just`, `nextest`, and `cargo-deny` were not installed where this was done. No dependency was added. The equivalent `cargo` commands passed.
+- GitHub Actions was not looked at.
+- A Mac or a Windows build. The window is Linux only.
+
+## Still scaffolds
+
+`ambient-core`, `ambient-sync`, `ambient-capabilities`, `ambient-docs`, and `ambient-ffi` have no behavior. The v0.1 exit in [ROADMAP.md](../ROADMAP.md) is not met: the owner on a second computer for real notes, one 1:1 with one other person, an offline gap, and one restore from the phrase. A green test run is not that.

@@ -23,6 +23,10 @@ just ci
 
 `just ci` is format, lint, test, docs, the wasm check, and the dependency policy. Do not weaken a check to make it pass.
 
+`just lint` passes on the whole workspace and all targets. Keep it that way: run it before the commit, not after, and gate the commit on it. If `just` and `cargo-nextest` are not installed, the same checks are `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`, and `cargo check` for `wasm32-unknown-unknown` on the protocol crates. `cargo deny check` has no substitute.
+
+In a dev build, dependencies and the crates on the typing, saving, and syncing path are optimized (`[profile.dev.package]` in `Cargo.toml`). The first build after pulling it is slower. Stepping through those crates in a debugger is harder. See [ADR-0003](docs/adr/0003-workspace-and-tooling.md).
+
 ## Changes
 
 - Conventional commits, small enough to read.
@@ -35,4 +39,6 @@ just ci
 
 - Do not add a second encryption path, an agent runtime, or a JavaScript client.
 - If a turn changes a locked choice, update `HISTORY.md` in the same change.
+- A change to which events a projection applies is a protocol-behavior change. It needs a spec edit and an ADR, and it needs owner review. A change to how a log is written, locked, or retried is a change to data safety. Say so in the commit.
+- Check the branch before describing the app. `git fetch` and `git branch -a`. A stale checkout was once read as the whole project.
 - If you are unsure about a security-relevant choice, stop and ask.

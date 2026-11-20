@@ -7,6 +7,7 @@ The one primitive for conversations and creations (ADR-0001). A Space is a membe
 ## Invariants
 
 - Every private Space is sealed with HPKE (RFC 9180) to each member device's current encryption key. There is no second encryption path and no MLS dependency.
+- A note or message from a signer who is not yet a member waits for an enrollment, and is refused only when no event left can enroll them ([ADR-0006](../../docs/adr/0006-wait-for-enrollment.md)). The projection of a set of events must not depend on event ids or arrival order. A test that shuffles the arrival order is the check.
 - Membership and application events stay commutative. Do not add a totally ordered group-commit cipher without a new ADR.
 - Events from members without the required role are ignored by every client. Read-only is enforced by rules, not by cryptography, and the UI must say so.
 - A share Space carries a signed expiry; honest clients purge on expiry or revocation. Purging does not mean a hostile client forgot.

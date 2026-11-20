@@ -4,6 +4,26 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-20 — the log of the last two days, in one place
+
+[docs/session-2026-11-19-to-20.md](docs/session-2026-11-19-to-20.md) is the story of 2026-11-19 and 2026-11-20 in order, with every commit, what was measured, and the mistakes. [docs/open-items.md](docs/open-items.md) is what is still open. [ADR-0006](docs/adr/0006-wait-for-enrollment.md) records the merge-order decision and is Proposed, waiting for owner review. Entries below are in the order they were written, newest first.
+
+## 2026-11-20 — erasing a notebook erases its dictionary
+
+"Erase this notebook" removed the files, but the personal dictionary's words stayed in memory, and the next word added would have written all of them into the new notebook's `dictionary` file. The words came from notes that were erased. They are cleared now, along with focus mode, and a test checks it. The small local files beside the log (`names`, `profile`, `seen`, `dictionary`) are plain text, and [THREAT_MODEL.md](THREAT_MODEL.md) now says so.
+
+## 2026-11-20 — fixes from using the app
+
+The Tasks tab did not show a task that was added, removed, checked, or cleared until the tab was left and opened again. A change to a note that is not open is written in the background and comes back as `Applied`, and `finish_applied` installed the new notebook without rebuilding the task list. `finish_saved` did, in the same case. It rebuilds it now.
+
+A conversation's name is plain text with a pencil beside it, and the pencil turns it into a field. The delete question appears in the lower right over the editor, where the delete button was, and not at the bottom of the left column.
+
+These came with a test harness for the window: `App::at(dir)` builds a real `App` on a folder, and a `cfg(test)` recorder in `apply_note` lets a test do the background writes the app asked for and hand each result back through `update`. See [docs/TESTING.md](docs/TESTING.md).
+
+## 2026-11-19 — the search index builds in one transaction
+
+Rebuilding the SQLCipher index deleted every row and then inserted each note in its own auto-committed statement, which is one flush to disk per note. The index is rebuilt on the first search after any note changes, so the first keystroke in search after a save paid for all of it, 1.7 s at a thousand notes. The rebuild is one transaction now, rolled back if an insert fails, and takes about 65 ms. Searches while nothing has changed were already fast. The rebuild still happens in full, not per changed note. See [docs/open-items.md](docs/open-items.md).
+
 ## 2026-11-20 — small things for daily use
 
 Enter in a note's title moves to the writing. The Tasks tab puts the cursor in the add field when it opens and keeps it there after a task is added. Ctrl or Cmd with a full stop turns focus on and off. A Keys card in settings lists every key, because most have no button to find them by.

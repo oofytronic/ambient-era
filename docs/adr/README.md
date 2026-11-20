@@ -9,6 +9,7 @@ Decisions that are hard to reverse, or that others will wonder about later, are 
 | [0003](0003-workspace-and-tooling.md) | Workspace layout, lints, dependency policy, and CI | Accepted |
 | [0004](0004-licensing.md) | Licensing | Deferred |
 | [0005](0005-private-space-encryption.md) | Private Spaces are sealed with HPKE, not MLS | Accepted |
+| [0006](0006-wait-for-enrollment.md) | A note from a signer who is not yet a member waits for an enrollment | Proposed |
 
 ## Template
 
