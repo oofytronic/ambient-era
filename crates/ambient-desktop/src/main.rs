@@ -213,6 +213,8 @@ struct App {
     focus: bool,
     /// The right panel shows this note's settings, not its links.
     note_panel: bool,
+    /// Groups the owner has folded in the list. Only for this run.
+    folded: BTreeSet<String>,
     /// A selection waiting for a chat to be chosen: its words and the lines it covers.
     send_part: Option<(String, usize, usize)>,
     /// The note whose row the pointer is over, so its delete button shows.
@@ -452,6 +454,8 @@ enum Message {
     BackedUp(Result<profile::BackupReport, String>),
     /// The Send button in the bar over a selection: send only those words, with where they are from.
     SendSelection,
+    /// Fold or open a group in the list.
+    Fold(String),
     /// Show or close the Tasks note over the Tasks tab.
     ToggleTasksNote,
     /// The icon at the top of the right panel: this note's settings, or its links.
@@ -874,6 +878,7 @@ impl App {
             note_panel: false,
             hover_row: None,
             send_part: None,
+            folded: BTreeSet::new(),
             slide_bar: Slide::settled(true),
             slide_panels: Slide::settled(true),
             alias_editing: None,
@@ -1707,6 +1712,12 @@ impl App {
                 self.send_selection();
                 Task::none()
             }
+            Message::Fold(id) => {
+                if !self.folded.remove(&id) {
+                    self.folded.insert(id);
+                }
+                Task::none()
+            }
             Message::ToggleTasksNote => {
                 self.tasks_note_open = !self.tasks_note_open;
                 Task::none()
@@ -2241,24 +2252,14 @@ impl App {
             );
         }
         if self.query.trim().is_empty() && self.tag.is_none() {
-            for note in &self.notes {
-                if self.pieces.contains(&note.id) {
-                    continue;
-                }
-                list = list.push(self.note_row(note, 0.0));
-                if let Some((_, targets)) = self.groups.iter().find(|(id, _)| id == &note.id) {
-                    for target in targets {
-                        if let Some(piece) =
-                            self.notes.iter().find(|item| Self::target_is(target, item))
-                        {
-                            list = list.push(self.note_row(piece, 16.0));
-                        }
-                    }
+            for line in outline(&self.notes, &self.groups, &self.folded) {
+                if let Some(note) = self.notes.get(line.note) {
+                    list = list.push(self.note_row(note, line.depth, line.fold));
                 }
             }
         } else {
             for note in &self.notes {
-                list = list.push(self.note_row(note, 0.0));
+                list = list.push(self.note_row(note, 0, None));
             }
         }
         if !self.query.trim().is_empty() && !self.search_chats.is_empty() {
@@ -2293,7 +2294,13 @@ impl App {
         .into()
     }
 
-    fn note_row(&self, note: &NoteSummary, indent: f32) -> Element<'_, Message> {
+    /// One row of the list. `fold` is `Some(open)` for a group, which gets a handle to fold it.
+    fn note_row(
+        &self,
+        note: &NoteSummary,
+        depth: usize,
+        fold: Option<bool>,
+    ) -> Element<'_, Message> {
         let ink = self.ink();
         let selected = self.selected.as_deref() == Some(note.id.as_str());
         let title = if note.title.is_empty() {
@@ -2337,7 +2344,7 @@ impl App {
                 top: 8.0,
                 right: 10.0,
                 bottom: 8.0,
-                left: 10.0 + indent,
+                left: 10.0,
             })
             .on_press(Message::Select(note.id.clone()))
             .style(list_row(selected));
@@ -2357,10 +2364,27 @@ impl App {
                 .padding([0.0, 4.0]),
             );
         }
-        mouse_area(layers)
+        let row_hit = mouse_area(layers)
             .on_enter(Message::RowHover(note.id.clone(), true))
-            .on_exit(Message::RowHover(note.id.clone(), false))
-            .into()
+            .on_exit(Message::RowHover(note.id.clone(), false));
+        let handle: Element<'_, Message> = match fold {
+            Some(open) => mini_button(
+                mini_handle(if open { Mini::Up } else { Mini::Down }, self.is_dark()),
+                if open {
+                    "Fold this group"
+                } else {
+                    "Open this group"
+                },
+                Message::Fold(note.id.clone()),
+            ),
+            None => space().width(28).into(),
+        };
+        // A level in is a step right, and a thin line down the left shows which group it is in.
+        let mut line = row![].align_y(iced::Alignment::Center);
+        for _ in 0..depth {
+            line = line.push(space().width(14)).push(hairline_v());
+        }
+        line.push(handle).push(row_hit).into()
     }
 
     fn chat_hit_row(&self, hit: &lane::ChatHit) -> Element<'_, Message> {
@@ -7879,6 +7903,109 @@ fn selection_message(title: &str, lines: (usize, usize), home: &str, words: &str
     out
 }
 
+/// One line of the outline: which note, how deep, and `Some(open)` when it is a group.
+#[derive(Debug, Eq, PartialEq)]
+struct OutlineLine {
+    note: usize,
+    depth: usize,
+    fold: Option<bool>,
+}
+
+/// The list as nested groups. A note linked from a group is drawn inside it, whether or not it
+/// is a group itself, and is not drawn again at the top. A note two groups link is drawn in
+/// each. A group is drawn once per place and never inside itself, so a loop of links ends.
+/// Notes that are in a loop with no way in from the top are still drawn, at the top.
+fn outline(
+    notes: &[NoteSummary],
+    groups: &[(String, Vec<String>)],
+    folded: &BTreeSet<String>,
+) -> Vec<OutlineLine> {
+    #[allow(clippy::too_many_arguments)]
+    fn walk(
+        at: usize,
+        depth: usize,
+        path: &mut Vec<usize>,
+        drawn: &mut BTreeSet<usize>,
+        out: &mut Vec<OutlineLine>,
+        children: &dyn Fn(usize) -> Vec<usize>,
+        notes: &[NoteSummary],
+        folded: &BTreeSet<String>,
+        show: bool,
+    ) {
+        drawn.insert(at);
+        let below: Vec<usize> = children(at)
+            .into_iter()
+            .filter(|child| !path.contains(child))
+            .collect();
+        let is_group = !below.is_empty();
+        let shut = notes.get(at).is_some_and(|note| folded.contains(&note.id));
+        if show {
+            out.push(OutlineLine {
+                note: at,
+                depth,
+                fold: is_group.then_some(!shut),
+            });
+        }
+        // What is inside a folded group is not drawn, but it is not loose either.
+        path.push(at);
+        for child in below {
+            walk(
+                child,
+                depth + 1,
+                path,
+                drawn,
+                out,
+                children,
+                notes,
+                folded,
+                show && !shut,
+            );
+        }
+        path.pop();
+    }
+    let children = |at: usize| -> Vec<usize> {
+        let Some(note) = notes.get(at) else {
+            return Vec::new();
+        };
+        let Some((_, targets)) = groups.iter().find(|(id, _)| id == &note.id) else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        for target in targets {
+            if let Some(index) = notes.iter().position(|item| App::target_is(target, item))
+                && index != at
+                && !found.contains(&index)
+            {
+                found.push(index);
+            }
+        }
+        found
+    };
+    let mut inside = BTreeSet::new();
+    for at in 0..notes.len() {
+        inside.extend(children(at));
+    }
+    let mut out = Vec::new();
+    let mut drawn = BTreeSet::new();
+    let mut path = Vec::new();
+    for at in 0..notes.len() {
+        if !inside.contains(&at) {
+            walk(
+                at, 0, &mut path, &mut drawn, &mut out, &children, notes, folded, true,
+            );
+        }
+    }
+    // A loop that nothing outside links to.
+    for at in 0..notes.len() {
+        if !drawn.contains(&at) {
+            walk(
+                at, 0, &mut path, &mut drawn, &mut out, &children, notes, folded, true,
+            );
+        }
+    }
+    out
+}
+
 fn is_tasks_note(note: &NoteSummary) -> bool {
     note.title == "Tasks" && !note.conflict
 }
@@ -10275,6 +10402,63 @@ mod app_tests {
         app.slide_panels.jump(true);
         assert!((app.panel_shown() - 1.0).abs() < f32::EPSILON);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn groups_nest_inside_groups_and_a_note_is_not_drawn_twice_at_the_top() {
+        let note = |id: &str| super::NoteSummary {
+            id: id.to_owned(),
+            title: id.to_owned(),
+            writer: String::new(),
+            conflict: false,
+            tags: Vec::new(),
+            version: String::new(),
+        };
+        let notes: Vec<_> = ["book", "part", "scene", "loose", "x", "y"]
+            .map(note)
+            .into();
+        let groups = vec![
+            (
+                "book".to_owned(),
+                vec!["part".to_owned(), "loose2".to_owned()],
+            ),
+            ("part".to_owned(), vec!["scene".to_owned()]),
+            ("x".to_owned(), vec!["y".to_owned()]),
+            ("y".to_owned(), vec!["x".to_owned()]),
+        ];
+        let unfolded = std::collections::BTreeSet::new();
+        let shape = |folded: &std::collections::BTreeSet<String>| {
+            super::outline(&notes, &groups, folded)
+                .into_iter()
+                .map(|line| (notes[line.note].id.clone(), line.depth, line.fold))
+                .collect::<Vec<_>>()
+        };
+        let open = shape(&unfolded);
+        let expect = |id: &str, depth, fold| (id.to_owned(), depth, fold);
+        assert_eq!(
+            open,
+            [
+                expect("book", 0, Some(true)),
+                expect("part", 1, Some(true)),
+                expect("scene", 2, None),
+                expect("loose", 0, None),
+                // a loop with no way in from the top still shows, once each way round
+                expect("x", 0, Some(true)),
+                expect("y", 1, None),
+            ]
+        );
+        // Folding a group hides what is inside it, and only that.
+        let mut folded = std::collections::BTreeSet::new();
+        folded.insert("book".to_owned());
+        assert_eq!(
+            shape(&folded),
+            [
+                expect("book", 0, Some(false)),
+                expect("loose", 0, None),
+                expect("x", 0, Some(true)),
+                expect("y", 1, None),
+            ]
+        );
     }
 
     #[test]

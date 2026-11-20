@@ -395,3 +395,7 @@ The owner used v0.1 for a short time and asked for nine small things. No locked 
 - The side panels ease in and out of focus.
 
 Not done, and why: [open-items.md](docs/open-items.md). Nothing was seen in a window.
+
+## 2026-11-20 — The list nests groups inside groups
+
+A piece that was itself a group showed twice: under its parent and again at the top as its own group. The list is now an outline. Groups nest to any depth, each has a handle to fold it, and a note is drawn at the top only when no group links it. Loops of links end. Folded state is not kept between runs. Nothing was seen in a window.
