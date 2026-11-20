@@ -219,6 +219,8 @@ struct App {
     hover_row: Option<String>,
     /// The formatting bar, while writing in focus. Hidden until pulled in.
     slide_bar: Slide,
+    /// The list and the group panel, with their edge handles, in and out of focus.
+    slide_panels: Slide,
     /// The conversation whose name is being typed. Otherwise the name is plain text.
     alias_editing: Option<String>,
     invite_pick: Option<InvitePick>,
@@ -873,6 +875,7 @@ impl App {
             hover_row: None,
             send_part: None,
             slide_bar: Slide::settled(true),
+            slide_panels: Slide::settled(true),
             alias_editing: None,
             invite_pick: None,
             histories: BTreeMap::new(),
@@ -1015,7 +1018,7 @@ impl App {
                 wake_stream,
             ));
         }
-        if app.slide_bar.moving() {
+        if app.slide_bar.moving() || app.slide_panels.moving() {
             parts.push(
                 iced::time::every(std::time::Duration::from_millis(16)).map(|_| Message::SlideTick),
             );
@@ -1679,6 +1682,7 @@ impl App {
                 self.focus = !self.focus;
                 // Going in, the bar slides away. Coming out it is back at once.
                 self.slide_bar.set(!self.focus);
+                self.slide_panels.set(!self.focus);
                 if !self.focus {
                     self.slide_bar.jump(true);
                 }
@@ -1892,21 +1896,37 @@ impl App {
             .height(Fill)
             .into();
         }
-        let focused = self.focused();
-        let mut body = row![].width(Fill).height(Fill);
-        if self.show_list && !focused {
-            body = body.push(self.sidebar()).push(hairline_v());
+        // The panels are always in the row, at a width that eases between its full size and none,
+        // so the page does not change place in the tree and lose the caret when they go.
+        let t = self.panel_shown();
+        let mut left = row![];
+        let mut left_full = 28.0;
+        if self.show_list {
+            left = left.push(self.sidebar()).push(hairline_v());
+            left_full += self.side_width() + 1.0;
         }
-        if !focused {
-            body = body.push(self.edge_toggle(true));
-        }
-        body = body.push(self.main());
-        if self.context_room() && !focused {
-            body = body.push(self.edge_toggle(false));
+        left = left.push(self.edge_toggle(true));
+        let mut right = row![];
+        let mut right_full = 0.0;
+        if self.context_room() {
+            right = right.push(self.edge_toggle(false));
+            right_full += 28.0;
             if self.show_context {
-                body = body.push(hairline_v()).push(self.context_pane());
+                right = right.push(hairline_v()).push(self.context_pane());
+                right_full += 241.0;
             }
         }
+        let body = row![
+            container(left).width(left_full * t).height(Fill).clip(true),
+            self.main(),
+            container(right)
+                .width(right_full * t)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Right)
+                .clip(true),
+        ]
+        .width(Fill)
+        .height(Fill);
         column![self.toolbar(), hairline(), body]
             .width(Fill)
             .height(Fill)
@@ -4628,6 +4648,16 @@ impl App {
 
     /// Writing with nothing else in view. Only in the wide layout, and only for a note being
     /// written, not a book being read or an older version.
+    /// How much of the side panels is in view, 0 to 1. In focus they are away. Leaving focus,
+    /// or turning on a layout where focus does not apply, brings them back.
+    fn panel_shown(&self) -> f32 {
+        if self.focused() || self.slide_panels.moving() {
+            self.slide_panels.shown()
+        } else {
+            1.0
+        }
+    }
+
     fn focused(&self) -> bool {
         self.focus
             && self.editing_note()
@@ -6949,6 +6979,7 @@ impl App {
         self.share_words();
         self.focus = false;
         self.slide_bar.jump(true);
+        self.slide_panels.jump(true);
         self.note_panel = false;
         self.catalog.clear();
         self.notes.clear();
@@ -10219,6 +10250,31 @@ mod app_tests {
             (super::wheel_step(100_000.0) - 150.0).abs() < f32::EPSILON,
             "and a huge one is capped"
         );
+    }
+
+    #[test]
+    fn the_side_panels_ease_out_and_back_with_focus() {
+        let _turn = one_at_a_time();
+        let dir = folder("panel-slide");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::TitleChanged("A note".to_owned()));
+        assert!((app.panel_shown() - 1.0).abs() < f32::EPSILON);
+        let _ = app.update(Message::ToggleFocus);
+        assert!(app.slide_panels.moving(), "they move, not jump");
+        assert!(app.panel_shown() > 0.5, "they have only just started to go");
+        drop(app.view());
+        app.slide_panels.jump(false);
+        assert!(
+            app.panel_shown() < f32::EPSILON,
+            "and in the end they are away"
+        );
+        drop(app.view());
+        let _ = app.update(Message::ToggleFocus);
+        assert!(app.slide_panels.moving(), "they come back by sliding");
+        app.slide_panels.jump(true);
+        assert!((app.panel_shown() - 1.0).abs() < f32::EPSILON);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
