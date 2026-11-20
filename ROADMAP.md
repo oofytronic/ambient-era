@@ -24,20 +24,21 @@ Declared by the owner on 2026-11-20. Desktop only. One person, one computer. No 
 | 2 | Identity | Done. A random root with a recovery phrase, an identity log with genesis and a device, and a key file that a passphrase can wrap. |
 | 3 | Local store and notes | Done. The `ambient` CLI creates, edits, and searches notes offline. The log is an encrypted file. Native search is a SQLCipher FTS5 index beside it. A save checks each signature once and never replaces a file it did not read. |
 | 4 | Desktop app | Done. The Linux window, Aerodash, is Iced over the same folder as the CLI. Notes, tasks, tags, a markdown page that styles as it is typed, search, spelling with a personal dictionary, a focus mode. Not the OS keystore. |
+| 5 | Back up | Done. Back up, in settings, copies the folder to another place, by hand. The copy has the key file, leaves out the export folder and the search index, is made whole before it is named, never overwrites an earlier one, and has the key file and the notes log compared with the originals. Nothing reminds the owner or runs it on a schedule. Restoring is copying the folder back. |
 
 **Exit.** The owner uses it daily, on one computer, for real work. A green test run is not the exit. The owner declared it on 2026-11-20 and started that use. This file does not say the use is done.
 
-**Still true at the end of v0.1.** The notes are on one disk. There is no copy anywhere else, and the recovery phrase does not bring the notes back by itself. A stolen or seized device whose key file is not wrapped, or that is unlocked, gives up the notes. The key file is not the OS keystore. The product is not anonymous. There is no agent, no sensing, and no public mirror.
+**Still true at the end of v0.1.** The notes are on one disk until the owner makes a copy with Back up. Nothing makes one for them, and the recovery phrase does not bring the notes back by itself. A copy has the key file, so whoever has the copy can read the notes unless the key file is wrapped. A stolen or seized device whose key file is not wrapped, or that is unlocked, gives up the notes. The key file is not the OS keystore. The product is not anonymous. There is no agent, no sensing, and no public mirror.
 
 ## v0.2 — a second computer and a private 1:1, then groups
 
-Everything in steps 5 through 7 is already built and tested, on two folders on one computer. None of it has been used between two machines. Build, and use, in this order. Do not skip ahead.
+Everything in steps 6 through 8 is already built and tested, on two folders on one computer. None of it has been used between two machines. Build, and use, in this order. Do not skip ahead.
 
 | Step | Work | Done when |
 |:--|:--|:--|
-| 5 | Relay and a second device | The window pairs a second folder and a note shows up there. The relay starts with the window and syncs on its own. It stores opaque blobs and binds `127.0.0.1` in the clear, which spec 04 says is not a public deployment. Two folders on one computer, not two machines. |
-| 6 | 1:1 | The window opens a conversation, and can open another. Each one has its own contact key. Text is sealed to that key. The invite is a link or a QR. Messages show up after both windows sync. |
-| 7 | Devices, activity, copy | Revoke a device from the root window. The note list shows which device wrote the current version. The editor's line for it was taken off the page on 2026-11-20 and comes back with a per-note info icon. Copy a note into a chat as text is in. Recovery restore from the phrase is in the window, and the restored folder enrolls its new device. |
+| 6 | Relay and a second device | The window pairs a second folder and a note shows up there. The relay starts with the window and syncs on its own. It stores opaque blobs and binds `127.0.0.1` in the clear, which spec 04 says is not a public deployment. Two folders on one computer, not two machines. |
+| 7 | 1:1 | The window opens a conversation, and can open another. Each one has its own contact key. Text is sealed to that key. The invite is a link or a QR. Messages show up after both windows sync. |
+| 8 | Devices, activity, copy | Revoke a device from the root window. The note list shows which device wrote the current version. The editor's line for it was taken off the page on 2026-11-20 and comes back with a per-note info icon. Copy a note into a chat as text is in. Recovery restore from the phrase is in the window, and the restored folder enrolls its new device. |
 
 The network track in [docs/network/README.md](docs/network/README.md) is how a second computer reaches the first without an address being typed. It is part of this stage.
 
@@ -47,9 +48,9 @@ Then, and only then:
 
 | Step | Work | Done when |
 |:--|:--|:--|
-| 8 | Small private groups | The same HPKE sealing. A numeric member cap in the spaces spec. Member remove and block. A rate limit on first contact. |
-| 9 | Encrypted attachments | A file in a conversation reaches the other member as sealed bytes. Today the citation syncs and the bytes do not. |
-| 10 | Content-free push | A phone client exists, and a push carries no content. |
+| 9 | Small private groups | The same HPKE sealing. A numeric member cap in the spaces spec. Member remove and block. A rate limit on first contact. |
+| 10 | Encrypted attachments | A file in a conversation reaches the other member as sealed bytes. Today the citation syncs and the bytes do not. |
+| 11 | Content-free push | A phone client exists, and a push carries no content. |
 
 Not in v0.2: rooms of hundreds, a group ratchet, MLS.
 

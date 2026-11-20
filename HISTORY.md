@@ -4,6 +4,18 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-20 — Back up this folder
+
+v0.1 had no copy of the notes off the computer, and the owner was about to use it every day. Back up, in settings, copies the notebook folder to a place the owner types, with a default of `Aerodash backups` in the home folder. It is by hand. The copy is named for the time, `aerodash-2026-11-20-1405`, and never overwrites an earlier one.
+
+The copy holds the key file, because the notes cannot be opened without it. That is the choice with a cost: whoever has the copy can read the notes unless the key file is wrapped. The card says so, and warns in red when the key file is not locked with a passphrase. The alternative was to leave the key out and restore from the recovery phrase. That needs a restore flow that does not exist yet, and so it was not chosen. It remains an option.
+
+It leaves out the `export` folder, which holds readable Markdown with no lock and would have defeated a passphrase. It leaves out the search index, which is rebuilt, and lock and unfinished-write files. It does not follow symbolic links. It is made in a folder named `.partial` and renamed only when whole, so a cut-short copy never looks finished. The key file and the notes log are compared with the originals byte for byte, and flushed to disk. The copy folder is private to its owner. A place inside the notebook is refused before anything is made. The notes and chat locks are held while it runs, so no save or sync lands in the middle. A note typed in the last moment is saved first.
+
+A copy opens as a notebook, and a test checks it. Restoring is putting the copy where the notebook is. There is no folder picker, because one would need a new dependency, and no reminder or schedule. Those are in [docs/open-items.md](docs/open-items.md).
+
+Found on the way: Export notes writes readable Markdown beside the sealed log, and the threat model now says so.
+
 ## 2026-11-20 — v0.1 is notes on one computer, and the second computer is v0.2
 
 The owner declared v0.1 and moved the exit. v0.1 is notes on one computer, and its exit is the owner using it daily. The second computer, the relay, 1:1 chat, device revoke, and recovery restore move to v0.2, with the exit test they had: the notes on a second computer for real work, one 1:1, an offline gap, and a restore from the phrase. The old v0.2, small private groups with encrypted attachments and content-free push, is folded into v0.2 as a second stage that does not start until the 1:1 is in use. Every later version keeps its number.

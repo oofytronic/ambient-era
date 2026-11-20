@@ -54,7 +54,7 @@ v0.1 is **not** an everything app, and it does not run an agent. It is the owner
 2. Write notes in one Notes space. Tasks are lines in notes. Tags, search, and spelling work. Nothing needs a network.
 3. Use it every day. That is the exit.
 
-**There is no copy of the notes off this computer in v0.1.** The recovery phrase brings back the identity. It brings back the notes only from a copy held by a relay that can be reached, and a relay that sends the owner's notes elsewhere is v0.2. Until then a lost disk is lost notes unless the owner copies the folder.
+**v0.1 makes no copy of the notes for you.** Back up, in settings, copies the notebook folder to a place you choose, such as a USB drive or a folder that syncs. It is by hand: nothing reminds you or does it on a schedule. The copy has the key file, so it is as readable as the folder is, and it is only locked if you locked the key file with a passphrase. The recovery phrase brings back the identity. It brings back the notes only from a copy held by a relay that can be reached, and sending the owner's notes to a relay is v0.2. Until you make a copy, a lost disk is lost notes.
 
 The second computer, the relay, 1:1 chat, device revoke, and recovery restore are built and tested in the app. They are not v0.1. They are the first half of v0.2, and they are not what v0.1 promises.
 

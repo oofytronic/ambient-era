@@ -139,6 +139,12 @@ struct App {
     aliases: BTreeMap<String, String>,
     /// Words this person added to the spellchecker. Kept on this computer, in `dictionary`.
     my_words: BTreeSet<String>,
+    /// Where backups go, as typed. Empty until the person chooses, and then the default is used.
+    backup_to: String,
+    /// When the last backup finished, in unix milliseconds, or zero.
+    backup_at: u64,
+    /// A copy is being made. It holds both locks, so a second one waits for this one.
+    backup_busy: bool,
     syncing: bool,
     edited_at: Option<Instant>,
     /// Bumps when the pause wait starts over, so a late wake cannot save another note.
@@ -423,6 +429,12 @@ enum Message {
     TitleSubmit,
     /// Ctrl or Cmd + Shift + D: tell the spellchecker the word at the caret is fine.
     AddWord,
+    /// The text in the box that says where a backup goes.
+    BackupTo(String),
+    /// Copy this notebook's folder to another place.
+    BackUp,
+    /// A copy finished, or failed.
+    BackedUp(Result<profile::BackupReport, String>),
     /// The handle at the lower right in focus: pull the round buttons in, or send them away.
     FocusTools,
     /// The button beside the small title in focus: pull the formatting bar in, or send it away.
@@ -785,6 +797,9 @@ impl App {
             wipe_draft: String::new(),
             aliases: BTreeMap::new(),
             my_words: BTreeSet::new(),
+            backup_to: String::new(),
+            backup_at: 0,
+            backup_busy: false,
             syncing: false,
             edited_at: None,
             pause_token: 0,
@@ -873,6 +888,8 @@ impl App {
         app.your_name.clone_from(&saved.name);
         app.name_draft.clone_from(&saved.name);
         app.device_draft.clone_from(&saved.device);
+        app.backup_to.clone_from(&saved.backup_to);
+        app.backup_at = saved.backup_at;
         app.system_dark = profile::system_is_dark();
         for (id, name) in profile::load_names(&app.dir) {
             app.aliases.insert(id, name);
@@ -1633,6 +1650,15 @@ impl App {
             Message::TitleSubmit => focus_named("note-body"),
             Message::AddWord => {
                 self.add_word();
+                Task::none()
+            }
+            Message::BackupTo(text) => {
+                self.backup_to = text;
+                Task::none()
+            }
+            Message::BackUp => self.start_backup(),
+            Message::BackedUp(result) => {
+                self.finish_backup(result);
                 Task::none()
             }
             Message::FocusTools => {
@@ -5606,6 +5632,73 @@ impl App {
         focus
     }
 
+    /// Copy the notebook folder to the place typed in settings.
+    ///
+    /// A note that was typed in the last moment is saved first, so it is in the copy. The copy
+    /// runs on its own thread and holds the notes lock and the chat lock, so no save or sync lands
+    /// in the middle of it.
+    fn start_backup(&mut self) -> Task<Message> {
+        if self.backup_busy {
+            return Task::none();
+        }
+        if self.notebook.is_none() {
+            self.say("Folder is not open.");
+            return Task::none();
+        }
+        if self.saving || self.editor_dirty() {
+            self.say("Saving your note first. Press Back up again in a moment.");
+            return self.start_save(true);
+        }
+        let typed = self.backup_to.trim();
+        let dest = if typed.is_empty() {
+            profile::default_backup_dir()
+        } else {
+            profile::expand_home(typed)
+        };
+        self.backup_to = dest.display().to_string();
+        self.backup_busy = true;
+        self.say("Backing up.");
+        let dir = self.dir.clone();
+        let name = format!(
+            "aerodash-{}",
+            clock::stamp(clock::now_ms(), &clock::load_tz())
+        );
+        Task::perform(
+            async move {
+                let (sender, receiver) = iced::futures::channel::oneshot::channel();
+                std::thread::spawn(move || {
+                    let result = {
+                        let _notes = notes_lock();
+                        let _chat = chat_lock();
+                        profile::backup_folder(&dir, &dest, &name)
+                    };
+                    let _ = sender.send(result);
+                });
+                receiver
+                    .await
+                    .unwrap_or_else(|_| Err("The copy stopped before it finished.".to_owned()))
+            },
+            Message::BackedUp,
+        )
+    }
+
+    fn finish_backup(&mut self, result: Result<profile::BackupReport, String>) {
+        self.backup_busy = false;
+        match result {
+            Ok(report) => {
+                self.backup_at = clock::now_ms();
+                self.persist_profile();
+                self.say(&format!(
+                    "Backed up {} files, {}, to {}.",
+                    report.files,
+                    size_label(report.bytes),
+                    report.path.display()
+                ));
+            }
+            Err(err) => self.message = err,
+        }
+    }
+
     fn share_words(&self) {
         let words: Vec<String> = self.my_words.iter().cloned().collect();
         markdown::set_personal_words(&words);
@@ -6421,6 +6514,8 @@ impl App {
             name: self.your_name.clone(),
             appearance: self.appearance,
             seen: self.seen,
+            backup_to: self.backup_to.clone(),
+            backup_at: self.backup_at,
         };
         if let Err(err) = profile::store_profile(&self.dir, &profile) {
             self.message = err;
@@ -6773,6 +6868,7 @@ impl App {
                         self.devices_sheet(),
                         self.recovery_sheet(),
                         self.people_section(),
+                        self.backup_section(),
                         self.data_section(),
                         Self::keys_section(),
                     ]
@@ -6934,6 +7030,55 @@ impl App {
                 people,
             ]
             .spacing(14)
+            .into(),
+        )
+    }
+
+    /// Where the notes go if this computer's disk does not survive.
+    fn backup_section(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let warn = Color::from_rgb8(184, 78, 62);
+        let wrapped = ambient_cli::folder_key_is_wrapped(&self.dir);
+        let last = if self.backup_at == 0 {
+            text("No backup yet.").size(14).color(warn)
+        } else {
+            let when = clock::when(Some(self.backup_at), &clock::load_tz(), clock::now_ms());
+            text(format!("Last backup: {}, {}.", when.day, when.time))
+                .size(14)
+                .color(ink.muted)
+        };
+        let key = if wrapped {
+            text("The key file is locked with your passphrase, so the copy is locked too.")
+                .size(14)
+                .color(ink.muted)
+        } else {
+            text("The key file is not locked with a passphrase. Anyone who gets the copy can read your notes. Lock the key file, above, first.")
+                .size(14)
+                .color(warn)
+        };
+        let default = profile::default_backup_dir().display().to_string();
+        settings_card(
+            "Back up",
+            column![
+                text("Your notes are only on this computer until you copy them somewhere else, such as a USB drive or a folder that syncs. The copy has everything: the sealed notes, your chats, and the key file. It leaves out the readable Markdown in the export folder, which has no lock.")
+                    .size(14)
+                    .color(ink.muted),
+                key,
+                text_input(&default, &self.backup_to)
+                    .on_input(Message::BackupTo)
+                    .on_submit(Message::BackUp)
+                    .padding(12)
+                    .style(field_style),
+                action_label(
+                    if self.backup_busy { "Backing up" } else { "Back up now" },
+                    Message::BackUp,
+                ),
+                last,
+                text(format!("To restore, close the app, put the copy where this notebook is, {}, and open it again.", self.dir.display()))
+                    .size(13)
+                    .color(ink.muted),
+            ]
+            .spacing(12)
             .into(),
         )
     }
@@ -8070,6 +8215,23 @@ impl Slide {
         let t = (self.since.elapsed().as_secs_f32() / SLIDE.as_secs_f32()).clamp(0.0, 1.0);
         let eased = 1.0 - (1.0 - t).powi(3);
         if self.open { eased } else { 1.0 - eased }
+    }
+}
+
+/// A size a person can read: `812 bytes`, `340 KB`, `3.4 MB`, `1.2 GB`.
+fn size_label(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    let tenths = |unit: u64| bytes.saturating_mul(10) / unit;
+    if bytes < KB {
+        format!("{bytes} bytes")
+    } else if bytes < MB {
+        format!("{} KB", bytes / KB)
+    } else if bytes < GB {
+        format!("{}.{} MB", tenths(MB) / 10, tenths(MB) % 10)
+    } else {
+        format!("{}.{} GB", tenths(GB) / 10, tenths(GB) % 10)
     }
 }
 
@@ -9489,5 +9651,127 @@ mod app_tests {
         assert!(super::profile::load_words(&dir).is_empty());
         super::markdown::set_personal_words(&[]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_backup_copies_the_folder_remembers_when_and_can_be_opened() {
+        let _turn = one_at_a_time();
+        let dir = folder("backup-flow");
+        let mut app = open_app(&dir);
+        let id = Notebook::open(&dir)
+            .expect("open")
+            .add("Plan", "buy oats")
+            .expect("add");
+        let place = folder("backup-flow-usb");
+        let _ = app.update(Message::BackupTo(place.display().to_string()));
+
+        let _ = app.update(Message::BackUp);
+        assert!(app.backup_busy, "it is working");
+        assert_eq!(app.message, "Backing up.");
+        // A second press while it works does nothing.
+        let _ = app.update(Message::BackUp);
+        assert!(app.backup_busy);
+
+        // What the worker thread does, and its answer.
+        let report =
+            super::profile::backup_folder(&app.dir, &place, "aerodash-test").expect("the copy");
+        let _ = app.update(Message::BackedUp(Ok(report.clone())));
+        assert!(!app.backup_busy);
+        assert!(app.backup_at > 0, "the time is remembered");
+        assert!(app.message.contains("Backed up") && app.message.contains("aerodash-test"));
+        let saved = super::profile::load_profile(&dir);
+        assert_eq!(saved.backup_at, app.backup_at, "and kept for next time");
+        assert_eq!(saved.backup_to, place.display().to_string());
+
+        // The copy is a whole notebook.
+        let copy = Notebook::open(&report.path).expect("the copy opens");
+        assert_eq!(copy.show(&id).expect("the note").heads[0].body, "buy oats");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&place);
+    }
+
+    #[test]
+    fn a_failed_backup_says_why_and_changes_nothing_else() {
+        let _turn = one_at_a_time();
+        let dir = folder("backup-fail");
+        let mut app = open_app(&dir);
+        let _ = app.update(Message::BackupTo(dir.join("inside").display().to_string()));
+        let _ = app.update(Message::BackUp);
+        assert!(app.backup_busy);
+        let refused = super::profile::backup_folder(&app.dir, &dir.join("inside"), "copy");
+        let _ = app.update(Message::BackedUp(refused));
+        assert!(!app.backup_busy, "it can be tried again");
+        assert!(app.message.contains("outside"), "{}", app.message);
+        assert_eq!(app.backup_at, 0, "no backup is claimed");
+        assert!(
+            !dir.join("inside").exists(),
+            "nothing was left in the notebook"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_typed_a_moment_ago_is_saved_before_the_copy_is_made() {
+        let _turn = one_at_a_time();
+        let dir = folder("backup-dirty");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::TitleChanged("Not saved yet".to_owned()));
+        assert!(app.editor_dirty());
+        let _ = app.update(Message::BackUp);
+        assert!(!app.backup_busy, "the copy waits for the save");
+        assert!(app.message.contains("Saving"), "{}", app.message);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_backup_card_draws_with_and_without_a_passphrase() {
+        let _turn = one_at_a_time();
+        let dir = folder("backup-card");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::ShowSettings);
+        assert!(!ambient_cli::folder_key_is_wrapped(&dir));
+        drop(app.view());
+        ambient_cli::set_folder_unlock(&dir, "correct horse").expect("lock");
+        assert!(ambient_cli::folder_key_is_wrapped(&dir));
+        drop(app.view());
+        // And after a copy, and while one is running.
+        let _ = app.update(Message::BackedUp(Err("no".to_owned())));
+        app.backup_at = 1_700_000_000_000;
+        drop(app.view());
+        app.backup_busy = true;
+        drop(app.view());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sizes_read_as_people_say_them() {
+        assert_eq!(super::size_label(0), "0 bytes");
+        assert_eq!(super::size_label(812), "812 bytes");
+        assert_eq!(super::size_label(1024), "1 KB");
+        assert_eq!(super::size_label(340 * 1024), "340 KB");
+        assert_eq!(super::size_label(3 * 1024 * 1024 + 450_000), "3.4 MB");
+        assert_eq!(super::size_label(1_300_000_000), "1.2 GB");
+    }
+
+    #[test]
+    fn a_typed_place_can_start_with_the_home_folder() {
+        use std::path::PathBuf;
+        assert_eq!(
+            super::profile::expand_home("/media/usb"),
+            PathBuf::from("/media/usb")
+        );
+        assert_eq!(
+            super::profile::expand_home("backups"),
+            PathBuf::from("backups")
+        );
+        if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+            assert_eq!(
+                super::profile::expand_home("~/Backups"),
+                PathBuf::from(&home).join("Backups")
+            );
+            assert_eq!(super::profile::expand_home("~"), PathBuf::from(home));
+        }
     }
 }

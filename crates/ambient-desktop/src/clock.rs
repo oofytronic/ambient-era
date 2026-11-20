@@ -42,6 +42,14 @@ pub(crate) fn when(unix_ms: Option<u64>, tz: &[u8], now: u64) -> When {
     }
 }
 
+/// `YYYY-MM-DD-HHMM` in local time. For naming things so they sort by when they were made.
+pub(crate) fn stamp(unix_ms: u64, tz: &[u8]) -> String {
+    let secs = i64::try_from(unix_ms / 1000).unwrap_or(0);
+    let offset = offset_at(tz, secs).unwrap_or(0);
+    let (year, month, day, hour, minute) = ymd_hm(secs.saturating_add(i64::from(offset)));
+    format!("{year:04}-{month:02}-{day:02}-{hour:02}{minute:02}")
+}
+
 fn local_secs(unix_ms: u64, offset: i32) -> i64 {
     let secs = i64::try_from(unix_ms / 1000).unwrap_or(0);
     secs.saturating_add(i64::from(offset))
@@ -198,7 +206,17 @@ fn tz_offset(data: &[u8], at: usize, counts: [i32; 6], time_size: usize, unix: i
 
 #[cfg(test)]
 mod tests {
-    use super::{offset_at, when, ymd_hm};
+    use super::{offset_at, stamp, when, ymd_hm};
+
+    #[test]
+    fn a_stamp_names_a_moment_so_names_sort_by_time() {
+        assert_eq!(stamp(0, &[]), "1970-01-01-0000");
+        assert_eq!(stamp(1_700_000_000_000, &[]), "2023-11-14-2213");
+        // In a zone seven hours behind, the same moment is earlier on the same day.
+        let seven_behind = tz_v1(-7 * 3_600);
+        assert_eq!(stamp(1_700_000_000_000, &seven_behind), "2023-11-14-1513");
+        assert!(stamp(1_700_000_000_000, &[]) < stamp(1_700_000_060_000, &[]));
+    }
 
     #[test]
     fn unix_epoch_and_a_known_second() {

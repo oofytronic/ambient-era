@@ -1,13 +1,22 @@
 //! The key file wrap. The passphrase is not the root.
 
-use ambient_cli::{Notebook, set_folder_unlock, unlock_folder};
+use ambient_cli::{Notebook, folder_key_is_wrapped, set_folder_unlock, unlock_folder};
 
 #[test]
 fn passphrase_wraps_and_unlocks() -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("ambient-unlock-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     Notebook::create(&dir).map_err(|err| err.to_string())?;
+    if folder_key_is_wrapped(&dir) {
+        return Err("a new key file was already wrapped".to_owned());
+    }
     set_folder_unlock(&dir, "correct horse").map_err(|err| err.to_string())?;
+    if !folder_key_is_wrapped(&dir) {
+        return Err("a wrapped key file was not noticed".to_owned());
+    }
+    if folder_key_is_wrapped(&dir.join("nowhere")) {
+        return Err("a folder with no key file counted as wrapped".to_owned());
+    }
     let bytes = std::fs::read(dir.join("key")).map_err(|err| err.to_string())?;
     if bytes.get(4) != Some(&3) {
         return Err("key file was not wrapped".to_owned());

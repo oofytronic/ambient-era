@@ -472,6 +472,18 @@ fn open_inner(wrap: &[u8; 32], nonce_bytes: &[u8; 12], sealed: &[u8]) -> Result<
         .map_err(|_| CliError::message("passphrase rejected"))
 }
 
+/// Whether the key file in `dir` is wrapped with a passphrase. It reads five bytes. A missing or
+/// unreadable file counts as not wrapped.
+pub(crate) fn is_wrapped(dir: &Path) -> bool {
+    let Ok(mut file) = fs::File::open(dir.join("key")) else {
+        return false;
+    };
+    let mut head = [0_u8; 5];
+    std::io::Read::read_exact(&mut file, &mut head).is_ok()
+        && head.get(..4) == Some(b"AMBK".as_slice())
+        && head.get(4) == Some(&3)
+}
+
 fn wrapped_bytes(salt: &[u8; 16], nonce: &[u8; 12], sealed: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(33 + sealed.len());
     out.extend_from_slice(b"AMBK");

@@ -298,6 +298,15 @@ pub fn set_folder_unlock(dir: &Path, passphrase: &str) -> Result<(), CliError> {
     keys::set_unlock(dir, passphrase)
 }
 
+/// Whether the key file in this folder is wrapped with a passphrase.
+///
+/// A copy of the folder holds the key file. When it is not wrapped, anyone who gets the copy can
+/// read the notes.
+#[must_use]
+pub fn folder_key_is_wrapped(dir: &Path) -> bool {
+    keys::is_wrapped(dir)
+}
+
 /// Unlock a wrapped key file for this process. The unwrapped root is not written back to disk.
 ///
 /// # Errors
