@@ -328,6 +328,8 @@ enum Message {
     ToggleList,
     ToggleContext,
     TagDraft(String),
+    /// A tag offered under the tag field.
+    PickSuggestion(String),
     AddTag,
     RemoveTag(String),
     CompleteLink(String),
@@ -1270,6 +1272,11 @@ impl App {
             Message::TagDraft(text) => {
                 self.tag_draft = text;
                 Task::none()
+            }
+            Message::PickSuggestion(tag) => {
+                self.tag_draft = tag;
+                self.add_tag();
+                focus_named("note-tag")
             }
             Message::AddTag => {
                 self.add_tag();
@@ -3906,7 +3913,55 @@ impl App {
                 .width(140)
                 .style(field_style),
         );
-        chips.into()
+        let offered = self.tag_suggestions();
+        if offered.is_empty() {
+            return chips.into();
+        }
+        let mut more = row![text("Used before").size(12).color(self.ink().muted)]
+            .spacing(6)
+            .align_y(iced::Alignment::Center);
+        for tag in offered {
+            more = more.push(
+                button(text(tag.clone()).size(12))
+                    .padding([3, 8])
+                    .on_press(Message::PickSuggestion(tag))
+                    .style(ghost_style),
+            );
+        }
+        column![chips, more].spacing(4).into()
+    }
+
+    /// Tags already used in other notes that fit what is typed, and are not on this note. Those
+    /// that start with it come first, then those that contain it, then the most used.
+    fn tag_suggestions(&self) -> Vec<String> {
+        let typed = self.tag_draft.trim().trim_start_matches('#').to_lowercase();
+        if typed.is_empty() {
+            return Vec::new();
+        }
+        let mut counts: BTreeMap<String, (String, usize)> = BTreeMap::new();
+        for note in &self.catalog {
+            for tag in &note.tags {
+                let entry = counts
+                    .entry(tag.to_lowercase())
+                    .or_insert_with(|| (tag.clone(), 0));
+                entry.1 = entry.1.saturating_add(1);
+            }
+        }
+        let mut fits: Vec<(bool, usize, String)> = counts
+            .into_iter()
+            .filter(|(key, _)| {
+                key.contains(typed.as_str())
+                    && *key != typed
+                    && !self.tags.iter().any(|have| have.to_lowercase() == *key)
+            })
+            .map(|(key, (shown, count))| (key.starts_with(typed.as_str()), count, shown))
+            .collect();
+        fits.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then(b.1.cmp(&a.1))
+                .then_with(|| a.2.to_lowercase().cmp(&b.2.to_lowercase()))
+        });
+        fits.into_iter().take(6).map(|(_, _, tag)| tag).collect()
     }
 
     fn post(&self, job: lane::Job) {
@@ -9943,6 +9998,50 @@ mod app_tests {
             super::selection_message("", (2, 4), "Laptop", "a\nb\n"),
             "> a\n> b\n\n— Untitled, lines 2–4, written on Laptop"
         );
+    }
+
+    #[test]
+    fn tags_used_before_are_offered_and_narrow_as_you_type() {
+        let _turn = one_at_a_time();
+        let dir = folder("tag-suggest");
+        let mut app = open_app(&dir);
+        let note = |id: &str, tags: &[&str]| super::NoteSummary {
+            id: id.to_owned(),
+            title: id.to_owned(),
+            writer: String::new(),
+            conflict: false,
+            tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            version: String::new(),
+        };
+        app.catalog = vec![
+            note("a", &["project", "reading"]),
+            note("b", &["project", "recipes"]),
+            note("c", &["Research"]),
+        ];
+        assert!(
+            app.tag_suggestions().is_empty(),
+            "nothing typed, nothing offered"
+        );
+        let _ = app.update(Message::TagDraft("r".to_owned()));
+        assert_eq!(
+            app.tag_suggestions(),
+            ["reading", "recipes", "Research", "project"],
+            "those that start with it first, then those that only contain it"
+        );
+        let _ = app.update(Message::TagDraft("re".to_owned()));
+        assert_eq!(app.tag_suggestions(), ["reading", "recipes", "Research"]);
+        let _ = app.update(Message::TagDraft("rec".to_owned()));
+        assert_eq!(app.tag_suggestions(), ["recipes"]);
+        drop(app.view());
+        let _ = app.update(Message::PickSuggestion("recipes".to_owned()));
+        assert_eq!(app.tags, ["recipes"]);
+        assert!(app.tag_draft.is_empty());
+        let _ = app.update(Message::TagDraft("rec".to_owned()));
+        assert!(
+            app.tag_suggestions().is_empty(),
+            "one already on the note is not offered"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
