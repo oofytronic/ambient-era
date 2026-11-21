@@ -414,3 +414,7 @@ The word group in the notes UI means a tag path. It does not mean a multi-member
 ## 2026-11-21 — Links only reference; Read belongs to a group
 
 The owner asked what links were for once groups were tags. Two or more links in a note no longer make a contents note, a chapter rail, an auto-opened panel, or a Read mode, and the `Kind:` line is gone. Links are references: `Links to` and `Linked from` in the right panel, the lines in the graph, and a count under the tags that opens the panel. Read now reads the notes of the group in view, in title order. Not built: the link field beside the tags, which the owner wants after a few days of use. Nothing was seen in a window.
+
+## 2026-11-21 — The graph clusters by group, and the right panel is restyled
+
+The graph gives each top-level group its own cluster of dots inside a soft circle of the group's color, with the name on the circle, so a link from one group to another stands out as a heavier line crossing between circles. Titles wrap, and the picture keeps a margin from the edge and sits in a card. The right panel has a larger serif title, a larger gear with a soft background while settings are showing, a line under the header, small capitalized section labels with counts, and taller rows. Nothing was seen in a window.

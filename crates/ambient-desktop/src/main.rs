@@ -1936,7 +1936,7 @@ impl App {
             right_full += 28.0;
             if self.show_context {
                 right = right.push(hairline_v()).push(self.context_pane());
-                right_full += 241.0;
+                right_full += CONTEXT_WIDTH + 1.0;
             }
         }
         let body = row![
@@ -4692,7 +4692,7 @@ impl App {
         if self.context_room() {
             chrome += 28.0;
             if self.show_context {
-                chrome += 241.0;
+                chrome += CONTEXT_WIDTH + 1.0;
             }
         }
         (self.size.width - chrome).max(160.0)
@@ -5508,32 +5508,19 @@ impl App {
 
     fn context_pane(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        let mut block = column![].spacing(10).padding(16).width(Fill).height(Fill);
-        block = block.push(
-            row![
-                text(if self.note_panel {
-                    "This note"
-                } else {
-                    "Links"
-                })
-                .size(12)
-                .color(ink.muted),
-                space().width(Fill),
-                mini_button(
-                    mini_handle(Mini::Gear, self.is_dark()),
-                    if self.note_panel {
-                        "Links and backlinks"
-                    } else {
-                        "Note settings"
-                    },
-                    Message::ToggleNoteSettings,
-                ),
-            ]
-            .align_y(iced::Alignment::Center),
-        );
+        let mut block = column![self.panel_header()]
+            .spacing(14)
+            .padding(iced::Padding {
+                top: 18.0,
+                right: 20.0,
+                bottom: 18.0,
+                left: 20.0,
+            })
+            .width(Fill)
+            .height(Fill);
         if self.note_panel {
             return container(self.note_settings(block))
-                .width(240)
+                .width(CONTEXT_WIDTH)
                 .height(Fill)
                 .style(surface_pane)
                 .into();
@@ -5542,40 +5529,85 @@ impl App {
             block = block.push(
                 text("Notes this one links to, and notes that link here, gather in this panel. Link with [[. Tags under the title make groups: Novel/Part 1 is a group inside Novel.")
                     .size(13)
-                    .color(ink.muted),
+                    .color(ink.muted)
+                    .line_height(1.4),
             );
         }
         if !self.links_to.is_empty() {
-            block = block.push(text("Links to").size(12).color(ink.muted));
-            for (id, title) in &self.links_to {
-                let id = id.clone();
-                block = block.push(
-                    button(text(title.clone()).size(14).width(Fill))
-                        .width(Fill)
-                        .padding([4, 8])
-                        .on_press(Message::Select(id))
-                        .style(list_row(false)),
-                );
-            }
+            block = block.push(self.link_section("Links to", &self.links_to));
         }
         if !self.cached_backlinks.is_empty() {
-            block = block.push(text("Linked from").size(12).color(ink.muted));
-            for (id, title) in &self.cached_backlinks {
-                let id = id.clone();
-                block = block.push(
-                    button(text(title.clone()).size(14).width(Fill))
-                        .width(Fill)
-                        .padding([4, 8])
-                        .on_press(Message::Select(id))
-                        .style(list_row(false)),
-                );
-            }
+            block = block.push(self.link_section("Linked from", &self.cached_backlinks));
         }
         container(block)
-            .width(240)
+            .width(CONTEXT_WIDTH)
             .height(Fill)
             .style(surface_pane)
             .into()
+    }
+
+    /// The panel's title, large, with the switch for settings or links at its right, and a line
+    /// under both.
+    fn panel_header(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        column![
+            row![
+                text(if self.note_panel {
+                    "This note"
+                } else {
+                    "Links"
+                })
+                .font(serif())
+                .size(22)
+                .color(ink.text),
+                space().width(Fill),
+                panel_icon(
+                    mini_handle(Mini::Gear, self.is_dark()),
+                    if self.note_panel {
+                        "Links and backlinks"
+                    } else {
+                        "Note settings"
+                    },
+                    Message::ToggleNoteSettings,
+                    self.note_panel,
+                ),
+            ]
+            .align_y(iced::Alignment::Center),
+            hairline(),
+        ]
+        .spacing(12)
+        .into()
+    }
+
+    /// A small heading with a count, and one button per note under it.
+    fn link_section<'a>(
+        &'a self,
+        heading: &'a str,
+        notes: &'a [(String, String)],
+    ) -> Element<'a, Message> {
+        let ink = self.ink();
+        let mut list = column![
+            row![
+                text(heading.to_uppercase())
+                    .size(11)
+                    .color(ink.muted)
+                    .width(Fill),
+                text(notes.len().to_string()).size(11).color(ink.muted),
+            ]
+            .padding([0, 8])
+        ]
+        .spacing(2)
+        .width(Fill);
+        for (id, title) in notes {
+            list = list.push(
+                button(text(title.clone()).size(14).width(Fill))
+                    .width(Fill)
+                    .padding([7, 10])
+                    .on_press(Message::Select(id.clone()))
+                    .style(list_row(false)),
+            );
+        }
+        list.into()
     }
 
     /// What belongs to this one note and not to the page: where it was written, and what can be
@@ -5586,7 +5618,6 @@ impl App {
     ) -> iced::widget::Column<'a, Message> {
         let ink = self.ink();
         let saved = self.selected.is_some();
-        block = block.push(text("Home device").size(12).color(ink.muted));
         let home = if !saved {
             "Not saved yet.".to_owned()
         } else if self.note_writer.is_empty() {
@@ -5594,10 +5625,19 @@ impl App {
         } else {
             self.note_writer.clone()
         };
-        block = block.push(text(home).size(14));
+        block = block.push(
+            column![
+                text("HOME DEVICE").size(11).color(ink.muted),
+                text(home).size(15),
+            ]
+            .spacing(4)
+            .padding([0, 8]),
+        );
         let has_words = saved || !self.body.text().is_empty() || !self.title_text.is_empty();
+        if has_words || saved || self.editor_dirty() {
+            block = block.push(hairline());
+        }
         if has_words {
-            block = block.push(space().height(6));
             block = block.push(action_fill("Send to a chat", Message::SendNoteToChat));
         }
         if saved || self.editor_dirty() {
@@ -7625,6 +7665,31 @@ fn ghost_style(theme: &Theme, status: button::Status) -> button::Style {
         },
         ..Default::default()
     }
+}
+
+/// Width of the panel on the right, inside its edge.
+const CONTEXT_WIDTH: f32 = 264.0;
+
+/// A larger icon button for the panel header, with a soft background while its panel is the one
+/// showing.
+fn panel_icon(
+    handle: iced_image::Handle,
+    hint_text: &'static str,
+    message: Message,
+    active: bool,
+) -> Element<'static, Message> {
+    let face = button(iced_image::Image::new(handle).width(22).height(22))
+        .padding(8)
+        .on_press(message)
+        .style(move |theme: &Theme, status| {
+            let ink = ink_of(theme);
+            let mut style = icon_style(theme, status);
+            if active && style.background.is_none() {
+                style.background = Some(iced::Background::Color(mix(ink.bg, ink.accent, 0.18)));
+            }
+            style
+        });
+    hover_label(face, hint_text)
 }
 
 fn icon_style(theme: &Theme, status: button::Status) -> button::Style {
