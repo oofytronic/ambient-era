@@ -4159,13 +4159,14 @@ impl App {
                 .width(140)
                 .style(field_style),
         );
+        // The same two rows whether or not there is anything to offer. The field is in the first,
+        // and if the shape of what holds it changed on the first key, the field would be built
+        // again, lose the caret, and the next keys would go to the page.
         let offered = self.tag_suggestions();
-        if offered.is_empty() {
-            return chips.into();
+        let mut more = row![].spacing(6).align_y(iced::Alignment::Center);
+        if !offered.is_empty() {
+            more = more.push(text("Used before").size(12).color(self.ink().muted));
         }
-        let mut more = row![text("Used before").size(12).color(self.ink().muted)]
-            .spacing(6)
-            .align_y(iced::Alignment::Center);
         for tag in offered {
             more = more.push(
                 button(text(tag.clone()).size(12))
@@ -4174,7 +4175,7 @@ impl App {
                     .style(ghost_style),
             );
         }
-        column![chips, more].spacing(4).into()
+        column![chips, more].spacing(0).into()
     }
 
     /// Tags already used in other notes that fit what is typed, and are not on this note. Those
@@ -11714,6 +11715,30 @@ mod app_tests {
         again.orders = super::profile::load_order(&dir);
         again.catalog = app.catalog.clone();
         assert_eq!(shown(&again), ["pre", "c2", "c1"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typing_a_tag_does_not_change_the_shape_of_the_tag_row() {
+        let _turn = one_at_a_time();
+        let dir = folder("tag-shape");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        app.catalog = vec![summary("a", &["recipes"])];
+        let _ = app.update(Message::TitleChanged("A note".to_owned()));
+        // Nothing offered, then something offered, then nothing again: the row is built the
+        // same way each time, so the field keeps its place and the caret.
+        for draft in ["", "r", "re", "rez", ""] {
+            let _ = app.update(Message::TagDraft(draft.to_owned()));
+            let row = app.tag_chips();
+            let tree = iced::advanced::widget::Tree::new(&row);
+            assert_eq!(tree.children.len(), 2, "two rows for {draft:?}");
+            assert_eq!(
+                tree.children.first().map(|first| first.children.len()),
+                Some(1),
+                "the field is alone in the first row, for {draft:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -422,3 +422,7 @@ The graph gives each top-level group its own cluster of dots inside a soft circl
 ## 2026-11-21 — Notes in a group are ordered
 
 Notes in a group are alphabetical, counting numbers as numbers, so Chapter 2 comes before Chapter 10. The owner can drag a note by a grip to sit beside another note in its group, or onto the group's name to put it first, for a prequel. Read follows the same order. The hand order is a plain local file named `order`, not part of the sealed log, so it does not sync to a second computer. That was chosen to avoid a new record type before the owner had used it. If it should sync, it needs a record with its own merge rule, and so a spec edit and an ADR. THREAT_MODEL now lists the file. Nothing was seen in a window.
+
+## 2026-11-21 — Typing a tag no longer jumps to the page
+
+The first key in the tag field made the tag suggestions appear, which changed the row that holds the field from a row to a column. Iced then built the field again, and it lost the caret. The next keys had nothing focused, so the window's own typing fallback put them in the note body. The tag row now has the same two rows whether or not anything is offered, and a test checks its shape stays the same as the draft changes. The same cause would show for any field that gains a sibling as you type, so keep a field's container steady.
