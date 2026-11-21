@@ -230,10 +230,10 @@ struct App {
     histories: BTreeMap<String, NoteHistory>,
     history_order: Vec<String>,
     history_key: String,
-    /// Contents note for the chapter rail. An empty string is the unsaved draft.
-    book_id: Option<String>,
-    /// Linked chapters drawn as one reading, not the editor.
+    /// A group's notes drawn as one reading, not the editor.
     reading: bool,
+    /// The group being read, as written in its tag.
+    read_title: String,
     /// A missing chapter to create once the open note finishes saving.
     pending_chapter: Option<String>,
     /// The note list on the left. Memory only.
@@ -242,13 +242,9 @@ struct App {
     show_context: bool,
     /// The chapter panel was closed by hand, so a group does not open it again.
     context_shut: bool,
-    /// Title last checked for a group, and that group's id when one names it.
-    group_cache: Option<(String, Option<String>)>,
     /// Tags on the open note. Not words in the writing.
     tags: Vec<String>,
     tag_draft: String,
-    /// Group note id and the link targets under it.
-    groups: Vec<(String, Vec<String>)>,
     /// The notes the open note links to, as id and title.
     links_to: Vec<(String, String)>,
     /// Every link between two notes, from id to id.
@@ -283,8 +279,6 @@ struct App {
     task_cite_open: bool,
     /// Background folder work. The caret's thread only posts a job.
     lane: std::sync::mpsc::Sender<lane::Job>,
-    /// Every group's pieces, filled off the caret's thread.
-    group_views: Vec<lane::GroupView>,
 }
 
 /// Which side of an invite this computer is on. One path, not both.
@@ -408,7 +402,6 @@ enum Message {
     PasteNote,
     Pasted(Option<String>),
     ClearSelect,
-    OpenChapter(String),
     ToggleRead,
     ChapterMade(Result<MadeChapter, String>),
     TaskDraft(String),
@@ -466,6 +459,8 @@ enum Message {
     ToggleGraph,
     /// A dot in the graph was clicked.
     GraphPick(String),
+    /// The line of link counts under the title: open the right panel on the links.
+    ShowLinks,
     /// Show or close the Tasks note over the Tasks tab.
     ToggleTasksNote,
     /// The icon at the top of the right panel: this note's settings, or its links.
@@ -551,12 +546,9 @@ struct OlderNote {
     body: String,
 }
 
+/// One note in a reading of a group.
 struct Chapter {
     name: String,
-    /// The link as written: a note id, or a title on an older link.
-    target: String,
-    id: Option<String>,
-    words: usize,
     body: String,
 }
 
@@ -896,16 +888,14 @@ impl App {
             histories: BTreeMap::new(),
             history_order: Vec::new(),
             history_key: String::new(),
-            book_id: None,
+            read_title: String::new(),
             reading: false,
             pending_chapter: None,
             show_list: true,
             show_context: false,
             context_shut: false,
-            group_cache: None,
             tags: Vec::new(),
             tag_draft: String::new(),
-            groups: Vec::new(),
             links_to: Vec::new(),
             graph_edges: Vec::new(),
             graph_open: false,
@@ -914,7 +904,6 @@ impl App {
             cached_backlinks: Vec::new(),
             known_links: None,
             lane: lane::start(),
-            group_views: Vec::new(),
             proof_body: String::new(),
             proof_warning: String::new(),
             misspellings: Arc::new(BTreeSet::new()),
@@ -1567,11 +1556,8 @@ impl App {
                 });
                 Task::none()
             }
-            Message::OpenChapter(name) => self.open_chapter(&name),
             Message::ToggleRead => {
-                if self.cached_chapters.len() >= 2 {
-                    self.reading = !self.reading;
-                }
+                self.toggle_read();
                 Task::none()
             }
             Message::ChapterMade(result) => self.finish_chapter(result),
@@ -1736,6 +1722,12 @@ impl App {
                 if !self.folded.remove(&id) {
                     self.folded.insert(id);
                 }
+                Task::none()
+            }
+            Message::ShowLinks => {
+                self.note_panel = false;
+                self.show_context = true;
+                self.context_shut = false;
                 Task::none()
             }
             Message::ToggleTasksNote => {
@@ -2292,6 +2284,10 @@ impl App {
                     .on_press(Message::PickTag(Some(tag.clone())))
                     .style(list_row(true)),
                 );
+                list = list.push(ghost_label(
+                    "Read this group, one note after another",
+                    Message::ToggleRead,
+                ));
             }
             for note in &self.notes {
                 list = list.push(self.note_row(note, 0));
@@ -3918,7 +3914,7 @@ impl App {
                 self.detail = true;
                 self.message.clear();
                 self.reading = false;
-                self.touch_group();
+                self.post_side();
                 self.reset_proof();
                 self.maybe_proof();
             }
@@ -3955,7 +3951,7 @@ impl App {
             self.arm_pause();
             self.reset_proof();
             self.maybe_proof();
-            self.touch_group();
+            self.post_side();
             return;
         }
         self.title_text.clear();
@@ -3966,7 +3962,7 @@ impl App {
         self.message.clear();
         self.reset_proof();
         self.maybe_proof();
-        self.touch_group();
+        self.post_side();
     }
 
     fn remember_unsaved(&mut self) {
@@ -4013,6 +4009,28 @@ impl App {
         if self.tags.len() != before {
             self.arm_pause();
         }
+    }
+
+    /// `2 links · 1 linked from`, under the tags, when the note has any. It opens the panel.
+    fn link_counts(&self) -> Option<Element<'_, Message>> {
+        let (out, back) = (self.links_to.len(), self.cached_backlinks.len());
+        if out == 0 && back == 0 {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if out > 0 {
+            parts.push(format!("{out} {}", if out == 1 { "link" } else { "links" }));
+        }
+        if back > 0 {
+            parts.push(format!("{back} linked from"));
+        }
+        Some(
+            button(text(parts.join(" · ")).size(12).color(self.ink().muted))
+                .padding(0)
+                .on_press(Message::ShowLinks)
+                .style(ghost_style)
+                .into(),
+        )
     }
 
     fn tag_chips(&self) -> Element<'_, Message> {
@@ -4109,48 +4127,12 @@ impl App {
         self.post(lane::Job::Watch(id));
     }
 
-    /// The list already knows the groups. This only points the open note at one.
-    fn touch_group(&mut self) {
-        self.track_book();
-        self.use_cached_chapters();
-        self.post_side();
-    }
-
-    fn use_cached_chapters(&mut self) {
-        self.cached_chapters = self
-            .group_views
-            .iter()
-            .find(|group| self.book_id.as_ref() == Some(&group.id))
-            .map(|group| {
-                group
-                    .chapters
-                    .iter()
-                    .map(|piece| Chapter {
-                        name: piece.name.clone(),
-                        target: piece.target.clone(),
-                        id: piece.id.clone(),
-                        words: piece.words,
-                        body: piece.body.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-    }
-
     fn apply_side(&mut self, side: lane::SideDone) {
-        self.groups = side
-            .groups
-            .iter()
-            .map(|group| (group.id.clone(), group.targets.clone()))
-            .collect();
         self.links_to = side.links_to;
         self.graph_edges = side.edges;
-        self.group_views = side.groups;
         self.cached_backlinks = side.backlinks;
         self.known_links = Some(Arc::new(side.known));
         markdown::set_known_links(self.known_links.clone());
-        self.track_book();
-        self.use_cached_chapters();
         self.refresh_graph();
     }
 
@@ -4330,18 +4312,6 @@ impl App {
         self.sheet = Sheet::None;
         self.detail = true;
         self.reading = false;
-    }
-
-    fn names_piece(&self, target: &str, title: &str) -> bool {
-        if title.is_empty() {
-            return false;
-        }
-        if target.eq_ignore_ascii_case(title) {
-            return true;
-        }
-        self.catalog
-            .iter()
-            .any(|note| note.id == target && note.title.eq_ignore_ascii_case(title))
     }
 
     fn note_named(&self, title: &str) -> Option<(String, String)> {
@@ -4689,7 +4659,7 @@ impl App {
         self.title_text.clone_from(&draft.title);
         self.load_sealed(&draft.body);
         self.disarm_pause();
-        self.touch_group();
+        self.post_side();
     }
 
     fn compact(&self) -> bool {
@@ -5406,9 +5376,14 @@ impl App {
         let mut page = column![].spacing(14).width(Fill).height(Fill);
         if self.reading && !chapters.is_empty() {
             page = page.push(
-                text(self.book_title())
-                    .font(serif())
-                    .size(if self.compact() { 32.0 } else { 36.0 }),
+                row![
+                    text(self.read_title.clone())
+                        .font(serif())
+                        .size(if self.compact() { 32.0 } else { 36.0 })
+                        .width(Fill),
+                    ghost_label("Back to writing", Message::ToggleRead),
+                ]
+                .align_y(iced::Alignment::Center),
             );
             page = page.push(self.read_pages(chapters));
         } else {
@@ -5429,6 +5404,9 @@ impl App {
                         .style(title_style),
                 );
                 page = page.push(self.tag_chips());
+                if let Some(line) = self.link_counts() {
+                    page = page.push(line);
+                }
             }
             if self.find_open {
                 page = page.push(self.find_bar());
@@ -5453,16 +5431,6 @@ impl App {
                     .height(Fill),
             );
             page = page.push(self.note_media());
-        }
-        if self.compact()
-            && self.show_context
-            && let Some(rail) = self.chapter_rail(chapters)
-        {
-            return column![rail, self.writing_frame(page)]
-                .spacing(12)
-                .width(Fill)
-                .height(Fill)
-                .into();
         }
         self.writing_frame(page)
     }
@@ -5528,104 +5496,12 @@ impl App {
         .into()
     }
 
-    fn chapter_rail(&self, chapters: &[Chapter]) -> Option<Element<'_, Message>> {
-        if chapters.len() < 2 {
-            return None;
-        }
-        let ink = self.ink();
-        let kind = self
-            .group_views
-            .iter()
-            .find(|group| self.book_id.as_ref() == Some(&group.id))
-            .map(|group| group.kind.clone())
-            .unwrap_or_default();
-        let mut head = column![self.group_heading()].spacing(4).width(Fill);
-        if !kind.is_empty() {
-            head = head.push(text(kind).size(12).color(ink.muted));
-        }
-        if !self.on_group_note() && !self.title_text.trim().is_empty() {
-            head = head.push(text(self.title_text.clone()).size(14));
-        }
-        let total: usize = chapters.iter().map(|chapter| chapter.words).sum();
-        head = head.push(
-            row![
-                text(words_label(total)).size(12).color(ink.muted),
-                space().width(Fill),
-                ghost_label(
-                    if self.reading { "Write" } else { "Read" },
-                    Message::ToggleRead,
-                ),
-            ]
-            .align_y(iced::Alignment::Center),
-        );
-        let mut list = column![].spacing(4).width(Fill);
-        for chapter in chapters {
-            let here = self.selected.as_deref() == chapter.id.as_deref()
-                || self.selected.as_deref() == Some(chapter.target.as_str())
-                || (!self.on_group_note()
-                    && !self.title_text.is_empty()
-                    && self.title_text.eq_ignore_ascii_case(&chapter.name));
-            let count = if chapter.id.is_some() {
-                chapter.words.to_string()
-            } else if markdown::is_note_id(&chapter.target) {
-                "missing".to_owned()
-            } else {
-                "new".to_owned()
-            };
-            list = list.push(
-                button(
-                    text(format!("{} · {count}", chapter.name))
-                        .size(14)
-                        .width(Fill),
-                )
-                .width(Fill)
-                .padding([6.0, 8.0])
-                .on_press(Message::OpenChapter(chapter.target.clone()))
-                .style(list_row(here)),
-            );
-        }
-        let scroll = vscroll(list).width(Fill);
-        let body = if self.compact() {
-            column![head, scroll.height(180)].spacing(8).width(Fill)
-        } else {
-            column![head, scroll.height(Fill)]
-                .spacing(8)
-                .width(Fill)
-                .height(Fill)
-        };
-        Some(body.into())
-    }
-
-    fn on_group_note(&self) -> bool {
-        match (&self.book_id, &self.selected) {
-            (Some(book), Some(id)) => book == id,
-            (Some(book), None) => book.is_empty(),
-            _ => false,
-        }
-    }
-
-    fn group_heading(&self) -> Element<'_, Message> {
-        let title = self.book_title();
-        if self.on_group_note() {
-            return text(title).font(serif()).size(18).into();
-        }
-        let Some(id) = self.book_id.clone().filter(|id| !id.is_empty()) else {
-            return text(title).font(serif()).size(18).into();
-        };
-        button(text(title).font(serif()).size(18))
-            .padding(0)
-            .on_press(Message::Select(id))
-            .style(ghost_style)
-            .into()
-    }
-
     fn context_room(&self) -> bool {
         self.sheet == Sheet::None && self.screen == Screen::Notes
     }
 
     fn context_pane(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        let chapters = &self.cached_chapters;
         let mut block = column![].spacing(10).padding(16).width(Fill).height(Fill);
         block = block.push(
             row![
@@ -5656,9 +5532,7 @@ impl App {
                 .style(surface_pane)
                 .into();
         }
-        if let Some(rail) = self.chapter_rail(chapters) {
-            block = block.push(rail);
-        } else if self.cached_backlinks.is_empty() && self.links_to.is_empty() {
+        if self.cached_backlinks.is_empty() && self.links_to.is_empty() {
             block = block.push(
                 text("Notes this one links to, and notes that link here, gather in this panel. Link with [[. Tags under the title make groups: Novel/Part 1 is a group inside Novel.")
                     .size(13)
@@ -5789,116 +5663,6 @@ impl App {
         vscroll(pages).height(Fill).into()
     }
 
-    fn book_title(&self) -> String {
-        let Some(id) = &self.book_id else {
-            return self.title_text.clone();
-        };
-        if id.is_empty() || self.selected.as_deref() == Some(id.as_str()) {
-            return self.title_text.clone();
-        }
-        self.catalog
-            .iter()
-            .find(|note| note.id == *id)
-            .map(|note| note.title.clone())
-            .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| "Untitled".to_owned())
-    }
-
-    fn track_book(&mut self) {
-        let names = markdown::chapter_names(&self.body.text());
-        if names.len() >= 2 && !self.context_shut {
-            self.show_context = true;
-        }
-        if names.len() >= 2 {
-            self.group_cache = None;
-            if let Some(id) = self.selected.clone() {
-                if self.book_id.as_ref().is_some_and(|book| book != &id)
-                    && self.linked_from_book(&self.title_text)
-                {
-                    return;
-                }
-                self.book_id = Some(id);
-            } else {
-                let keep = self.book_id.as_ref().is_some_and(|book| !book.is_empty());
-                if keep && self.linked_from_book(&self.title_text) {
-                    return;
-                }
-                self.book_id = Some(String::new());
-            }
-            return;
-        }
-        if self.on_group_note() || self.linked_from_book(&self.title_text) {
-            return;
-        }
-        self.remember_group();
-    }
-
-    /// A piece opened from the list still belongs to the note that links it.
-    fn remember_group(&mut self) {
-        if self
-            .group_cache
-            .as_ref()
-            .is_some_and(|(title, _)| title == &self.title_text)
-        {
-            if let Some((_, Some(id))) = &self.group_cache {
-                let id = id.clone();
-                if !self.context_shut {
-                    self.show_context = true;
-                }
-                self.book_id = Some(id);
-            } else {
-                self.book_id = None;
-                self.reading = false;
-            }
-            return;
-        }
-        let found = self.group_for(&self.title_text);
-        self.group_cache = Some((self.title_text.clone(), found.clone()));
-        if let Some(id) = found {
-            if !self.context_shut {
-                self.show_context = true;
-            }
-            self.book_id = Some(id);
-        } else if !self.on_group_note() {
-            self.book_id = None;
-            self.reading = false;
-        }
-    }
-
-    fn group_for(&self, title: &str) -> Option<String> {
-        let title = title.trim();
-        if title.is_empty() {
-            return None;
-        }
-        if let Some(id) = &self.book_id
-            && self
-                .groups
-                .iter()
-                .any(|(group, targets)| group == id && self.names_in(targets, title))
-        {
-            return Some(id.clone());
-        }
-        self.groups
-            .iter()
-            .find_map(|(id, targets)| self.names_in(targets, title).then(|| id.clone()))
-    }
-
-    fn names_in(&self, targets: &[String], title: &str) -> bool {
-        targets.iter().any(|target| self.names_piece(target, title))
-    }
-
-    fn linked_from_book(&self, title: &str) -> bool {
-        if title.is_empty() {
-            return false;
-        }
-        let Some(id) = &self.book_id else {
-            return false;
-        };
-        self.groups
-            .iter()
-            .any(|(group, targets)| group == id && self.names_in(targets, title))
-    }
-
     fn find_title(&self, name: &str) -> Option<String> {
         if name.is_empty() {
             return None;
@@ -5919,6 +5683,55 @@ impl App {
             .iter()
             .find(|note| !note.title.is_empty() && note.title.eq_ignore_ascii_case(name))
             .map(|note| note.id.clone())
+    }
+
+    /// Read the notes of the group in view, one after another, in title order. The notes are
+    /// not changed and no combined note is written.
+    fn toggle_read(&mut self) {
+        if self.reading {
+            self.reading = false;
+            return;
+        }
+        let Some(group) = self.tag.clone() else {
+            return;
+        };
+        let mut members: Vec<(String, String)> = self
+            .catalog
+            .iter()
+            .filter(|note| !is_tasks_note(note) && in_group(&note.tags, &group))
+            .map(|note| (note.id.clone(), note.title.clone()))
+            .collect();
+        members.sort_by_key(|(_, title)| title.to_lowercase());
+        let chapters: Vec<Chapter> = members
+            .into_iter()
+            .map(|(id, title)| {
+                let body = self
+                    .task_source(&id)
+                    .map(|(body, _, _)| ambient_cli::split_note_tags(&body).0)
+                    .unwrap_or_default();
+                Chapter {
+                    name: if title.is_empty() {
+                        "Untitled".to_owned()
+                    } else {
+                        title
+                    },
+                    body,
+                }
+            })
+            .collect();
+        if chapters.is_empty() {
+            return;
+        }
+        self.read_title = tag_path(&group)
+            .last()
+            .map_or_else(String::new, |last| (*last).to_owned());
+        self.cached_chapters = chapters;
+        self.graph_open = false;
+        self.graph = None;
+        self.reading = true;
+        self.screen = Screen::Notes;
+        self.sheet = Sheet::None;
+        self.detail = true;
     }
 
     fn open_chapter(&mut self, name: &str) -> Task<Message> {
@@ -5990,9 +5803,6 @@ impl App {
                     self.history_key.clone_from(&saved.id);
                 }
                 self.selected = Some(saved.id.clone());
-            }
-            if self.book_id.as_deref() == Some("") {
-                self.book_id = Some(saved.id);
             }
         }
         if self.install_latest() {
@@ -6628,10 +6438,6 @@ impl App {
         self.disarm_pause();
         self.histories.remove(&id);
         self.history_order.retain(|key| key != &id);
-        if self.book_id.as_deref() == Some(id.as_str()) {
-            self.book_id = None;
-            self.reading = false;
-        }
         if self.history_key == id {
             self.history.clear();
         }
@@ -6679,10 +6485,6 @@ impl App {
 
     fn discard_draft(&mut self) {
         self.unsaved.retain(|(key, _, _)| key.is_some());
-        if self.book_id.as_deref() == Some("") {
-            self.book_id = None;
-            self.reading = false;
-        }
         self.title_text.clear();
         self.tags.clear();
         self.tag_draft.clear();
@@ -6866,9 +6668,6 @@ impl App {
                 if current && self.selected.is_none() {
                     if self.history_key.is_empty() {
                         self.history_key.clone_from(&id);
-                    }
-                    if self.book_id.as_deref() == Some("") {
-                        self.book_id = Some(id.clone());
                     }
                     self.selected = Some(id);
                 }
@@ -8687,14 +8486,6 @@ fn clean_tag(raw: &str) -> Option<String> {
         return None;
     }
     Some(parts.join("/"))
-}
-
-fn words_label(count: usize) -> String {
-    if count == 1 {
-        "1 word".to_owned()
-    } else {
-        format!("{count} words")
-    }
 }
 
 fn format_caption(label: &'static str) -> Element<'static, Message> {
@@ -11047,6 +10838,46 @@ mod app_tests {
         let _ = app.update(Message::ToggleGraph);
         let _ = app.update(Message::GraphPick("a".to_owned()));
         assert!(!app.graph_open, "picking a dot goes back to the page");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_links_no_longer_make_a_group_and_a_group_is_read_by_its_members() {
+        let _turn = one_at_a_time();
+        let dir = folder("read-group");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        // A note that links two others is an ordinary note. Nothing turns on.
+        let _ = app.update(Message::TitleChanged("Hub".to_owned()));
+        let _ = app.update(Message::BodyEdited(
+            iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Paste(
+                std::sync::Arc::new("[[One]] and [[Two]]".to_owned()),
+            )),
+        ));
+        assert!(!app.reading && app.cached_chapters.is_empty());
+        let _ = app.update(Message::ToggleRead);
+        assert!(!app.reading, "no group in view, nothing to read");
+
+        // With a group in view, Read draws its notes in title order, and goes back.
+        app.catalog = vec![
+            summary("b", &["Novel/Part 1"]),
+            summary("a", &["Novel"]),
+            summary("x", &[]),
+        ];
+        app.tag = Some("Novel".to_owned());
+        let _ = app.update(Message::ToggleRead);
+        // The notes are not in a folder here, so the bodies are empty, but the order is real.
+        assert!(app.reading);
+        let names: Vec<_> = app
+            .cached_chapters
+            .iter()
+            .map(|chapter| chapter.name.as_str())
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(app.read_title, "Novel");
+        drop(app.view());
+        let _ = app.update(Message::ToggleRead);
+        assert!(!app.reading);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

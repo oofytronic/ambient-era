@@ -36,7 +36,7 @@ These are not for an agent to settle.
 - **Group order and group text.** A group is a tag, so it has no body of its own and no hand-set order of its pieces. Read still follows link order, not group membership.
 - **The graph.** It lays out once and does not animate, pan, or zoom. Past a few hundred notes the labels are shown only on hover and the layout rounds shrink. A click opens a note. There is no filter, and no way to show only one group.
 - **Fold state** of groups is not kept between runs.
-- **Reading pieces** still come from a note with two or more links. It is a separate idea from groups now and may want to move to a group's members.
+- **Reading a group** is in title order. There is no hand-set order, and no per-group word count.
 
 ## Offered, not built
 

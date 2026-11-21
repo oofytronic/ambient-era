@@ -44,26 +44,8 @@ pub(super) struct OpenSnap {
     pub unsaved: Vec<(Option<String>, String, String)>,
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct PieceRow {
-    pub name: String,
-    pub target: String,
-    pub id: Option<String>,
-    pub words: usize,
-    pub body: String,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct GroupView {
-    pub id: String,
-    pub targets: Vec<String>,
-    pub kind: String,
-    pub chapters: Vec<PieceRow>,
-}
-
 #[derive(Clone, Debug, Default)]
 pub(super) struct SideDone {
-    pub groups: Vec<GroupView>,
     /// The notes the open note links to, as id and title.
     pub links_to: Vec<(String, String)>,
     /// Every link between two notes, from id to id. Drawn by the graph.
@@ -293,7 +275,6 @@ pub(super) fn compute(files: &[NoteFile], open: &OpenSnap) -> SideDone {
             markdown::chapter_names(&prose)
         })
         .collect();
-    let mut groups = Vec::new();
     let mut edges: Vec<(String, String)> = Vec::new();
     for (row, targets) in rows.iter().zip(&targets_of) {
         for target in targets {
@@ -306,17 +287,6 @@ pub(super) fn compute(files: &[NoteFile], open: &OpenSnap) -> SideDone {
                 edges.push((row.id.clone(), other.id.clone()));
             }
         }
-        if targets.len() < 2 {
-            continue;
-        }
-        let kind = markdown::group_kind(&row.body).unwrap_or_default();
-        let chapters = pieces_of(&rows, targets);
-        groups.push(GroupView {
-            id: row.id.clone(),
-            targets: targets.clone(),
-            kind,
-            chapters,
-        });
     }
     let title_of = |id: &str| {
         rows.iter()
@@ -350,7 +320,6 @@ pub(super) fn compute(files: &[NoteFile], open: &OpenSnap) -> SideDone {
     }
     let backlinks = backlinks_of(&rows, open);
     SideDone {
-        groups,
         links_to,
         edges,
         backlinks,
@@ -994,36 +963,6 @@ fn overlay(files: &[NoteFile], open: &OpenSnap) -> Vec<NoteFile> {
 
 fn same_piece(target: &str, note: &NoteFile) -> bool {
     target == note.id || (!note.title.is_empty() && target.eq_ignore_ascii_case(&note.title))
-}
-
-fn pieces_of(rows: &[NoteFile], targets: &[String]) -> Vec<PieceRow> {
-    targets
-        .iter()
-        .map(|target| {
-            let found = rows.iter().find(|row| same_piece(target, row));
-            let name = if let Some(row) = found {
-                if row.title.is_empty() {
-                    "Untitled".to_owned()
-                } else {
-                    row.title.clone()
-                }
-            } else if markdown::is_note_id(target) {
-                "Missing".to_owned()
-            } else {
-                target.clone()
-            };
-            let prose = found
-                .map(|row| ambient_cli::split_note_tags(&row.body).0)
-                .unwrap_or_default();
-            PieceRow {
-                name,
-                target: target.clone(),
-                id: found.map(|row| row.id.clone()),
-                words: markdown::word_count(&prose),
-                body: prose,
-            }
-        })
-        .collect()
 }
 
 fn backlinks_of(rows: &[NoteFile], open: &OpenSnap) -> Vec<(String, String)> {

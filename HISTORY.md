@@ -410,3 +410,7 @@ The nested outline of the earlier entry was the wrong model. It treated a link a
 - The reading pieces (a note with two or more links, a `Kind:` line, Read) are unchanged. They are a reading order and do not nest the list.
 
 The word group in the notes UI means a tag path. It does not mean a multi-member Space, which is what ARCHITECTURE and ROADMAP call a group. Nothing in the protocol changed. Nothing was seen in a window.
+
+## 2026-11-21 — Links only reference; Read belongs to a group
+
+The owner asked what links were for once groups were tags. Two or more links in a note no longer make a contents note, a chapter rail, an auto-opened panel, or a Read mode, and the `Kind:` line is gone. Links are references: `Links to` and `Linked from` in the right panel, the lines in the graph, and a count under the tags that opens the panel. Read now reads the notes of the group in view, in title order. Not built: the link field beside the tags, which the owner wants after a few days of use. Nothing was seen in a window.

@@ -27,7 +27,7 @@ This is the part most likely to be misread, so it is spelled out. The notes UI n
 2. **Groups**, which are tags. `Novel/Part 1` is a group inside `Novel`. Stored on the note's hidden tag line. The left list is built from them by `group_outline`. No new record type exists and none should: the owner asked for this specifically. See "One primitive" in [AGENTS.md](../AGENTS.md).
 3. **The graph**, a toggle at the top of the left panel: dots, lines, a color per top-level group.
 
-Do not confuse the word group here with a multi-member Space, which is what ARCHITECTURE and ROADMAP call a group, and which is v0.2 later. The first design nested notes under the note that linked them. It duplicated notes and was dropped. Reading pieces (a note with two or more links, Read mode, the chapter rail) still exist as a reading order and do not nest the list.
+Do not confuse the word group here with a multi-member Space, which is what ARCHITECTURE and ROADMAP call a group, and which is v0.2 later. The first design nested notes under the note that linked them. It duplicated notes and was dropped. The earlier rule where a note with two or more links became a contents note with a chapter rail is gone. Read mode now belongs to a group: it reads the notes in the group in view, in title order. Links only reference; a count under the tags opens the panel that lists them.
 
 ## Owner preferences learned
 
