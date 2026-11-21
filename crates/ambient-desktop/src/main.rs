@@ -6592,6 +6592,9 @@ impl App {
         }
         next.push_str(&line);
         next.push('\n');
+        // The last task left "Added to Tasks." in the message. Clear it, so that a message after
+        // the write means the write said something is wrong, and not that it said it last time.
+        self.message.clear();
         let follow = self.write_note(&id, &title, &next);
         if self.message.is_empty() {
             self.task_draft.clear();
@@ -11037,7 +11040,34 @@ mod app_tests {
         // The second goes into the note that is there now.
         let _ = app.update(Message::TaskDraft("call the clinic".to_owned()));
         let _ = app.update(Message::AddTask);
+        assert!(
+            app.task_draft.is_empty(),
+            "the field is empty for the next task"
+        );
         settle(&mut app);
+        let _ = app.update(Message::TaskDraft("third".to_owned()));
+        let _ = app.update(Message::AddTask);
+        assert!(
+            app.task_draft.is_empty(),
+            "and again, with a message already up"
+        );
+        settle(&mut app);
+        let _ = app.update(Message::TaskDraft("fourth".to_owned()));
+        let _ = app.update(Message::AddTask);
+        assert!(app.task_draft.is_empty(), "every time");
+        settle(&mut app);
+        // Take the two extra tasks out so the checks below are as they were.
+        let extra: Vec<(String, usize)> = app
+            .tasks
+            .iter()
+            .filter(|task| task.text == "third" || task.text == "fourth")
+            .map(|task| (task.note_id.clone(), task.line))
+            .collect();
+        assert_eq!(extra.len(), 2);
+        for (id, line) in extra.into_iter().rev() {
+            let _ = app.update(Message::RemoveTask { id, line });
+            settle(&mut app);
+        }
         assert_eq!(listed(&app), ["buy milk", "call the clinic"]);
 
         // Checking one moves it to done, without leaving the tab.

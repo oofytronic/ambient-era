@@ -426,3 +426,7 @@ Notes in a group are alphabetical, counting numbers as numbers, so Chapter 2 com
 ## 2026-11-21 — Typing a tag no longer jumps to the page
 
 The first key in the tag field made the tag suggestions appear, which changed the row that holds the field from a row to a column. Iced then built the field again, and it lost the caret. The next keys had nothing focused, so the window's own typing fallback put them in the note body. The tag row now has the same two rows whether or not anything is offered, and a test checks its shape stays the same as the draft changes. The same cause would show for any field that gains a sibling as you type, so keep a field's container steady.
+
+## 2026-11-21 — The task field clears after every task
+
+The field was cleared only when the status message was empty after the write, and the message still held "Added to Tasks." from the task before. So the first task cleared the field and the next ones did not. The message is now cleared before the write, so a message after it means the write complained. A test adds four tasks in a row and checks the field each time. Nothing was seen in a window.
