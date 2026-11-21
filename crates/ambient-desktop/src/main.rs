@@ -215,6 +215,11 @@ struct App {
     note_panel: bool,
     /// Groups the owner has folded in the list. Only for this run.
     folded: BTreeSet<String>,
+    /// The order notes were put in by hand, per group key. A note not listed comes after, in
+    /// alphabetical order. On this computer only.
+    orders: BTreeMap<String, Vec<String>>,
+    /// A note being dragged to a new place in its group.
+    list_drag: Option<ListDrag>,
     /// A selection waiting for a chat to be chosen: its words and the lines it covers.
     send_part: Option<(String, usize, usize)>,
     /// The note whose row the pointer is over, so its delete button shows.
@@ -455,6 +460,11 @@ enum Message {
     SendSelection,
     /// Fold or open a group in the list.
     Fold(String),
+    /// The grip on a note in a group was pressed: start moving it.
+    DragStart {
+        group: String,
+        id: String,
+    },
     /// Show the graph of notes and links in place of the note, or go back.
     ToggleGraph,
     /// A dot in the graph was clicked.
@@ -880,6 +890,8 @@ impl App {
             note_panel: false,
             hover_row: None,
             send_part: None,
+            orders: BTreeMap::new(),
+            list_drag: None,
             folded: BTreeSet::new(),
             slide_bar: Slide::settled(true),
             slide_panels: Slide::settled(true),
@@ -928,6 +940,7 @@ impl App {
         for (id, name) in profile::load_names(&app.dir) {
             app.aliases.insert(id, name);
         }
+        app.orders = profile::load_order(&app.dir);
         app.my_words = profile::load_words(&app.dir).into_iter().collect();
         if !app.my_words.is_empty() {
             app.share_words();
@@ -1163,6 +1176,7 @@ impl App {
                 Task::none()
             }
             Message::SelectStop => {
+                self.finish_list_drag();
                 let was_down = self.pointer_down;
                 let dragged = self.dragged;
                 let kept = self.kept_click;
@@ -1718,6 +1732,14 @@ impl App {
                 self.refresh_graph();
                 Task::none()
             }
+            Message::DragStart { group, id } => {
+                self.list_drag = Some(ListDrag {
+                    group,
+                    id,
+                    over: None,
+                });
+                Task::none()
+            }
             Message::Fold(id) => {
                 if !self.folded.remove(&id) {
                     self.folded.insert(id);
@@ -1741,6 +1763,13 @@ impl App {
                 Task::none()
             }
             Message::RowHover(id, over) => {
+                if let Some(drag) = &mut self.list_drag {
+                    if over {
+                        drag.over = Some(id.clone());
+                    } else if drag.over.as_deref() == Some(id.as_str()) {
+                        drag.over = None;
+                    }
+                }
                 if over {
                     self.hover_row = Some(id);
                 } else if self.hover_row.as_deref() == Some(id.as_str()) {
@@ -2244,61 +2273,7 @@ impl App {
             };
             block = block.push(text(empty).size(13).color(ink.muted));
         }
-        let mut list = column![].spacing(2).width(Fill);
-        if self.query.trim().is_empty() && self.tag.is_none() {
-            if !self.catalog.iter().any(|note| !note.tags.is_empty()) && !self.catalog.is_empty() {
-                list = list.push(
-                    text("Tags make groups. Novel/Part 1 is a group inside Novel.")
-                        .size(12)
-                        .color(ink.muted),
-                );
-            }
-            for line in group_outline(&self.notes, &self.folded) {
-                match line {
-                    ListLine::Group {
-                        path,
-                        name,
-                        depth,
-                        count,
-                        open,
-                    } => list = list.push(self.group_row(&path, &name, depth, count, open)),
-                    ListLine::Note { index, depth } => {
-                        if let Some(note) = self.notes.get(index) {
-                            list = list.push(self.note_row(note, depth));
-                        }
-                    }
-                }
-            }
-        } else {
-            if let Some(tag) = &self.tag {
-                list = list.push(
-                    button(
-                        row![
-                            text(format!("In {tag}")).size(13).width(Fill),
-                            text("Show all").size(12).color(ink.muted),
-                        ]
-                        .spacing(6),
-                    )
-                    .width(Fill)
-                    .padding([4.0, 8.0])
-                    .on_press(Message::PickTag(Some(tag.clone())))
-                    .style(list_row(true)),
-                );
-                list = list.push(ghost_label(
-                    "Read this group, one note after another",
-                    Message::ToggleRead,
-                ));
-            }
-            for note in &self.notes {
-                list = list.push(self.note_row(note, 0));
-            }
-        }
-        if !self.query.trim().is_empty() && !self.search_chats.is_empty() {
-            list = list.push(text("Conversations").size(12).color(ink.muted).width(Fill));
-            for chat in &self.search_chats {
-                list = list.push(self.chat_hit_row(chat));
-            }
-        }
+        let list = self.list_rows();
         block
             .push(vscroll(list).height(Fill).width(Fill))
             .push(action_fill("New note", Message::NewNote))
@@ -2329,25 +2304,135 @@ impl App {
             },
             Message::Fold(path.to_owned()),
         ));
-        line.push(
-            button(
-                row![
-                    text(name.to_owned()).size(13).width(Fill),
-                    text(count.to_string()).size(12).color(ink.muted),
-                ]
-                .spacing(6)
-                .align_y(iced::Alignment::Center),
-            )
-            .width(Fill)
-            .padding([4.0, 8.0])
-            .on_press(Message::PickTag(Some(path.to_owned())))
-            .style(list_row(false)),
+        let name_row = button(
+            row![
+                text(name.to_owned()).size(13).width(Fill),
+                text(count.to_string()).size(12).color(ink.muted),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
         )
-        .into()
+        .width(Fill)
+        .padding([4.0, 8.0])
+        .on_press(Message::PickTag(Some(path.to_owned())))
+        .style(list_row(false));
+        // Dropping a note on its own group's name puts it first.
+        let top = top_of(path);
+        let landing = self
+            .list_drag
+            .as_ref()
+            .is_some_and(|drag| drag.group == path && drag.over.as_deref() == Some(top.as_str()));
+        let line = line.push(
+            mouse_area(name_row)
+                .on_enter(Message::RowHover(top.clone(), true))
+                .on_exit(Message::RowHover(top, false)),
+        );
+        if landing {
+            return column![line, drop_bar()].into();
+        }
+        line.into()
     }
 
     /// One note in the list, `depth` groups in.
-    fn note_row(&self, note: &NoteSummary, depth: usize) -> Element<'_, Message> {
+    /// The rows under the search field: groups and notes, or the matches.
+    fn list_rows(&self) -> iced::widget::Column<'_, Message> {
+        let ink = self.ink();
+        let mut list = column![].spacing(2).width(Fill);
+        if self.list_drag.is_some() {
+            list = list.push(
+                text("Drop it on a note to put it beside that note, or on the group's name to put it first.")
+                    .size(12)
+                    .color(ink.muted),
+            );
+        }
+        if self.query.trim().is_empty() && self.tag.is_none() {
+            if !self.catalog.iter().any(|note| !note.tags.is_empty()) && !self.catalog.is_empty() {
+                list = list.push(
+                    text("Tags make groups. Novel/Part 1 is a group inside Novel.")
+                        .size(12)
+                        .color(ink.muted),
+                );
+            }
+            for line in group_outline(&self.notes, &self.folded, &self.orders) {
+                match line {
+                    ListLine::Group {
+                        path,
+                        name,
+                        depth,
+                        count,
+                        open,
+                    } => list = list.push(self.group_row(&path, &name, depth, count, open)),
+                    ListLine::Note {
+                        index,
+                        depth,
+                        group,
+                    } => {
+                        if let Some(note) = self.notes.get(index) {
+                            list = list.push(self.note_row(note, depth, Some(&group)));
+                        }
+                    }
+                }
+            }
+        } else {
+            if let Some(tag) = &self.tag {
+                list = list.push(
+                    button(
+                        row![
+                            text(format!("In {tag}")).size(13).width(Fill),
+                            text("Show all").size(12).color(ink.muted),
+                        ]
+                        .spacing(6),
+                    )
+                    .width(Fill)
+                    .padding([4.0, 8.0])
+                    .on_press(Message::PickTag(Some(tag.clone())))
+                    .style(list_row(true)),
+                );
+                list = list.push(ghost_label(
+                    "Read this group, one note after another",
+                    Message::ToggleRead,
+                ));
+            }
+            // One group in view: its notes in the order set here, and movable.
+            let key = self
+                .tag
+                .as_ref()
+                .map(|tag| group_key(&tag_path(tag)))
+                .filter(|_| self.query.trim().is_empty());
+            let mut shown: Vec<&NoteSummary> = self.notes.iter().collect();
+            if let Some(key) = &key {
+                let by_hand = self.orders.get(key).map_or(&[][..], Vec::as_slice);
+                shown.sort_by(|a, b| {
+                    let place = |id: &str| by_hand.iter().position(|have| have == id);
+                    match (place(&a.id), place(&b.id)) {
+                        (Some(x), Some(y)) => x.cmp(&y),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => natural_cmp(&a.title, &b.title),
+                    }
+                });
+            }
+            for note in shown {
+                list = list.push(self.note_row(note, 0, key.as_deref()));
+            }
+        }
+        if !self.query.trim().is_empty() && !self.search_chats.is_empty() {
+            list = list.push(text("Conversations").size(12).color(ink.muted).width(Fill));
+            for chat in &self.search_chats {
+                list = list.push(self.chat_hit_row(chat));
+            }
+        }
+        list
+    }
+
+    /// One note in the list, `depth` groups in. `group` is the key of the group it is listed in,
+    /// when it can be moved there.
+    fn note_row(
+        &self,
+        note: &NoteSummary,
+        depth: usize,
+        group: Option<&str>,
+    ) -> Element<'_, Message> {
         let ink = self.ink();
         let selected = self.selected.as_deref() == Some(note.id.as_str());
         let title = if note.title.is_empty() {
@@ -2396,19 +2481,25 @@ impl App {
             .on_press(Message::Select(note.id.clone()))
             .style(list_row(selected));
         let over = self.hover_row.as_deref() == Some(note.id.as_str());
+        let movable = group.filter(|key| !key.is_empty() && has_exact_tag(&note.tags, key));
         let mut layers = stack![face];
-        if over {
+        if over && self.list_drag.is_none() {
+            let mut tools = row![].spacing(0).align_y(iced::Alignment::Center);
+            if let Some(key) = movable {
+                tools = tools.push(grip(mini_handle(Mini::Grip, self.is_dark()), key, &note.id));
+            }
+            tools = tools.push(mini_button(
+                mini_handle(Mini::Trash, self.is_dark()),
+                "Delete this note",
+                Message::AskDeleteNote(note.id.clone()),
+            ));
             layers = layers.push(
-                container(mini_button(
-                    mini_handle(Mini::Trash, self.is_dark()),
-                    "Delete this note",
-                    Message::AskDeleteNote(note.id.clone()),
-                ))
-                .width(Fill)
-                .height(Fill)
-                .align_x(iced::alignment::Horizontal::Right)
-                .align_y(iced::alignment::Vertical::Center)
-                .padding([0.0, 4.0]),
+                container(tools)
+                    .width(Fill)
+                    .height(Fill)
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .align_y(iced::alignment::Vertical::Center)
+                    .padding([0.0, 4.0]),
             );
         }
         let row_hit = mouse_area(layers)
@@ -2419,7 +2510,15 @@ impl App {
         for _ in 0..depth {
             line = line.push(space().width(14)).push(hairline_v());
         }
-        line.push(row_hit).into()
+        let line = line.push(row_hit);
+        // While a note is being moved, a bar over the row it would land beside shows the place.
+        let landing = self.list_drag.as_ref().is_some_and(|drag| {
+            drag.over.as_deref() == Some(note.id.as_str()) && drag.id != note.id
+        });
+        if landing {
+            return column![drop_bar(), line].into();
+        }
+        line.into()
     }
 
     fn chat_hit_row(&self, hit: &lane::ChatHit) -> Element<'_, Message> {
@@ -5733,6 +5832,50 @@ impl App {
 
     /// Read the notes of the group in view, one after another, in title order. The notes are
     /// not changed and no combined note is written.
+    /// The mouse button came up. If a note was being dragged and the pointer is over a note in
+    /// its group, or over the group's name, it goes there.
+    fn finish_list_drag(&mut self) {
+        let Some(drag) = self.list_drag.take() else {
+            return;
+        };
+        let Some(over) = drag.over else {
+            return;
+        };
+        let mut members = self.exact_members(&drag.group);
+        let ids: Vec<String> = members.iter().map(|(id, _)| id.clone()).collect();
+        let target = if over == top_of(&drag.group) {
+            None
+        } else if ids.contains(&over) {
+            Some(over)
+        } else {
+            return;
+        };
+        let moved = move_in_order(&ids, &drag.id, target.as_deref());
+        if moved == ids {
+            return;
+        }
+        members.clear();
+        self.orders.insert(drag.group, moved);
+        if let Err(err) = profile::store_order(&self.dir, &self.orders) {
+            self.say(&err);
+        }
+    }
+
+    /// The notes tagged with exactly this group, as id and title, in the order they are shown.
+    fn exact_members(&self, group: &str) -> Vec<(String, String)> {
+        let mut found: Vec<(String, String)> = self
+            .catalog
+            .iter()
+            .filter(|note| !is_tasks_note(note) && has_exact_tag(&note.tags, group))
+            .map(|note| (note.id.clone(), note.title.clone()))
+            .collect();
+        order_ids(
+            &mut found,
+            self.orders.get(group).map_or(&[][..], Vec::as_slice),
+        );
+        found
+    }
+
     fn toggle_read(&mut self) {
         if self.reading {
             self.reading = false;
@@ -5747,7 +5890,12 @@ impl App {
             .filter(|note| !is_tasks_note(note) && in_group(&note.tags, &group))
             .map(|note| (note.id.clone(), note.title.clone()))
             .collect();
-        members.sort_by_key(|(_, title)| title.to_lowercase());
+        order_ids(
+            &mut members,
+            self.orders
+                .get(&group_key(&tag_path(&group)))
+                .map_or(&[][..], Vec::as_slice),
+        );
         let chapters: Vec<Chapter> = members
             .into_iter()
             .map(|(id, title)| {
@@ -6934,6 +7082,8 @@ impl App {
         // The words in the personal dictionary are from the notes that were just erased. They
         // must not be written back into the next notebook's file.
         self.my_words.clear();
+        self.orders.clear();
+        self.list_drag = None;
         self.share_words();
         self.focus = false;
         self.slide_bar.jump(true);
@@ -7891,6 +8041,102 @@ fn in_group(tags: &[String], path: &str) -> bool {
     })
 }
 
+/// A note being dragged: the group it is in, the note, and what the pointer is over now, which
+/// is another note's id or `top_of(group)` for the group's name.
+#[derive(Debug)]
+struct ListDrag {
+    group: String,
+    id: String,
+    over: Option<String>,
+}
+
+/// What the pointer reports over a group's name, which is a drop at the top of that group.
+fn top_of(group: &str) -> String {
+    format!("top:{group}")
+}
+
+/// Whether one of the tags is exactly this group, not a group inside it.
+fn has_exact_tag(tags: &[String], group: &str) -> bool {
+    tags.iter().any(|tag| group_key(&tag_path(tag)) == group)
+}
+
+/// Titles compared the way a person counts: `Chapter 2` before `Chapter 10`, and capitals
+/// ignored.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let (mut left, mut right) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        match (left.peek().copied(), right.peek().copied()) {
+            (None, None) => return a.cmp(b),
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
+                let number = |chars: &mut std::iter::Peekable<std::str::Chars<'_>>| {
+                    let mut digits = String::new();
+                    while let Some(&c) = chars.peek() {
+                        if !c.is_ascii_digit() {
+                            break;
+                        }
+                        digits.push(c);
+                        chars.next();
+                    }
+                    digits.trim_start_matches('0').to_owned()
+                };
+                let (one, two) = (number(&mut left), number(&mut right));
+                let order = one.len().cmp(&two.len()).then_with(|| one.cmp(&two));
+                if order != std::cmp::Ordering::Equal {
+                    return order;
+                }
+            }
+            (Some(x), Some(y)) => {
+                let order = x.to_lowercase().cmp(y.to_lowercase());
+                if order != std::cmp::Ordering::Equal {
+                    return order;
+                }
+                left.next();
+                right.next();
+            }
+        }
+    }
+}
+
+/// Put notes, as id and title, in the order they are shown in a group: the ones placed by hand
+/// first, in that order, then the rest alphabetically.
+fn order_ids(items: &mut [(String, String)], by_hand: &[String]) {
+    items.sort_by(|a, b| {
+        let place = |id: &str| by_hand.iter().position(|have| have == id);
+        match (place(&a.0), place(&b.0)) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => natural_cmp(&a.1, &b.1).then_with(|| a.0.cmp(&b.0)),
+        }
+    });
+}
+
+/// `ids` with `moved` taken out and put before `before`, or first when `before` is none. A note
+/// moved down goes after the one it was dropped on, so it lands where the pointer is.
+fn move_in_order(ids: &[String], moved: &str, before: Option<&str>) -> Vec<String> {
+    let Some(from) = ids.iter().position(|id| id == moved) else {
+        return ids.to_vec();
+    };
+    let mut out: Vec<String> = ids.to_vec();
+    out.remove(from);
+    let at = match before {
+        None => 0,
+        Some(target) => {
+            let (Some(to), Some(now)) = (
+                ids.iter().position(|id| id == target),
+                out.iter().position(|id| id == target),
+            ) else {
+                return ids.to_vec();
+            };
+            if to > from { now + 1 } else { now }
+        }
+    };
+    out.insert(at.min(out.len()), moved.to_owned());
+    out
+}
+
 /// One line of the note list.
 #[derive(Debug, Eq, PartialEq)]
 enum ListLine {
@@ -7905,6 +8151,8 @@ enum ListLine {
     Note {
         index: usize,
         depth: usize,
+        /// The key of the group it is listed in, empty for a note with none.
+        group: String,
     },
 }
 
@@ -7947,14 +8195,23 @@ fn place(level: &mut BTreeMap<String, GroupNode>, parts: &[&str], at: usize, ind
 /// The note list as groups inside groups, from the notes' tags. A group is a tag, and a tag
 /// with slashes is a group inside a group. A note with two tags is in both. A note with no tag
 /// is listed after the groups. A folded group hides what is inside it.
-fn group_outline(notes: &[NoteSummary], folded: &BTreeSet<String>) -> Vec<ListLine> {
+fn group_outline(
+    notes: &[NoteSummary],
+    folded: &BTreeSet<String>,
+    orders: &BTreeMap<String, Vec<String>>,
+) -> Vec<ListLine> {
     fn walk(
         key: &str,
         node: &GroupNode,
         depth: usize,
-        folded: &BTreeSet<String>,
+        shown: (
+            &[NoteSummary],
+            &BTreeSet<String>,
+            &BTreeMap<String, Vec<String>>,
+        ),
         out: &mut Vec<ListLine>,
     ) {
+        let (notes, folded, orders) = shown;
         let mut all = BTreeSet::new();
         node.everyone(&mut all);
         let open = !folded.contains(key);
@@ -7969,13 +8226,24 @@ fn group_outline(notes: &[NoteSummary], folded: &BTreeSet<String>) -> Vec<ListLi
             return;
         }
         for (child_key, child) in &node.children {
-            walk(child_key, child, depth + 1, folded, out);
+            walk(child_key, child, depth + 1, shown, out);
         }
-        for index in &node.notes {
-            out.push(ListLine::Note {
-                index: *index,
-                depth: depth + 1,
-            });
+        // Placed by hand first, then alphabetical, whatever order they were filed in.
+        let mut items: Vec<(String, String)> = node
+            .notes
+            .iter()
+            .filter_map(|index| notes.get(*index))
+            .map(|note| (note.id.clone(), note.title.clone()))
+            .collect();
+        order_ids(&mut items, orders.get(key).map_or(&[][..], Vec::as_slice));
+        for (id, _) in items {
+            if let Some(index) = notes.iter().position(|note| note.id == id) {
+                out.push(ListLine::Note {
+                    index,
+                    depth: depth + 1,
+                    group: key.to_owned(),
+                });
+            }
         }
     }
     let mut roots: BTreeMap<String, GroupNode> = BTreeMap::new();
@@ -7995,10 +8263,22 @@ fn group_outline(notes: &[NoteSummary], folded: &BTreeSet<String>) -> Vec<ListLi
     }
     let mut out = Vec::new();
     for (key, node) in &roots {
-        walk(key, node, 0, folded, &mut out);
+        walk(key, node, 0, (notes, folded, orders), &mut out);
     }
-    for index in loose {
-        out.push(ListLine::Note { index, depth: 0 });
+    let mut loose_items: Vec<(String, String)> = loose
+        .iter()
+        .filter_map(|index| notes.get(*index))
+        .map(|note| (note.id.clone(), note.title.clone()))
+        .collect();
+    order_ids(&mut loose_items, &[]);
+    for (id, _) in loose_items {
+        if let Some(index) = notes.iter().position(|note| note.id == id) {
+            out.push(ListLine::Note {
+                index,
+                depth: 0,
+                group: String::new(),
+            });
+        }
     }
     out
 }
@@ -8568,6 +8848,37 @@ impl canvas::Program<Message> for GraphView {
             iced::mouse::Interaction::default()
         }
     }
+}
+
+/// The handle on a note in a group. Pressing it starts moving the note in that group.
+fn grip(handle: iced_image::Handle, group: &str, id: &str) -> Element<'static, Message> {
+    let face =
+        mouse_area(container(iced_image::Image::new(handle).width(16).height(16)).padding(6))
+            .on_press(Message::DragStart {
+                group: group.to_owned(),
+                id: id.to_owned(),
+            })
+            .interaction(iced::mouse::Interaction::Grab);
+    hover_label(face, "Drag to move it in this group")
+}
+
+/// A line in the accent color, drawn where a note being moved would land.
+fn drop_bar() -> Element<'static, Message> {
+    container(column![])
+        .height(3)
+        .width(Fill)
+        .style(|theme| {
+            let ink = ink_of(theme);
+            container::Style {
+                background: Some(iced::Background::Color(ink.accent)),
+                border: iced::Border {
+                    radius: 2.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        })
+        .into()
 }
 
 fn is_tasks_note(note: &NoteSummary) -> bool {
@@ -9513,6 +9824,7 @@ enum Mini {
     Focus,
     Gear,
     Graph,
+    Grip,
 }
 
 fn mini_button(
@@ -9529,7 +9841,7 @@ fn mini_button(
 
 fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
     use std::sync::OnceLock;
-    static HANDLES: OnceLock<[iced_image::Handle; 16]> = OnceLock::new();
+    static HANDLES: OnceLock<[iced_image::Handle; 18]> = OnceLock::new();
     let handles = HANDLES.get_or_init(|| {
         let ink = [0xED, 0xEA, 0xDE];
         let day = [0x1C, 0x19, 0x17];
@@ -9550,6 +9862,8 @@ fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
             iced_image::Handle::from_bytes(icon_png(day, gear_ink)),
             iced_image::Handle::from_bytes(icon_png(ink, graph_ink)),
             iced_image::Handle::from_bytes(icon_png(day, graph_ink)),
+            iced_image::Handle::from_bytes(icon_png(ink, grip_ink)),
+            iced_image::Handle::from_bytes(icon_png(day, grip_ink)),
         ]
     });
     let index = match kind {
@@ -9561,6 +9875,7 @@ fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
         Mini::Focus => 10,
         Mini::Gear => 12,
         Mini::Graph => 14,
+        Mini::Grip => 16,
     } + usize::from(!dark);
     handles
         .get(index)
@@ -9622,6 +9937,15 @@ fn focus_ink(dx: f64, dy: f64) -> bool {
     let upright = (16.0..20.5).contains(&x) && (8.0..=20.5).contains(&y);
     let across = (16.0..20.5).contains(&y) && (8.0..=20.5).contains(&x);
     upright || across || x.hypot(y) < 4.5
+}
+
+/// Two columns of three dots: something to take hold of.
+fn grip_ink(dx: f64, dy: f64) -> bool {
+    [-8.0, 8.0].iter().any(|x: &f64| {
+        [-14.0, 0.0, 14.0]
+            .iter()
+            .any(|y: &f64| (dx - x).hypot(dy - y) < 4.6)
+    })
 }
 
 /// Three dots joined by lines: notes and links.
@@ -11000,7 +11324,12 @@ mod app_tests {
 
     #[test]
     fn a_group_is_a_tag_and_a_slash_makes_a_group_inside_a_group() {
-        use super::ListLine::{Group, Note};
+        use super::ListLine::Group;
+        let note = |index, depth, group: &str| super::ListLine::Note {
+            index,
+            depth,
+            group: group.to_owned(),
+        };
         let notes = [
             summary("ch1", &["Novel/Part 1"]),
             summary("ch2", &["novel / part 1", "Research"]),
@@ -11008,7 +11337,7 @@ mod app_tests {
             summary("loose", &[]),
         ];
         let open = std::collections::BTreeSet::new();
-        let lines = super::group_outline(&notes, &open);
+        let lines = super::group_outline(&notes, &open, &std::collections::BTreeMap::new());
         let group = |path: &str, name: &str, depth, count| Group {
             path: path.to_owned(),
             name: name.to_owned(),
@@ -11021,12 +11350,12 @@ mod app_tests {
             [
                 group("novel", "Novel", 0, 3),
                 group("novel/part 1", "Part 1", 1, 2),
-                Note { index: 0, depth: 2 },
-                Note { index: 1, depth: 2 },
-                Note { index: 2, depth: 1 },
+                note(0, 2, "novel/part 1"),
+                note(1, 2, "novel/part 1"),
+                note(2, 1, "novel"),
                 group("research", "Research", 0, 1),
-                Note { index: 1, depth: 1 },
-                Note { index: 3, depth: 0 },
+                note(1, 1, "research"),
+                note(3, 0, ""),
             ],
             "case and spacing do not make a second group, a note in two groups shows in both, \
              and an untagged note comes after the groups"
@@ -11034,7 +11363,7 @@ mod app_tests {
         // Folding a group hides what is in it, not the groups beside it.
         let mut folded = std::collections::BTreeSet::new();
         folded.insert("novel".to_owned());
-        let shut = super::group_outline(&notes, &folded);
+        let shut = super::group_outline(&notes, &folded, &std::collections::BTreeMap::new());
         assert_eq!(shut.len(), 4, "{shut:?}");
         assert!(matches!(
             shut.first(),
@@ -11229,6 +11558,162 @@ mod app_tests {
         drop(app.view());
         let _ = app.update(Message::ToggleRead);
         assert!(!app.reading);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn titles_sort_the_way_a_person_counts() {
+        let mut titles = vec![
+            "Chapter 10",
+            "chapter 2",
+            "Chapter 1",
+            "Epilogue",
+            "Appendix",
+            "Chapter 02b",
+        ];
+        titles.sort_by(|a, b| super::natural_cmp(a, b));
+        assert_eq!(
+            titles,
+            [
+                "Appendix",
+                "Chapter 1",
+                "chapter 2",
+                "Chapter 02b",
+                "Chapter 10",
+                "Epilogue"
+            ]
+        );
+    }
+
+    #[test]
+    fn notes_in_a_group_are_alphabetical_until_placed_by_hand() {
+        let item = |id: &str, title: &str| (id.to_owned(), title.to_owned());
+        let mut items = vec![
+            item("c10", "Chapter 10"),
+            item("pre", "Prequel"),
+            item("c2", "Chapter 2"),
+            item("c1", "Chapter 1"),
+        ];
+        super::order_ids(&mut items, &[]);
+        let ids: Vec<_> = items.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["c1", "c2", "c10", "pre"],
+            "alphabetical, Chapter 2 before Chapter 10"
+        );
+        // The prequel pulled to the top, and the rest left as they were.
+        let saved = super::move_in_order(
+            &ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>(),
+            "pre",
+            None,
+        );
+        assert_eq!(saved, ["pre", "c1", "c2", "c10"]);
+        super::order_ids(&mut items, &saved);
+        assert_eq!(items[0].0, "pre");
+        // A note added later is not in the saved order, so it comes after, alphabetically.
+        items.push(item("c3", "Chapter 3"));
+        items.push(item("a", "A new one"));
+        super::order_ids(&mut items, &saved);
+        let ids: Vec<_> = items.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["pre", "c1", "c2", "c10", "a", "c3"]);
+    }
+
+    #[test]
+    fn a_dropped_note_lands_where_the_pointer_was() {
+        let ids: Vec<String> = ["a", "b", "c", "d"].map(str::to_owned).into();
+        let moved = |id: &str, before: Option<&str>| super::move_in_order(&ids, id, before);
+        assert_eq!(
+            moved("a", Some("c")),
+            ["b", "c", "a", "d"],
+            "down: after the one it is dropped on"
+        );
+        assert_eq!(moved("d", Some("b")), ["a", "d", "b", "c"], "up: before it");
+        assert_eq!(
+            moved("c", None),
+            ["c", "a", "b", "d"],
+            "on the group's name: first"
+        );
+        assert_eq!(moved("b", Some("b")), ids, "on itself: nothing");
+        assert_eq!(moved("zz", Some("a")), ids, "a stranger: nothing");
+        assert_eq!(moved("a", Some("zz")), ids, "onto a stranger: nothing");
+    }
+
+    #[test]
+    fn the_outline_follows_the_order_set_by_hand() {
+        let notes = [
+            summary("ch1", &["Novel"]),
+            summary("ch2", &["Novel"]),
+            summary("pre", &["Novel"]),
+        ];
+        let mut orders = std::collections::BTreeMap::new();
+        orders.insert("novel".to_owned(), vec!["pre".to_owned()]);
+        let lines = super::group_outline(&notes, &std::collections::BTreeSet::new(), &orders);
+        let order: Vec<_> = lines
+            .iter()
+            .filter_map(|line| match line {
+                super::ListLine::Note { index, .. } => Some(notes[*index].id.as_str()),
+                super::ListLine::Group { .. } => None,
+            })
+            .collect();
+        assert_eq!(order, ["pre", "ch1", "ch2"]);
+    }
+
+    #[test]
+    fn dragging_a_note_to_the_top_is_kept_and_survives_a_restart() {
+        let _turn = one_at_a_time();
+        let dir = folder("drag-order");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        app.catalog = vec![
+            summary("c1", &["Novel"]),
+            summary("c2", &["Novel"]),
+            summary("pre", &["Novel"]),
+        ];
+        app.catalog[0].title = "Chapter 1".to_owned();
+        app.catalog[1].title = "Chapter 2".to_owned();
+        app.catalog[2].title = "Prequel".to_owned();
+        app.refresh_shown();
+        let shown = |app: &App| -> Vec<String> {
+            app.exact_members("novel")
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        };
+        assert_eq!(shown(&app), ["c1", "c2", "pre"]);
+        // Press the grip on the prequel, move onto the group's name, let go.
+        let _ = app.update(Message::DragStart {
+            group: "novel".to_owned(),
+            id: "pre".to_owned(),
+        });
+        drop(app.view());
+        let _ = app.update(Message::RowHover(super::top_of("novel"), true));
+        drop(app.view());
+        let _ = app.update(Message::SelectStop);
+        assert!(app.list_drag.is_none());
+        assert_eq!(shown(&app), ["pre", "c1", "c2"]);
+        // Letting go over nothing changes nothing.
+        let _ = app.update(Message::DragStart {
+            group: "novel".to_owned(),
+            id: "c2".to_owned(),
+        });
+        let _ = app.update(Message::SelectStop);
+        assert_eq!(shown(&app), ["pre", "c1", "c2"]);
+        // Another note's row: c2 goes before c1.
+        let _ = app.update(Message::DragStart {
+            group: "novel".to_owned(),
+            id: "c2".to_owned(),
+        });
+        let _ = app.update(Message::RowHover("c1".to_owned(), true));
+        let _ = app.update(Message::SelectStop);
+        assert_eq!(shown(&app), ["pre", "c2", "c1"]);
+        assert_eq!(
+            super::profile::load_order(&dir).get("novel").map(Vec::len),
+            Some(3)
+        );
+        let (mut again, _) = App::at(dir.clone());
+        again.orders = super::profile::load_order(&dir);
+        again.catalog = app.catalog.clone();
+        assert_eq!(shown(&again), ["pre", "c2", "c1"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -125,6 +125,48 @@ pub(super) fn store_words(dir: &Path, words: &[String]) -> Result<(), String> {
         .map_err(|_| "could not write your dictionary".to_owned())
 }
 
+/// The order the notes of each group were put in by hand: a group's key, then its note ids.
+/// Not sealed and not sent, so it stays on this computer. Ids are random, but a group's name is
+/// a word from the notes, so this file is plain text beside the sealed log like `names`.
+pub(super) fn load_order(dir: &Path) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut found = std::collections::BTreeMap::new();
+    let Ok(text) = fs::read_to_string(dir.join("order")) else {
+        return found;
+    };
+    for line in text.lines().skip(1) {
+        let Some((key, ids)) = line.split_once('\t') else {
+            continue;
+        };
+        let ids: Vec<String> = ids
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if !key.is_empty() && !ids.is_empty() {
+            found.insert(key.to_owned(), ids);
+        }
+    }
+    found
+}
+
+pub(super) fn store_order(
+    dir: &Path,
+    order: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Result<(), String> {
+    let mut text = String::from("v1\n");
+    for (key, ids) in order {
+        if key.is_empty() || ids.is_empty() {
+            continue;
+        }
+        text.push_str(&one_line(key));
+        text.push('\t');
+        text.push_str(&ids.join(","));
+        text.push('\n');
+    }
+    fs::write(dir.join("order"), text).map_err(|_| "could not write the order".to_owned())
+}
+
 /// How far this computer has read each conversation. Not sealed. Not sent.
 pub(super) fn load_seen(dir: &Path) -> Vec<(String, usize)> {
     let Ok(text) = fs::read_to_string(dir.join("seen")) else {

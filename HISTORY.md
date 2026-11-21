@@ -418,3 +418,7 @@ The owner asked what links were for once groups were tags. Two or more links in 
 ## 2026-11-21 — The graph clusters by group, and the right panel is restyled
 
 The graph gives each top-level group its own cluster of dots inside a soft circle of the group's color, with the name on the circle, so a link from one group to another stands out as a heavier line crossing between circles. Titles wrap, and the picture keeps a margin from the edge and sits in a card. The right panel has a larger serif title, a larger gear with a soft background while settings are showing, a line under the header, small capitalized section labels with counts, and taller rows. Nothing was seen in a window.
+
+## 2026-11-21 — Notes in a group are ordered
+
+Notes in a group are alphabetical, counting numbers as numbers, so Chapter 2 comes before Chapter 10. The owner can drag a note by a grip to sit beside another note in its group, or onto the group's name to put it first, for a prequel. Read follows the same order. The hand order is a plain local file named `order`, not part of the sealed log, so it does not sync to a second computer. That was chosen to avoid a new record type before the owner had used it. If it should sync, it needs a record with its own merge rule, and so a spec edit and an ADR. THREAT_MODEL now lists the file. Nothing was seen in a window.

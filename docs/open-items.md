@@ -33,7 +33,8 @@ These are not for an agent to settle.
 ## Links, groups, and the graph, not built
 
 - **A link field beside the tags.** The owner liked the idea of adding a link to a note from the top, as a chip with a picker like the tag field. Links are still written as `[[ ]]` in the body. The field would store them on the hidden line like tags, and the panel would read both.
-- **Group order and group text.** A group is a tag, so it has no body of its own and no hand-set order of its pieces. Read still follows link order, not group membership.
+- **Group order does not sync.** Notes in a group are alphabetical, and can be moved by hand with a grip. The hand order is a plain local file, `order`, so a second computer would show alphabetical order. Syncing it needs a place in the log, which is a record with its own merge rule, so it needs an ADR. A group also has no text of its own. A note in two groups is ordered separately in each.
+- **Drag is by the grip only,** and only inside one group. There is no moving a note to another group by dragging, no keyboard way to reorder, and no way to clear a hand order except moving notes back.
 - **The graph.** It lays out once and does not animate, pan, or zoom. Past thirty notes the titles are shown only on hover or for the open note. A click opens a note. Only the top of a group path is a circle, so `Novel/Part 1` is not a circle inside `Novel`. There is no filter, and no way to show only one group.
 - **Fold state** of groups is not kept between runs.
 - **Reading a group** is in title order. There is no hand-set order, and no per-group word count.

@@ -29,6 +29,8 @@ This is the part most likely to be misread, so it is spelled out. The notes UI n
 
 Do not confuse the word group here with a multi-member Space, which is what ARCHITECTURE and ROADMAP call a group, and which is v0.2 later. The first design nested notes under the note that linked them. It duplicated notes and was dropped. The earlier rule where a note with two or more links became a contents note with a chapter rail is gone. Read mode now belongs to a group: it reads the notes in the group in view, in title order. Links only reference; a count under the tags opens the panel that lists them.
 
+Notes in a group are ordered alphabetically and can be reordered by a drag on a grip. That order is the local file `order` and does not sync, on purpose, until the owner decides it should (it would need a record with a merge rule and an ADR).
+
 ## Owner preferences learned
 
 - Short plain answers. Say what was done, what was not, and what was not seen. Do not claim a visual result.
