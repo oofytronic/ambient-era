@@ -64,7 +64,10 @@ pub(super) struct GroupView {
 #[derive(Clone, Debug, Default)]
 pub(super) struct SideDone {
     pub groups: Vec<GroupView>,
-    pub pieces: BTreeSet<String>,
+    /// The notes the open note links to, as id and title.
+    pub links_to: Vec<(String, String)>,
+    /// Every link between two notes, from id to id. Drawn by the graph.
+    pub edges: Vec<(String, String)>,
     pub backlinks: Vec<(String, String)>,
     pub known: BTreeSet<String>,
 }
@@ -282,34 +285,62 @@ pub(super) fn files_of(book: &Notebook) -> Vec<NoteFile> {
 
 pub(super) fn compute(files: &[NoteFile], open: &OpenSnap) -> SideDone {
     let rows = overlay(files, open);
+    // What each note links to, read once. The reading pieces and the graph both use it.
+    let targets_of: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            let (prose, _) = ambient_cli::split_note_tags(&row.body);
+            markdown::chapter_names(&prose)
+        })
+        .collect();
     let mut groups = Vec::new();
-    for row in &rows {
-        let (prose, _) = ambient_cli::split_note_tags(&row.body);
-        let targets = markdown::chapter_names(&prose);
+    let mut edges: Vec<(String, String)> = Vec::new();
+    for (row, targets) in rows.iter().zip(&targets_of) {
+        for target in targets {
+            if let Some(other) = rows.iter().find(|other| same_piece(target, other))
+                && other.id != row.id
+                && !edges
+                    .iter()
+                    .any(|(from, to)| *from == row.id && *to == other.id)
+            {
+                edges.push((row.id.clone(), other.id.clone()));
+            }
+        }
         if targets.len() < 2 {
             continue;
         }
         let kind = markdown::group_kind(&row.body).unwrap_or_default();
-        let chapters = pieces_of(&rows, &targets);
+        let chapters = pieces_of(&rows, targets);
         groups.push(GroupView {
             id: row.id.clone(),
-            targets,
+            targets: targets.clone(),
             kind,
             chapters,
         });
     }
-    let mut pieces = BTreeSet::new();
-    for row in &rows {
-        if groups.iter().any(|group| group.id == row.id) {
-            continue;
-        }
-        let linked = groups
-            .iter()
-            .any(|group| group.targets.iter().any(|target| same_piece(target, row)));
-        if linked {
-            pieces.insert(row.id.clone());
-        }
-    }
+    let title_of = |id: &str| {
+        rows.iter()
+            .find(|row| row.id == id)
+            .map(|row| {
+                if row.title.is_empty() {
+                    "Untitled".to_owned()
+                } else {
+                    row.title.clone()
+                }
+            })
+            .unwrap_or_default()
+    };
+    let links_to = open
+        .selected
+        .as_ref()
+        .map(|id| {
+            edges
+                .iter()
+                .filter(|(from, _)| from == id)
+                .map(|(_, to)| (to.clone(), title_of(to)))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut known = BTreeSet::new();
     for row in &rows {
         known.insert(row.id.clone());
@@ -320,7 +351,8 @@ pub(super) fn compute(files: &[NoteFile], open: &OpenSnap) -> SideDone {
     let backlinks = backlinks_of(&rows, open);
     SideDone {
         groups,
-        pieces,
+        links_to,
+        edges,
         backlinks,
         known,
     }

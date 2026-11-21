@@ -30,6 +30,14 @@ These are not for an agent to settle.
 - **A scroll speed setting.** The wheel follows a page step now. Nothing reads a system wheel setting, because Linux has none to read: the system sends the notches already scaled or it does not.
 - **Settings in the note's panel** show only the home device, send, and delete. Tags and the note's id are not there yet.
 
+## Links, groups, and the graph, not built
+
+- **A link field beside the tags.** The owner liked the idea of adding a link to a note from the top, as a chip with a picker like the tag field. Links are still written as `[[ ]]` in the body. The field would store them on the hidden line like tags, and the panel would read both.
+- **Group order and group text.** A group is a tag, so it has no body of its own and no hand-set order of its pieces. Read still follows link order, not group membership.
+- **The graph.** It lays out once and does not animate, pan, or zoom. Past a few hundred notes the labels are shown only on hover and the layout rounds shrink. A click opens a note. There is no filter, and no way to show only one group.
+- **Fold state** of groups is not kept between runs.
+- **Reading pieces** still come from a note with two or more links. It is a separate idea from groups now and may want to move to a group's members.
+
 ## Offered, not built
 
 Small things that would help daily use.

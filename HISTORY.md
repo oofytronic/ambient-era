@@ -399,3 +399,14 @@ Not done, and why: [open-items.md](docs/open-items.md). Nothing was seen in a wi
 ## 2026-11-20 — The list nests groups inside groups
 
 A piece that was itself a group showed twice: under its parent and again at the top as its own group. The list is now an outline. Groups nest to any depth, each has a handle to fold it, and a note is drawn at the top only when no group links it. Loops of links end. Folded state is not kept between runs. Nothing was seen in a window.
+
+## 2026-11-20 — Links, groups, and the graph are three separate things
+
+The nested outline of the earlier entry was the wrong model. It treated a link as containment, so a note with two links became a group, and a note linked by one group that had its own links appeared twice. The owner asked for links to be visualized correctly and said a group should not need a new type. What replaced it:
+
+- **A link is a reference.** The right panel of the open note lists `Links to` and `Linked from`. A link never nests a note in the left list.
+- **A group is a tag.** `Novel` is a group and `Novel/Part 1` is a group inside it. It is stored on the note's hidden tag line, as tags already were, so there is no new record, no reference note, and no new merge rule. The left list is built from the tags with a fold handle on each group. The earlier link-built outline, `outline`, is removed.
+- **A graph** behind a button at the top of the left panel draws notes as dots, links as lines, and a color per top-level group. A dot opens its note.
+- The reading pieces (a note with two or more links, a `Kind:` line, Read) are unchanged. They are a reading order and do not nest the list.
+
+The word group in the notes UI means a tag path. It does not mean a multi-member Space, which is what ARCHITECTURE and ROADMAP call a group. Nothing in the protocol changed. Nothing was seen in a window.
