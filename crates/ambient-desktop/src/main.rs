@@ -25,6 +25,7 @@ use image::ImageEncoder;
 use qrcode::QrCode;
 
 mod clock;
+mod dates;
 mod files;
 mod lane;
 mod markdown;
@@ -191,6 +192,18 @@ struct App {
     /// The Tasks note is shown over the Tasks tab.
     tasks_note_open: bool,
     task_due_text: String,
+    /// The due date picked for the task being added, as `YYYY-MM-DD`, or empty.
+    new_due: String,
+    /// Whose due date the calendar is choosing, when it is open.
+    cal: Option<CalFor>,
+    /// The month the calendar is showing.
+    cal_month: (i32, u32),
+    /// What the Tasks tab is showing.
+    task_view: TaskView,
+    /// This computer's time zone data, read once.
+    tz: Vec<u8>,
+    /// A day to treat as today. Only tests set it.
+    pinned_today: Option<dates::Date>,
     find_open: bool,
     find_query: String,
     /// Index of the current find hit. `usize::MAX` means the next jump starts at the first.
@@ -471,6 +484,17 @@ enum Message {
     GraphPick(String),
     /// The line of link counts under the title: open the right panel on the links.
     ShowLinks,
+    /// Open the calendar for this due date, or shut it if it is already open for it.
+    OpenCalendar(CalFor),
+    CloseCalendar,
+    /// Show the month this many months on, or back.
+    CalMonth(i32),
+    /// A day was chosen in the calendar, as `YYYY-MM-DD`.
+    PickDay(String),
+    /// No due date.
+    ClearDue,
+    /// Look at the tasks this way.
+    ShowTaskView(TaskView),
     /// Show or close the Tasks note over the Tasks tab.
     ToggleTasksNote,
     /// The icon at the top of the right panel: this note's settings, or its links.
@@ -512,7 +536,6 @@ enum Message {
         line: usize,
         up: bool,
     },
-    DueDraft(String),
     ChatQuery(String),
     FindOpen,
     FindQuery(String),
@@ -554,6 +577,30 @@ struct OlderNote {
     id: String,
     title: String,
     body: String,
+}
+
+/// Whose due date the calendar is choosing: the task being added, or one being edited.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CalFor {
+    New,
+    Edit,
+}
+
+/// A way of looking at the tasks, picked in the panel on the left of the Tasks tab.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TaskView {
+    /// Every task not done.
+    Open,
+    Today,
+    Overdue,
+    Upcoming,
+    /// Not done, and no due date.
+    NoDate,
+    Done,
+    /// The tasks in the notes of a group, by its key.
+    Group(String),
+    /// The tasks in one note.
+    Note(String),
 }
 
 /// One note in a reading of a group.
@@ -873,6 +920,12 @@ impl App {
             confirm_clear: false,
             tasks_note_open: false,
             task_due_text: String::new(),
+            new_due: String::new(),
+            cal: None,
+            cal_month: (1970, 1),
+            task_view: TaskView::Open,
+            tz: clock::load_tz(),
+            pinned_today: None,
             find_open: false,
             find_query: String::new(),
             find_at: usize::MAX,
@@ -1752,6 +1805,54 @@ impl App {
                 self.context_shut = false;
                 Task::none()
             }
+            Message::OpenCalendar(whose) => {
+                if self.cal == Some(whose) {
+                    self.cal = None;
+                } else {
+                    let chosen = match whose {
+                        CalFor::New => &self.new_due,
+                        CalFor::Edit => &self.task_due_text,
+                    };
+                    let shown = dates::Date::parse(chosen).unwrap_or_else(|| self.today());
+                    self.cal_month = (shown.year, shown.month);
+                    self.cal = Some(whose);
+                }
+                Task::none()
+            }
+            Message::CloseCalendar => {
+                self.cal = None;
+                Task::none()
+            }
+            Message::CalMonth(delta) => {
+                let (year, month) = self.cal_month;
+                self.cal_month = dates::shift_month(year, month, delta);
+                Task::none()
+            }
+            Message::PickDay(text) => {
+                // Only a day that exists is taken, so what is written is always a real date.
+                if dates::Date::parse(&text).is_some() {
+                    match self.cal {
+                        Some(CalFor::New) => self.new_due = text,
+                        Some(CalFor::Edit) => self.task_due_text = text,
+                        None => {}
+                    }
+                }
+                self.cal = None;
+                Task::none()
+            }
+            Message::ClearDue => {
+                match self.cal {
+                    Some(CalFor::New) => self.new_due.clear(),
+                    Some(CalFor::Edit) => self.task_due_text.clear(),
+                    None => {}
+                }
+                self.cal = None;
+                Task::none()
+            }
+            Message::ShowTaskView(view) => {
+                self.task_view = view;
+                Task::none()
+            }
             Message::ToggleTasksNote => {
                 self.tasks_note_open = !self.tasks_note_open;
                 Task::none()
@@ -1828,10 +1929,6 @@ impl App {
             }
             Message::TaskLabel(text) => {
                 self.task_rename_text = text;
-                Task::none()
-            }
-            Message::DueDraft(text) => {
-                self.task_due_text = text;
                 Task::none()
             }
             Message::CommitTaskRename => self.commit_task_rename(),
@@ -2180,13 +2277,7 @@ impl App {
                 ));
             }
         } else if self.screen == Screen::Tasks {
-            let open = self.tasks.iter().filter(|task| !task.done).count();
-            side = side.push(text(format!("{open} open")).size(13).color(ink.muted));
-            side = side.push(
-                text("A box writes back into its note. One added here is the Tasks note.")
-                    .size(13)
-                    .color(ink.muted),
-            );
+            side = side.push(vscroll(self.task_sidebar()).height(Fill).width(Fill));
         } else {
             side = side.push(self.note_index());
         }
@@ -2195,6 +2286,133 @@ impl App {
             .height(Fill)
             .style(surface_pane)
             .into()
+    }
+
+    /// The panel on the left of the Tasks tab: the ways to look at the tasks. Dates, the groups
+    /// the notes with tasks are in, and the notes.
+    fn task_sidebar(&self) -> iced::widget::Column<'_, Message> {
+        let ink = self.ink();
+        let today = self.today();
+        let count = |view: &TaskView| {
+            self.tasks
+                .iter()
+                .filter(|task| {
+                    self.in_view(task, view, today)
+                        && if *view == TaskView::Open
+                            || matches!(view, TaskView::Group(_) | TaskView::Note(_))
+                        {
+                            !task.done
+                        } else {
+                            true
+                        }
+                })
+                .count()
+        };
+        let label = |text_in: &str| {
+            text(text_in.to_uppercase())
+                .size(11)
+                .color(ink.muted)
+                .width(Fill)
+        };
+        let mut panel = column![label("Views")].spacing(2).width(Fill);
+        for (name, view) in [
+            ("All open", TaskView::Open),
+            ("Due today", TaskView::Today),
+            ("Overdue", TaskView::Overdue),
+            ("Upcoming", TaskView::Upcoming),
+            ("No date", TaskView::NoDate),
+            ("Done", TaskView::Done),
+        ] {
+            let n = count(&view);
+            panel = panel.push(self.task_view_row(name, n, 0, view));
+        }
+        // Groups: every group a note with a task is in, and every group that contains it.
+        let mut groups: BTreeMap<String, (String, usize, std::collections::BTreeSet<usize>)> =
+            BTreeMap::new();
+        for (index, task) in self.tasks.iter().enumerate() {
+            let Some(note) = self.catalog.iter().find(|note| note.id == task.note_id) else {
+                continue;
+            };
+            for tag in &note.tags {
+                let parts = tag_path(tag);
+                for at in 0..parts.len() {
+                    let key = group_key(parts.get(..=at).unwrap_or(&[]));
+                    let name = parts
+                        .get(at)
+                        .map_or_else(String::new, |part| (*part).to_owned());
+                    let entry = groups
+                        .entry(key)
+                        .or_insert_with(|| (name, 0, std::collections::BTreeSet::new()));
+                    if !task.done && entry.2.insert(index) {
+                        entry.1 += 1;
+                    }
+                }
+            }
+        }
+        if !groups.is_empty() {
+            panel = panel.push(space().height(10)).push(label("Groups"));
+            for (key, (name, open, _)) in &groups {
+                let depth = key.matches('/').count();
+                panel = panel.push(self.task_view_row(
+                    name,
+                    *open,
+                    depth,
+                    TaskView::Group(key.clone()),
+                ));
+            }
+        }
+        // Notes: every note that has a task, with how many are still open.
+        let mut notes: Vec<(String, String, usize)> = Vec::new();
+        for task in &self.tasks {
+            if let Some(found) = notes.iter_mut().find(|(id, _, _)| *id == task.note_id) {
+                found.2 += usize::from(!task.done);
+            } else {
+                let title = if task.note_title.is_empty() {
+                    "Untitled".to_owned()
+                } else {
+                    task.note_title.clone()
+                };
+                notes.push((task.note_id.clone(), title, usize::from(!task.done)));
+            }
+        }
+        notes.sort_by(|a, b| natural_cmp(&a.1, &b.1));
+        if !notes.is_empty() {
+            panel = panel.push(space().height(10)).push(label("Notes"));
+            for (id, title, open) in notes {
+                panel = panel.push(self.task_view_row(&title, open, 0, TaskView::Note(id)));
+            }
+        }
+        panel
+    }
+
+    fn task_view_row(
+        &self,
+        name: &str,
+        count: usize,
+        depth: usize,
+        view: TaskView,
+    ) -> Element<'_, Message> {
+        let ink = self.ink();
+        let active = self.task_view == view;
+        let mut line = row![].align_y(iced::Alignment::Center);
+        for _ in 0..depth {
+            line = line.push(space().width(12)).push(hairline_v());
+        }
+        line.push(
+            button(
+                row![
+                    text(name.to_owned()).size(13).width(Fill),
+                    text(count.to_string()).size(12).color(ink.muted),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Fill)
+            .padding([6.0, 8.0])
+            .on_press(Message::ShowTaskView(view))
+            .style(list_row(active)),
+        )
+        .into()
     }
 
     fn toggle_note_search(&mut self) -> Task<Message> {
@@ -2554,6 +2772,7 @@ impl App {
                 .padding(10)
                 .width(Fill)
                 .style(field_style),
+            self.due_button(CalFor::New, 10.0),
             action_label("Add", Message::AddTask),
             ghost_label(
                 if self.task_cite.is_some() {
@@ -2568,29 +2787,7 @@ impl App {
         .align_y(iced::Alignment::Center)
         .width(Fill);
         let searching = self.task_search || !self.task_query.trim().is_empty();
-        let mut tools = row![
-            mini_button(
-                mini_handle(Mini::Search, self.is_dark()),
-                if searching { "Close search" } else { "Search" },
-                Message::ToggleTaskSearch,
-            ),
-            ghost_label(
-                if self.hide_done {
-                    "Show done"
-                } else {
-                    "Hide done"
-                },
-                Message::ToggleDone,
-            ),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center);
-        if self.tasks.iter().any(|task| task.done) {
-            tools = tools.push(ghost_label("Clear done", Message::AskClearDone));
-        }
-        if self.catalog.iter().any(is_tasks_note) {
-            tools = tools.push(ghost_label("The Tasks note", Message::ToggleTasksNote));
-        }
+        let tools = self.task_tools(searching);
         let list = self.task_groups(&ink);
         let mut page = column![add].spacing(12).width(Fill).height(Fill);
         if let Some((_, title)) = &self.task_cite {
@@ -2618,11 +2815,30 @@ impl App {
         }
         page = page
             .push(tools)
-            .push(text("This goes in a note named Tasks. A box in any other note shows up here too. A date at the end, like 2026-11-20, is the due day.").size(13).color(ink.muted));
+            .push(text("This goes in a note named Tasks. A box in any other note shows up here too. Pick a due date with the Due button.").size(13).color(ink.muted));
         if self.confirm_clear {
             page = page.push(self.clear_confirm());
         }
         let page = page.push(vscroll(list).height(Fill).width(Fill));
+        if let Some(whose) = self.cal {
+            return stack![
+                page,
+                // Under the field it belongs to, at the right.
+                container(self.calendar_card(whose))
+                    .width(Fill)
+                    .height(Fill)
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .padding(iced::Padding {
+                        top: 52.0,
+                        right: 4.0,
+                        bottom: 0.0,
+                        left: 0.0,
+                    }),
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into();
+        }
         if self.tasks_note_open {
             return stack![
                 page,
@@ -2641,16 +2857,31 @@ impl App {
 
     fn task_groups(&self, ink: &Ink) -> Element<'_, Message> {
         let mut list = column![].spacing(14).width(Fill);
+        let today = self.today();
+        let view = &self.task_view;
         let open: Vec<&TaskRow> = self
             .tasks
             .iter()
-            .filter(|task| !task.done && self.task_hit(task))
+            .filter(|task| !task.done && self.task_hit(task) && self.in_view(task, view, today))
             .collect();
+        // Done tasks sit under the open ones in the plain list, a group, or a note. In a view
+        // about dates there are none, and in the Done view they are the list.
+        let shows_done = matches!(
+            view,
+            TaskView::Open | TaskView::Done | TaskView::Group(_) | TaskView::Note(_)
+        );
         let done: Vec<&TaskRow> = self
             .tasks
             .iter()
-            .filter(|task| task.done && self.task_hit(task) && !self.hide_done)
+            .filter(|task| {
+                task.done
+                    && shows_done
+                    && self.task_hit(task)
+                    && self.in_view(task, view, today)
+                    && (!self.hide_done || *view == TaskView::Done)
+            })
             .collect();
+        let heading = self.task_view_name();
         if self.tasks.is_empty() {
             list = list.push(text("Nothing to do yet.").font(serif()).size(32));
             list = list.push(
@@ -2660,26 +2891,253 @@ impl App {
             );
         } else if open.is_empty() && done.is_empty() {
             let empty = if self.task_query.trim().is_empty() {
-                "Nothing open."
+                format!("Nothing in {heading}.")
             } else {
-                "No tasks match."
+                "No tasks match.".to_owned()
             };
             list = list.push(text(empty).font(serif()).size(32));
         } else if open.is_empty() {
-            list = list.push(text("Nothing open.").font(serif()).size(32));
+            list = list.push(
+                text(format!("Nothing open in {heading}."))
+                    .font(serif())
+                    .size(32),
+            );
         } else {
-            list = list.push(text("Open").font(serif()).size(32));
+            list = list.push(text(heading.clone()).font(serif()).size(32));
             for task in open {
                 list = list.push(self.task_row(task));
             }
         }
-        if !done.is_empty() {
+        if !done.is_empty() && *view != TaskView::Done {
             list = list.push(text("Done").font(serif()).size(22));
             for task in done {
                 list = list.push(self.task_row(task));
             }
         }
         list.into()
+    }
+
+    fn today(&self) -> dates::Date {
+        self.pinned_today
+            .unwrap_or_else(|| clock::today(&self.tz, clock::now_ms()))
+    }
+
+    /// A task's due day, if it ends in one that exists.
+    fn due_of(task: &TaskRow) -> Option<dates::Date> {
+        markdown::due_day(&markdown::without_cites(&task.text)).and_then(dates::Date::parse)
+    }
+
+    /// Whether a task belongs in the view. A done task is only in `Done`, `Group`, and `Note`
+    /// and the plain list, so a date view is about what is still to do.
+    fn in_view(&self, task: &TaskRow, view: &TaskView, today: dates::Date) -> bool {
+        let due = Self::due_of(task);
+        match view {
+            TaskView::Open => true,
+            TaskView::Done => task.done,
+            TaskView::Today => !task.done && due == Some(today),
+            TaskView::Overdue => !task.done && due.is_some_and(|day| day < today),
+            TaskView::Upcoming => !task.done && due.is_some_and(|day| day > today),
+            TaskView::NoDate => !task.done && due.is_none(),
+            TaskView::Group(key) => self
+                .catalog
+                .iter()
+                .find(|note| note.id == task.note_id)
+                .is_some_and(|note| in_group(&note.tags, key)),
+            TaskView::Note(id) => task.note_id == *id,
+        }
+    }
+
+    /// Search, hide done, clear done, and the Tasks note, in a row over the list.
+    fn task_tools(&self, searching: bool) -> Element<'_, Message> {
+        let mut tools = row![
+            mini_button(
+                mini_handle(Mini::Search, self.is_dark()),
+                if searching { "Close search" } else { "Search" },
+                Message::ToggleTaskSearch,
+            ),
+            ghost_label(
+                if self.hide_done {
+                    "Show done"
+                } else {
+                    "Hide done"
+                },
+                Message::ToggleDone,
+            ),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        if self.tasks.iter().any(|task| task.done) {
+            tools = tools.push(ghost_label("Clear done", Message::AskClearDone));
+        }
+        if self.catalog.iter().any(is_tasks_note) {
+            tools = tools.push(ghost_label("The Tasks note", Message::ToggleTasksNote));
+        }
+        tools.into()
+    }
+
+    /// The button that opens the calendar. It says which day is picked, or asks for one.
+    fn due_button(&self, whose: CalFor, pad: f32) -> Element<'_, Message> {
+        let chosen = match whose {
+            CalFor::New => &self.new_due,
+            CalFor::Edit => &self.task_due_text,
+        };
+        let label = dates::Date::parse(chosen).map_or_else(
+            || "Due date".to_owned(),
+            |day| format!("Due {}", day.short(self.today())),
+        );
+        button(text(label).size(14))
+            .padding([pad, 12.0])
+            .on_press(Message::OpenCalendar(whose))
+            .style(ghost_style)
+            .into()
+    }
+
+    /// A month to pick a day from, with the quick ones above it. The only way a due date gets
+    /// written, so it is always `YYYY-MM-DD` and always a day that exists.
+    fn calendar_card(&self, whose: CalFor) -> Element<'_, Message> {
+        let ink = self.ink();
+        let today = self.today();
+        let chosen = dates::Date::parse(match whose {
+            CalFor::New => &self.new_due,
+            CalFor::Edit => &self.task_due_text,
+        });
+        let (year, month) = self.cal_month;
+        let name = dates::MONTHS
+            .get(usize::try_from(month.saturating_sub(1)).unwrap_or(0))
+            .copied()
+            .unwrap_or("");
+        let step = |glyph: &'static str, delta: i32| {
+            button(
+                container(text(glyph).size(16))
+                    .width(Fill)
+                    .align_x(iced::alignment::Horizontal::Center),
+            )
+            .width(32)
+            .padding([2, 0])
+            .on_press(Message::CalMonth(delta))
+            .style(ghost_style)
+        };
+        let quick = |label: &'static str, days: i64| {
+            let target = today
+                .plus_days(days)
+                .map_or_else(String::new, |day| day.to_string());
+            button(text(label).size(12))
+                .padding([4, 8])
+                .on_press(Message::PickDay(target))
+                .style(ghost_style)
+        };
+        let mut card = column![
+            row![
+                quick("Today", 0),
+                quick("Tomorrow", 1),
+                quick("Next week", 7),
+                space().width(Fill),
+                button(text("No date").size(12))
+                    .padding([4, 8])
+                    .on_press(Message::ClearDue)
+                    .style(ghost_style),
+            ]
+            .spacing(2)
+            .align_y(iced::Alignment::Center),
+            hairline(),
+            row![
+                step("‹", -1),
+                container(text(format!("{name} {year}")).font(serif()).size(16))
+                    .width(Fill)
+                    .align_x(iced::alignment::Horizontal::Center),
+                step("›", 1),
+            ]
+            .align_y(iced::Alignment::Center),
+            row(["S", "M", "T", "W", "T", "F", "S"].map(|letter| {
+                container(text(letter).size(11).color(ink.muted))
+                    .width(36)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .into()
+            })),
+        ]
+        .spacing(6);
+        for week in dates::month_grid(year, month) {
+            card = card.push(Self::calendar_week(&week, chosen, today));
+        }
+        card = card.push(row![
+            space().width(Fill),
+            button(text("Close").size(12))
+                .padding([4, 8])
+                .on_press(Message::CloseCalendar)
+                .style(ghost_style),
+        ]);
+        container(card)
+            .width(iced::Length::Shrink)
+            .padding(12)
+            .style(card_style)
+            .into()
+    }
+
+    /// One row of the calendar: seven days, the picked one filled and today outlined.
+    fn calendar_week(
+        week: &[Option<dates::Date>; 7],
+        chosen: Option<dates::Date>,
+        today: dates::Date,
+    ) -> Element<'static, Message> {
+        let cells = week.map(|cell| -> Element<'static, Message> {
+            let Some(day) = cell else {
+                return space().width(36).height(30).into();
+            };
+            let picked = chosen == Some(day);
+            let now = day == today;
+            button(
+                container(text(day.day.to_string()).size(13))
+                    .width(Fill)
+                    .align_x(iced::alignment::Horizontal::Center),
+            )
+            .width(36)
+            .height(30)
+            .padding([5, 0])
+            .on_press(Message::PickDay(day.to_string()))
+            .style(move |theme: &Theme, status| {
+                let palette = ink_of(theme);
+                let mut style = list_row(picked)(theme, status);
+                if now && !picked {
+                    style.border = iced::Border {
+                        radius: 8.0.into(),
+                        width: 1.0,
+                        color: palette.accent,
+                    };
+                }
+                style
+            })
+            .into()
+        });
+        row(cells).into()
+    }
+
+    /// What the list on the right is called, from the view chosen on the left.
+    fn task_view_name(&self) -> String {
+        match &self.task_view {
+            TaskView::Open => "Open".to_owned(),
+            TaskView::Today => "Due today".to_owned(),
+            TaskView::Overdue => "Overdue".to_owned(),
+            TaskView::Upcoming => "Upcoming".to_owned(),
+            TaskView::NoDate => "No date".to_owned(),
+            TaskView::Done => "Done".to_owned(),
+            TaskView::Group(key) => self
+                .catalog
+                .iter()
+                .flat_map(|note| note.tags.iter())
+                .find(|tag| group_key(&tag_path(tag)) == *key)
+                .and_then(|tag| tag_path(tag).last().map(|last| (*last).to_owned()))
+                .unwrap_or_else(|| key.clone()),
+            TaskView::Note(id) => self.catalog.iter().find(|note| note.id == *id).map_or_else(
+                || "that note".to_owned(),
+                |note| {
+                    if note.title.is_empty() {
+                        "Untitled".to_owned()
+                    } else {
+                        note.title.clone()
+                    }
+                },
+            ),
+        }
     }
 
     fn task_hit(&self, task: &TaskRow) -> bool {
@@ -2714,12 +3172,7 @@ impl App {
                     .padding(8)
                     .width(Fill)
                     .style(field_style),
-                text_input("2026-11-20", &self.task_due_text)
-                    .on_input(Message::DueDraft)
-                    .on_submit(Message::CommitTaskRename)
-                    .padding(8)
-                    .width(140)
-                    .style(field_style),
+                self.due_button(CalFor::Edit, 8.0),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center)
@@ -6556,6 +7009,8 @@ impl App {
             self.say("Write the task first.");
             return Task::none();
         }
+        // The date goes last among the words, ahead of a cite, which is where a due day is read.
+        label = markdown::join_due(&label, &self.new_due);
         if let Some((id, title)) = self.task_cite.clone() {
             let title = title.replace(['|', '[', ']'], "");
             label = format!("{label} [[{id}|{title}]]");
@@ -6572,6 +7027,7 @@ impl App {
             .map(|note| note.id.clone());
         let Some(id) = existing else {
             self.task_draft.clear();
+            self.new_due.clear();
             self.task_cite = None;
             self.task_cite_open = false;
             self.say("Added to Tasks.");
@@ -6598,6 +7054,7 @@ impl App {
         let follow = self.write_note(&id, &title, &next);
         if self.message.is_empty() {
             self.task_draft.clear();
+            self.new_due.clear();
             self.task_cite = None;
             self.task_cite_open = false;
             self.say("Added to Tasks.");
@@ -11769,6 +12226,195 @@ mod app_tests {
                 "the field is alone in the first row, for {draft:?}"
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn pinned(app: &mut App) -> super::dates::Date {
+        let today = super::dates::Date::new(2026, 11, 20).expect("a day");
+        app.pinned_today = Some(today);
+        today
+    }
+
+    fn task_row(id: &str, line: usize, done: bool, text: &str) -> super::TaskRow {
+        super::TaskRow {
+            note_id: id.to_owned(),
+            note_title: id.to_owned(),
+            line,
+            done,
+            text: text.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_task_views_sort_by_date_group_and_note() {
+        use super::TaskView;
+        let _turn = one_at_a_time();
+        let dir = folder("task-views");
+        let mut app = open_app(&dir);
+        let today = pinned(&mut app);
+        app.catalog = vec![summary("plan", &["Novel/Part 1"]), summary("home", &[])];
+        app.tasks = vec![
+            task_row("plan", 0, false, "late 2026-11-01"),
+            task_row("plan", 1, false, "now 2026-11-20"),
+            task_row("home", 0, false, "soon 2026-12-24"),
+            task_row("home", 1, false, "someday"),
+            task_row("home", 2, true, "finished 2026-11-01"),
+            task_row("home", 3, false, "impossible 2026-02-30"),
+            task_row("plan", 2, false, "cited 2026-11-20 [[abc|Plan]]"),
+        ];
+        let ids = |view: &TaskView| -> Vec<String> {
+            app.tasks
+                .iter()
+                .filter(|task| app.in_view(task, view, today))
+                .map(|task| format!("{}{}", task.note_id, task.line))
+                .collect()
+        };
+        assert_eq!(
+            ids(&TaskView::Today),
+            ["plan1", "plan2"],
+            "a cite after the date still counts"
+        );
+        assert_eq!(
+            ids(&TaskView::Overdue),
+            ["plan0"],
+            "done ones are not overdue"
+        );
+        assert_eq!(ids(&TaskView::Upcoming), ["home0"]);
+        assert_eq!(
+            ids(&TaskView::NoDate),
+            ["home1", "home3"],
+            "a date that does not exist is no date"
+        );
+        assert_eq!(ids(&TaskView::Done), ["home2"]);
+        assert_eq!(ids(&TaskView::Note("home".to_owned())).len(), 4);
+        assert_eq!(
+            ids(&TaskView::Group("novel".to_owned())),
+            ["plan0", "plan1", "plan2"],
+            "a group has the tasks of its notes, and so does the group above it"
+        );
+        assert_eq!(ids(&TaskView::Group("novel/part 1".to_owned())).len(), 3);
+        assert!(ids(&TaskView::Group("other".to_owned())).is_empty());
+        // Every view draws, and the panel lists the three kinds of way to look.
+        for view in [
+            TaskView::Open,
+            TaskView::Today,
+            TaskView::Overdue,
+            TaskView::Upcoming,
+            TaskView::NoDate,
+            TaskView::Done,
+            TaskView::Group("novel".to_owned()),
+            TaskView::Note("home".to_owned()),
+        ] {
+            let _ = app.update(Message::ShowTaskView(view));
+            let _ = app.update(Message::ShowTasks);
+            drop(app.view());
+        }
+        let _ = app.update(Message::ShowTaskView(TaskView::Note("gone".to_owned())));
+        assert_eq!(
+            app.task_view_name(),
+            "that note",
+            "a note not in the list has no name"
+        );
+        drop(app.view());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_calendar_writes_a_real_date_in_the_one_form() {
+        use super::CalFor;
+        let _turn = one_at_a_time();
+        let dir = folder("calendar");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        pinned(&mut app);
+        let _ = app.update(Message::ShowTasks);
+        drop(app.view());
+        // Opens on this month, steps by month across the year, and draws each time.
+        let _ = app.update(Message::OpenCalendar(CalFor::New));
+        assert_eq!(app.cal, Some(CalFor::New));
+        assert_eq!(app.cal_month, (2026, 11));
+        drop(app.view());
+        let _ = app.update(Message::CalMonth(2));
+        assert_eq!(app.cal_month, (2027, 1));
+        drop(app.view());
+        let _ = app.update(Message::PickDay("2027-01-09".to_owned()));
+        assert_eq!(app.new_due, "2027-01-09");
+        assert!(app.cal.is_none(), "choosing a day shuts it");
+        // Something that is not a day is not taken.
+        let _ = app.update(Message::OpenCalendar(CalFor::New));
+        let _ = app.update(Message::PickDay("2027-02-30".to_owned()));
+        assert_eq!(app.new_due, "2027-01-09");
+        let _ = app.update(Message::PickDay("tomorrow".to_owned()));
+        assert_eq!(app.new_due, "2027-01-09");
+        // Opening it again shows the month of the day already picked, and the button asks again.
+        let _ = app.update(Message::OpenCalendar(CalFor::New));
+        assert_eq!(app.cal_month, (2027, 1));
+        let _ = app.update(Message::OpenCalendar(CalFor::New));
+        assert!(app.cal.is_none(), "the button shuts it too");
+        // Clearing.
+        let _ = app.update(Message::OpenCalendar(CalFor::New));
+        let _ = app.update(Message::ClearDue);
+        assert!(app.new_due.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_task_added_with_a_date_ends_in_the_date_and_the_date_is_cleared_after() {
+        use super::CalFor;
+        let _turn = one_at_a_time();
+        let dir = folder("task-date");
+        let mut app = open_app(&dir);
+        pinned(&mut app);
+        let _ = app.update(Message::ShowTasks);
+        let _ = app.update(Message::TaskDraft("buy milk".to_owned()));
+        let _ = app.update(Message::OpenCalendar(CalFor::New));
+        let _ = app.update(Message::PickDay("2026-11-21".to_owned()));
+        let _ = app.update(Message::AddTask);
+        assert!(app.new_due.is_empty(), "the next task starts with no date");
+        assert!(app.task_draft.is_empty());
+        settle(&mut app);
+        let task = app
+            .tasks
+            .iter()
+            .find(|task| task.text.starts_with("buy milk"));
+        assert_eq!(
+            task.map(|task| task.text.as_str()),
+            Some("buy milk 2026-11-21")
+        );
+        assert!(
+            task.is_some_and(|task| super::App::due_of(task).is_some()),
+            "and it reads back as a due day"
+        );
+        // A second task, with no date, has none.
+        let _ = app.update(Message::TaskDraft("call".to_owned()));
+        let _ = app.update(Message::AddTask);
+        settle(&mut app);
+        let plain = app.tasks.iter().find(|task| task.text == "call");
+        assert!(
+            plain.is_some(),
+            "{:?}",
+            app.tasks.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+        // Changing the date of one already there goes through the same calendar.
+        let (id, line) = app
+            .tasks
+            .iter()
+            .find(|task| task.text.starts_with("buy milk"))
+            .map(|task| (task.note_id.clone(), task.line))
+            .expect("task");
+        let _ = app.update(Message::BeginTaskEdit { id, line });
+        assert_eq!(app.task_due_text, "2026-11-21");
+        let _ = app.update(Message::OpenCalendar(CalFor::Edit));
+        let _ = app.update(Message::PickDay("2026-12-01".to_owned()));
+        assert_eq!(app.task_due_text, "2026-12-01");
+        drop(app.view());
+        let _ = app.update(Message::CommitTaskRename);
+        settle(&mut app);
+        assert!(
+            app.tasks
+                .iter()
+                .any(|task| task.text == "buy milk 2026-12-01")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

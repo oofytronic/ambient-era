@@ -48,6 +48,14 @@ See [platforms.md](platforms.md).
 - **The `Host` trait lives in `ambient-cli`.** It should move to `ambient-core` when that facade exists, and a native shell should implement it through UniFFI.
 - **The shared design system** (the same colors, type sizes, spacing, and icon sizes for every UI) is undecided and not started.
 
+## Tasks and dates, not built
+
+- **Typing a date by hand** is not possible in the window now. The calendar is the only way. A date written in a note by hand still counts if it is a real day.
+- **The calendar starts its week on Sunday** and its months are in English. There is no setting.
+- **Today is read from the time zone file once at start.** A window left open across midnight, or across a change of zone, shows yesterday until restarted. The file is `/etc/localtime`, which is a Unix path (see [platforms.md](platforms.md)).
+- **No time of day, no repeat, and no reminders.** A due date is a day.
+- **The task panel's counts and the groups** are rebuilt on every draw. That is fine at a few hundred tasks and has not been measured past that.
+
 ## Offered, not built
 
 Small things that would help daily use.

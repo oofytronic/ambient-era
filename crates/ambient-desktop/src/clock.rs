@@ -22,6 +22,18 @@ pub(crate) fn load_tz() -> Vec<u8> {
     std::fs::read("/etc/localtime").unwrap_or_default()
 }
 
+/// Today's date on this computer's clock.
+pub(crate) fn today(tz: &[u8], now_ms: u64) -> crate::dates::Date {
+    let secs = i64::try_from(now_ms / 1000).unwrap_or(0);
+    let offset = offset_at(tz, secs).unwrap_or(0);
+    let (year, month, day, _, _) = ymd_hm(secs.saturating_add(i64::from(offset)));
+    crate::dates::Date::new(year, month, day).unwrap_or(crate::dates::Date {
+        year: 1970,
+        month: 1,
+        day: 1,
+    })
+}
+
 pub(crate) fn when(unix_ms: Option<u64>, tz: &[u8], now: u64) -> When {
     let Some(unix_ms) = unix_ms else {
         return When {

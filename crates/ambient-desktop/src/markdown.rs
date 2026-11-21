@@ -2113,26 +2113,8 @@ pub(super) fn due_day(label: &str) -> Option<&str> {
 }
 
 pub(super) fn is_due_day(token: &str) -> bool {
-    if token.len() != 10 {
-        return false;
-    }
-    let mut parts = token.split('-');
-    let year = parts.next().and_then(|text| text.parse::<u16>().ok());
-    let month = parts.next().and_then(|text| text.parse::<u8>().ok());
-    let day = parts.next().and_then(|text| text.parse::<u8>().ok());
-    let Some(year) = year else {
-        return false;
-    };
-    let Some(month) = month else {
-        return false;
-    };
-    let Some(day) = day else {
-        return false;
-    };
-    parts.next().is_none()
-        && (1900..=9999).contains(&year)
-        && (1..=12).contains(&month)
-        && (1..=31).contains(&day)
+    // A day that exists, in the one form the calendar writes. `2026-02-30` is not a due day.
+    crate::dates::Date::parse(token).is_some()
 }
 
 /// The label without a trailing due day or a note citation.

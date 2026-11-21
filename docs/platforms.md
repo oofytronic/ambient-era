@@ -36,6 +36,7 @@ The host holds no notes, keys, or text. It is given a path or a link and answers
 
 ## What still ties the notebook to Linux, and what is left
 
+- **`/etc/localtime`** is read by `clock::load_tz` for the time zone, and `clock.rs` parses the file itself. It works on macOS. It would not on Windows, and a native shell would hand the zone over instead. It belongs behind `Host`.
 - **`/dev/urandom`** names a file in `files.rs` (`fresh_id`). It works on macOS. It would not on Windows, and an iPhone app may not be allowed to open it. It should use `getrandom`, which `ambient-cli` already depends on.
 - **`ambient-cli` is a client library, not the core.** [ARCHITECTURE.md](../ARCHITECTURE.md) plans an `ambient-core` facade with `ambient-ffi` (UniFFI) over it for Swift and Kotlin. That crate is an empty scaffold. When it is built, the `Host` trait should move there, and a native shell should implement it as a UniFFI callback interface. Nothing is built for that yet.
 - **The window is Linux-only and untouched.** Its fonts are bundled, so those carry over, but nothing in it has been tried on another system.
