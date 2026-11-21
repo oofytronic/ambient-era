@@ -3769,7 +3769,7 @@ impl App {
             "No notes yet.".to_owned()
         } else {
             format!(
-                "{dots} {} and {lines} {}. A dot is a note, a line is a link, a color is a group. Click a dot to open it.",
+                "{dots} {} and {lines} {}. A dot is a note, a line is a link, a circle is a group. Click a dot to open it.",
                 if dots == 1 { "note" } else { "notes" },
                 if lines == 1 { "link" } else { "links" },
             )
@@ -3781,14 +3781,20 @@ impl App {
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
-            canvas::Canvas::new(GraphView {
-                data,
-                selected: self.selected.clone(),
-            })
+            container(
+                canvas::Canvas::new(GraphView {
+                    data,
+                    selected: self.selected.clone(),
+                })
+                .width(Fill)
+                .height(Fill),
+            )
+            .padding(4)
             .width(Fill)
-            .height(Fill),
+            .height(Fill)
+            .style(card_style),
         ]
-        .spacing(10)
+        .spacing(12)
         .into()
     }
 
@@ -7932,26 +7938,71 @@ fn group_outline(notes: &[NoteSummary], folded: &BTreeSet<String>) -> Vec<ListLi
     out
 }
 
-/// A dot in the graph.
+/// A dot in the graph. `x` and `y` are in world units, which are pixels at scale one.
 #[derive(Debug)]
 struct GraphNode {
     id: String,
     title: String,
-    /// The top group of its first tag, as a number to pick a color by. None when it has no tag.
-    shade: Option<usize>,
+    group: usize,
     x: f32,
     y: f32,
 }
 
-/// The notes as dots and the links as lines, laid out in a unit square.
+/// A group of dots and the circle drawn behind them. `shade` picks its color, and is none for the
+/// notes that have no group.
+#[derive(Debug)]
+struct GraphGroup {
+    name: String,
+    shade: Option<usize>,
+    x: f32,
+    y: f32,
+    r: f32,
+}
+
+/// The notes as dots, the groups as circles around them, and the links as lines.
 #[derive(Debug)]
 struct GraphData {
     nodes: Vec<GraphNode>,
+    groups: Vec<GraphGroup>,
     edges: Vec<(usize, usize)>,
+    /// The box that holds every circle: left, top, right, bottom.
+    bounds: (f32, f32, f32, f32),
 }
 
+/// The room one dot takes in its group, and the space kept round a group's dots.
+const DOT_ROOM: f32 = 34.0;
+const GROUP_PAD: f32 = 30.0;
+const GROUP_GAP: f32 = 60.0;
+
+/// Groups notes by the top of their first tag. `Novel/Part 1` is in `Novel`. A note with no tag is
+/// in a last group of its own. Each group is laid out on its own, then the groups are moved
+/// apart, with the ones that link to each other kept nearest. All of it is fixed, so the same
+/// notes give the same picture.
 fn build_graph(catalog: &[NoteSummary], links: &[(String, String)]) -> GraphData {
     let notes: Vec<&NoteSummary> = catalog.iter().filter(|note| !is_tasks_note(note)).collect();
+    let tops: Vec<Option<(String, String)>> = notes
+        .iter()
+        .map(|note| {
+            note.tags.iter().find_map(|tag| {
+                let top = *tag_path(tag).first()?;
+                Some((top.to_lowercase(), top.to_owned()))
+            })
+        })
+        .collect();
+    let mut names: BTreeMap<String, String> = BTreeMap::new();
+    for (key, shown) in tops.iter().flatten() {
+        names.entry(key.clone()).or_insert_with(|| shown.clone());
+    }
+    let keys: Vec<String> = names.keys().cloned().collect();
+    let loose = notes.iter().zip(&tops).any(|(_, top)| top.is_none());
+    let group_of: Vec<usize> = tops
+        .iter()
+        .map(|top| match top {
+            Some((key, _)) => keys.iter().position(|have| have == key).unwrap_or(0),
+            None => keys.len(),
+        })
+        .collect();
+    let count = keys.len() + usize::from(loose);
     let edges: Vec<(usize, usize)> = links
         .iter()
         .filter_map(|(from, to)| {
@@ -7960,68 +8011,162 @@ fn build_graph(catalog: &[NoteSummary], links: &[(String, String)]) -> GraphData
             Some((from, to))
         })
         .collect();
-    let spots = graph_layout(notes.len(), &edges);
-    let dots = notes
-        .iter()
-        .zip(spots)
-        .map(|(note, (x, y))| GraphNode {
-            id: note.id.clone(),
-            title: if note.title.is_empty() {
-                "Untitled".to_owned()
-            } else {
-                note.title.clone()
-            },
-            shade: note.tags.iter().find_map(|tag| {
-                let top = tag_path(tag).first().map(|part| part.to_lowercase())?;
-                Some(top.bytes().fold(7_usize, |sum, byte| {
-                    sum.wrapping_mul(31).wrapping_add(usize::from(byte))
-                }))
-            }),
-            x,
-            y,
+
+    // Each group on its own: dots in a sunflower, then a few rounds to bring linked dots close.
+    let mut local = vec![(0.0_f32, 0.0_f32); notes.len()];
+    let mut radius = vec![0.0_f32; count];
+    for group in 0..count {
+        let members: Vec<usize> = (0..notes.len())
+            .filter(|&index| group_of.get(index) == Some(&group))
+            .collect();
+        let spots = settle_group(&members, &edges);
+        let mut far = 0.0_f32;
+        for (&index, &(x, y)) in members.iter().zip(&spots) {
+            if let Some(spot) = local.get_mut(index) {
+                *spot = (x, y);
+            }
+            far = far.max(x.hypot(y));
+        }
+        if let Some(r) = radius.get_mut(group) {
+            *r = far + GROUP_PAD;
+        }
+    }
+
+    // The groups apart from each other, nearest where they link most.
+    let between = links_between(&edges, &group_of, count);
+    let centers = place_groups(&radius, &between);
+
+    let groups: Vec<GraphGroup> = (0..count)
+        .map(|group| {
+            let (x, y) = centers.get(group).copied().unwrap_or((0.0, 0.0));
+            GraphGroup {
+                name: keys
+                    .get(group)
+                    .and_then(|key| names.get(key))
+                    .cloned()
+                    .unwrap_or_else(|| "No group".to_owned()),
+                shade: (group < keys.len()).then_some(group),
+                x,
+                y,
+                r: radius.get(group).copied().unwrap_or(GROUP_PAD),
+            }
         })
         .collect();
-    GraphData { nodes: dots, edges }
+    let dots: Vec<GraphNode> = notes
+        .iter()
+        .enumerate()
+        .map(|(index, note)| {
+            let group = group_of.get(index).copied().unwrap_or(0);
+            let (cx, cy) = centers.get(group).copied().unwrap_or((0.0, 0.0));
+            let (lx, ly) = local.get(index).copied().unwrap_or((0.0, 0.0));
+            GraphNode {
+                id: note.id.clone(),
+                title: if note.title.is_empty() {
+                    "Untitled".to_owned()
+                } else {
+                    note.title.clone()
+                },
+                group,
+                x: cx + lx,
+                y: cy + ly,
+            }
+        })
+        .collect();
+    let bounds = graph_bounds(&groups);
+    GraphData {
+        nodes: dots,
+        groups,
+        edges,
+        bounds,
+    }
 }
 
-/// Places `count` dots so that linked ones sit near each other and the rest are apart. It is the
-/// usual spring layout, run a fixed number of rounds from a fixed start, so the same notes give
-/// the same picture. The rounds shrink as the notes grow, so it stays cheap.
-// Counts here are a few thousand at most, so the casts to f32 and back lose nothing.
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
-fn graph_layout(count: usize, edges: &[(usize, usize)]) -> Vec<(f32, f32)> {
-    if count == 0 {
-        return Vec::new();
+/// The box that holds every circle: left, top, right, bottom.
+fn graph_bounds(groups: &[GraphGroup]) -> (f32, f32, f32, f32) {
+    if groups.is_empty() {
+        return (0.0, 0.0, 1.0, 1.0);
     }
-    if count == 1 {
-        return vec![(0.5, 0.5)];
+    let mut bounds = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for group in groups {
+        bounds.0 = bounds.0.min(group.x - group.r);
+        bounds.1 = bounds.1.min(group.y - group.r);
+        bounds.2 = bounds.2.max(group.x + group.r);
+        bounds.3 = bounds.3.max(group.y + group.r);
     }
-    let n = count as f32;
-    let mut at: Vec<(f32, f32)> = (0..count)
-        .map(|index| {
-            let turn = index as f32 * 2.399_963;
-            let reach = (index as f32 / n).sqrt() * 0.4;
-            (0.5 + reach * turn.cos(), 0.5 + reach * turn.sin())
+    bounds
+}
+
+/// How many links join each pair of groups.
+fn links_between(edges: &[(usize, usize)], group_of: &[usize], count: usize) -> Vec<Vec<u32>> {
+    let mut between = vec![vec![0_u32; count]; count];
+    for &(from, to) in edges {
+        let (Some(&a), Some(&b)) = (group_of.get(from), group_of.get(to)) else {
+            continue;
+        };
+        if a != b {
+            if let Some(cell) = between.get_mut(a).and_then(|row| row.get_mut(b)) {
+                *cell += 1;
+            }
+            if let Some(cell) = between.get_mut(b).and_then(|row| row.get_mut(a)) {
+                *cell += 1;
+            }
+        }
+    }
+    between
+}
+
+/// Spots, round the group's middle, for these notes: a sunflower, then linked pairs pulled
+/// together for a few rounds with the rest kept apart. Indexes are into the note list.
+#[allow(clippy::cast_precision_loss)]
+fn settle_group(members: &[usize], edges: &[(usize, usize)]) -> Vec<(f32, f32)> {
+    let n = members.len();
+    let mut at: Vec<(f32, f32)> = (0..n)
+        .map(|k| {
+            let turn = k as f32 * 2.399_963;
+            let reach = DOT_ROOM * ((k as f32) + 0.5).sqrt() * 0.85;
+            (reach * turn.cos(), reach * turn.sin())
         })
         .collect();
-    let ideal = (1.0 / n).sqrt() * 0.7;
-    let rounds = (20_000_000.0 / (n * n)).clamp(12.0, 150.0) as usize;
-    for round in 0..rounds {
-        let heat = 0.1 * (1.0 - round as f32 / rounds as f32) + 0.002;
-        let mut push = vec![(0.0_f32, 0.0_f32); count];
-        for a in 0..count {
-            for b in (a + 1)..count {
+    if n < 3 {
+        return at;
+    }
+    let slot = |note: usize| members.iter().position(|&member| member == note);
+    let links: Vec<(usize, usize)> = edges
+        .iter()
+        .filter_map(|&(from, to)| Some((slot(from)?, slot(to)?)))
+        .collect();
+    for _ in 0..(4000 / n).clamp(10, 60) {
+        let mut push = vec![(0.0_f32, 0.0_f32); n];
+        for a in 0..n {
+            for b in (a + 1)..n {
                 let (Some(&(ax, ay)), Some(&(bx, by))) = (at.get(a), at.get(b)) else {
                     continue;
                 };
                 let (dx, dy) = (ax - bx, ay - by);
-                let far = dx.hypot(dy).max(0.001);
-                let force = ideal * ideal / far;
-                let (fx, fy) = (dx / far * force, dy / far * force);
+                let far = dx.hypot(dy).max(0.01);
+                if far < DOT_ROOM {
+                    let move_by = (DOT_ROOM - far) * 0.5;
+                    let (fx, fy) = (dx / far * move_by, dy / far * move_by);
+                    if let Some(p) = push.get_mut(a) {
+                        p.0 += fx;
+                        p.1 += fy;
+                    }
+                    if let Some(p) = push.get_mut(b) {
+                        p.0 -= fx;
+                        p.1 -= fy;
+                    }
+                }
+            }
+        }
+        for &(a, b) in &links {
+            let (Some(&(ax, ay)), Some(&(bx, by))) = (at.get(a), at.get(b)) else {
+                continue;
+            };
+            let (dx, dy) = (bx - ax, by - ay);
+            let far = dx.hypot(dy).max(0.01);
+            if far > DOT_ROOM {
+                let move_by = (far - DOT_ROOM) * 0.15;
+                let (fx, fy) = (dx / far * move_by, dy / far * move_by);
                 if let Some(p) = push.get_mut(a) {
                     p.0 += fx;
                     p.1 += fy;
@@ -8032,48 +8177,72 @@ fn graph_layout(count: usize, edges: &[(usize, usize)]) -> Vec<(f32, f32)> {
                 }
             }
         }
-        for &(a, b) in edges {
-            let (Some(&(ax, ay)), Some(&(bx, by))) = (at.get(a), at.get(b)) else {
-                continue;
-            };
-            let (dx, dy) = (ax - bx, ay - by);
-            let far = dx.hypot(dy).max(0.001);
-            let force = far * far / ideal;
-            let (fx, fy) = (dx / far * force, dy / far * force);
-            if let Some(p) = push.get_mut(a) {
-                p.0 -= fx;
-                p.1 -= fy;
-            }
-            if let Some(p) = push.get_mut(b) {
-                p.0 += fx;
-                p.1 += fy;
+        for (spot, force) in at.iter_mut().zip(&push) {
+            // A pull toward the middle keeps the group round and the circle small.
+            spot.0 = spot.0 * 0.97 + force.0;
+            spot.1 = spot.1 * 0.97 + force.1;
+        }
+    }
+    at
+}
+
+/// Centers for circles of these radii, none touching another, with the pairs that have the most
+/// links between them kept nearest. `between[a][b]` is how many links join group `a` and `b`.
+#[allow(clippy::cast_precision_loss)]
+fn place_groups(radius: &[f32], between: &[Vec<u32>]) -> Vec<(f32, f32)> {
+    let n = radius.len();
+    let mut at: Vec<(f32, f32)> = Vec::with_capacity(n);
+    let mut reach = 0.0_f32;
+    for (k, r) in radius.iter().enumerate() {
+        let turn = k as f32 * 2.399_963;
+        reach += r + GROUP_GAP * 0.5;
+        at.push((reach * 0.6 * turn.cos(), reach * 0.6 * turn.sin()));
+    }
+    for _ in 0..300 {
+        let mut push = vec![(0.0_f32, 0.0_f32); n];
+        for a in 0..n {
+            for b in (a + 1)..n {
+                let (Some(&(ax, ay)), Some(&(bx, by))) = (at.get(a), at.get(b)) else {
+                    continue;
+                };
+                let (dx, dy) = (bx - ax, by - ay);
+                let far = dx.hypot(dy).max(0.01);
+                let (ra, rb) = (
+                    radius.get(a).copied().unwrap_or(0.0),
+                    radius.get(b).copied().unwrap_or(0.0),
+                );
+                let want = ra + rb + GROUP_GAP;
+                let linked = between
+                    .get(a)
+                    .and_then(|row| row.get(b))
+                    .copied()
+                    .unwrap_or(0);
+                // Too close: apart. Linked and far: a little nearer, never inside `want`.
+                let move_by = if far < want {
+                    -(want - far) * 0.5
+                } else if linked > 0 {
+                    (far - want) * 0.04 * (linked.min(6) as f32)
+                } else {
+                    // Everyone drifts in a little, so unlinked groups do not wander off.
+                    (far - want) * 0.005
+                };
+                let (fx, fy) = (dx / far * move_by, dy / far * move_by);
+                if let Some(p) = push.get_mut(a) {
+                    p.0 += fx;
+                    p.1 += fy;
+                }
+                if let Some(p) = push.get_mut(b) {
+                    p.0 -= fx;
+                    p.1 -= fy;
+                }
             }
         }
         for (spot, force) in at.iter_mut().zip(&push) {
-            let size = force.0.hypot(force.1).max(0.000_1);
-            let step = size.min(heat);
-            spot.0 = (spot.0 + force.0 / size * step).clamp(0.0, 1.0);
-            spot.1 = (spot.1 + force.1 / size * step).clamp(0.0, 1.0);
+            spot.0 += force.0;
+            spot.1 += force.1;
         }
     }
-    // Stretch to fill the square, with a margin.
-    let (mut lo_x, mut hi_x, mut lo_y, mut hi_y) = (1.0_f32, 0.0_f32, 1.0_f32, 0.0_f32);
-    for (x, y) in &at {
-        lo_x = lo_x.min(*x);
-        hi_x = hi_x.max(*x);
-        lo_y = lo_y.min(*y);
-        hi_y = hi_y.max(*y);
-    }
-    let fit = |value: f32, lo: f32, hi: f32| {
-        if hi - lo < 0.000_1 {
-            0.5
-        } else {
-            0.06 + (value - lo) / (hi - lo) * 0.88
-        }
-    };
-    at.into_iter()
-        .map(|(x, y)| (fit(x, lo_x, hi_x), fit(y, lo_y, hi_y)))
-        .collect()
+    at
 }
 
 /// What the graph canvas draws and answers.
@@ -8087,14 +8256,64 @@ struct GraphHover {
     over: Option<usize>,
 }
 
-impl GraphView {
-    const MARGIN: f32 = 18.0;
+/// Room kept clear round the graph, in pixels, so nothing is drawn to the edge.
+const GRAPH_MARGIN: f32 = 56.0;
 
-    fn spot(node: &GraphNode, bounds: iced::Rectangle) -> iced::Point {
-        iced::Point::new(
-            Self::MARGIN + node.x * (bounds.width - Self::MARGIN * 2.0).max(1.0),
-            Self::MARGIN + node.y * (bounds.height - Self::MARGIN * 2.0).max(1.0),
-        )
+impl GraphView {
+    /// How the world fits the canvas: the scale, and where the world's left and top land. The
+    /// scale is the same both ways, so a circle stays round, and it is never more than 1.3 so a
+    /// few notes are not blown up.
+    fn fit(&self, bounds: iced::Rectangle) -> (f32, f32, f32) {
+        let (left, top, right, bottom) = self.data.bounds;
+        let (world_w, world_h) = ((right - left).max(1.0), (bottom - top).max(1.0));
+        let room_w = (bounds.width - GRAPH_MARGIN * 2.0).max(40.0);
+        let room_h = (bounds.height - GRAPH_MARGIN * 2.0).max(40.0);
+        let scale = (room_w / world_w).min(room_h / world_h).min(1.3);
+        let x = GRAPH_MARGIN + (room_w - world_w * scale) / 2.0 - left * scale;
+        let y = GRAPH_MARGIN + (room_h - world_h * scale) / 2.0 - top * scale;
+        (scale, x, y)
+    }
+
+    fn spot(&self, x: f32, y: f32, bounds: iced::Rectangle) -> iced::Point {
+        let (scale, ox, oy) = self.fit(bounds);
+        iced::Point::new(ox + x * scale, oy + y * scale)
+    }
+
+    /// The groups first: a wide soft circle, and the group's name at the top of it.
+    fn draw_groups(
+        &self,
+        frame: &mut canvas::Frame,
+        area: iced::Rectangle,
+        scale: f32,
+        ink: &Ink,
+        shade_of: &dyn Fn(usize) -> Color,
+    ) {
+        for (index, group) in self.data.groups.iter().enumerate() {
+            let color = shade_of(index);
+            let middle = self.spot(group.x, group.y, area);
+            let circle = canvas::Path::circle(middle, group.r * scale);
+            frame.fill(&circle, Color { a: 0.13, ..color });
+            frame.stroke(
+                &circle,
+                canvas::Stroke::default()
+                    .with_width(1.2)
+                    .with_color(Color { a: 0.4, ..color }),
+            );
+            frame.fill_text(canvas::Text {
+                content: group.name.clone(),
+                position: iced::Point::new(middle.x, middle.y - group.r * scale + 8.0),
+                max_width: (group.r * scale * 1.6).max(60.0),
+                color: Color {
+                    a: 0.85,
+                    ..ink.text
+                },
+                size: iced::Pixels(13.0),
+                font: sans(),
+                align_x: iced::alignment::Horizontal::Center.into(),
+                align_y: iced::alignment::Vertical::Top,
+                ..canvas::Text::default()
+            });
+        }
     }
 
     fn nearest(&self, at: iced::Point, bounds: iced::Rectangle) -> Option<usize> {
@@ -8103,7 +8322,7 @@ impl GraphView {
             .iter()
             .enumerate()
             .map(|(index, node)| {
-                let spot = Self::spot(node, bounds);
+                let spot = self.spot(node.x, node.y, bounds);
                 (index, (spot.x - at.x).hypot(spot.y - at.y))
             })
             .filter(|(_, far)| *far <= 12.0)
@@ -8188,45 +8407,65 @@ impl canvas::Program<Message> for GraphView {
         let mut frame = canvas::Frame::new(renderer, bounds.size());
         let ink = ink_of(theme);
         let area = iced::Rectangle::new(iced::Point::ORIGIN, bounds.size());
+        let (scale, _, _) = self.fit(area);
+        let shade_of = |group: usize| {
+            self.data
+                .groups
+                .get(group)
+                .and_then(|group| group.shade)
+                .and_then(|shade| GRAPH_SHADES.get(shade % GRAPH_SHADES.len()).copied())
+                .unwrap_or(ink.muted)
+        };
+        self.draw_groups(&mut frame, area, scale, &ink, &shade_of);
         let mine = self
             .selected
             .as_ref()
             .and_then(|id| self.data.nodes.iter().position(|node| node.id == *id));
+        // Lines over the circles. A link from one group to another is the one to see.
         for &(from, to) in &self.data.edges {
             let (Some(a), Some(b)) = (self.data.nodes.get(from), self.data.nodes.get(to)) else {
                 continue;
             };
+            let across = a.group != b.group;
             let touches = mine == Some(from)
                 || mine == Some(to)
                 || state.over == Some(from)
                 || state.over == Some(to);
-            let line = canvas::Path::line(Self::spot(a, area), Self::spot(b, area));
+            let line = canvas::Path::line(self.spot(a.x, a.y, area), self.spot(b.x, b.y, area));
+            let (width, alpha) = match (across, touches) {
+                (_, true) => (2.2, 0.95),
+                (true, false) => (1.6, 0.6),
+                (false, false) => (1.0, 0.3),
+            };
             frame.stroke(
                 &line,
                 canvas::Stroke::default()
-                    .with_width(if touches { 1.6 } else { 1.0 })
+                    .with_width(width)
                     .with_color(Color {
-                        a: if touches { 0.8 } else { 0.28 },
-                        ..ink.muted
+                        a: alpha,
+                        ..ink.text
                     }),
             );
         }
         let few = self.data.nodes.len() <= 30;
         for (index, node) in self.data.nodes.iter().enumerate() {
-            let spot = Self::spot(node, area);
-            let color = node
-                .shade
-                .and_then(|shade| GRAPH_SHADES.get(shade % GRAPH_SHADES.len()).copied())
-                .unwrap_or(ink.muted);
+            let spot = self.spot(node.x, node.y, area);
+            let color = shade_of(node.group);
             let chosen = mine == Some(index);
             let radius = if chosen {
                 7.0
             } else if state.over == Some(index) {
                 6.0
             } else {
-                4.5
+                5.0
             };
             frame.fill(&canvas::Path::circle(spot, radius), color);
+            frame.stroke(
+                &canvas::Path::circle(spot, radius),
+                canvas::Stroke::default()
+                    .with_width(1.0)
+                    .with_color(Color { a: 0.7, ..ink.text }),
+            );
             if chosen {
                 frame.stroke(
                     &canvas::Path::circle(spot, radius + 3.0),
@@ -8236,9 +8475,11 @@ impl canvas::Program<Message> for GraphView {
                 );
             }
             if chosen || state.over == Some(index) || few {
+                // A long title breaks onto lines at this width instead of running on.
                 frame.fill_text(canvas::Text {
                     content: node.title.clone(),
-                    position: iced::Point::new(spot.x + radius + 4.0, spot.y),
+                    position: iced::Point::new(spot.x + radius + 5.0, spot.y),
+                    max_width: 110.0,
                     color: ink.text,
                     size: iced::Pixels(12.0),
                     font: sans(),
@@ -10796,27 +11037,71 @@ mod app_tests {
     }
 
     #[test]
-    fn linked_notes_sit_closer_in_the_graph_than_unlinked_ones() {
-        let places = super::graph_layout(6, &[(0, 1), (1, 2), (3, 4), (4, 5)]);
-        assert_eq!(places.len(), 6);
-        assert!(
-            places
-                .iter()
-                .all(|(x, y)| (0.0..=1.0).contains(x) && (0.0..=1.0).contains(y))
-        );
-        let far = |a: usize, b: usize| {
-            let (ax, ay) = places[a];
-            let (bx, by) = places[b];
-            (ax - bx).hypot(ay - by)
+    fn a_group_is_one_cluster_in_a_circle_and_the_circles_do_not_touch() {
+        let mut catalog = Vec::new();
+        for index in 0..7 {
+            catalog.push(summary(&format!("n{index}"), &["Novel/Part 1"]));
+        }
+        for index in 0..4 {
+            catalog.push(summary(&format!("r{index}"), &["research"]));
+        }
+        catalog.push(summary("solo", &[]));
+        let links = vec![("n0".to_owned(), "r0".to_owned())];
+        let graph = super::build_graph(&catalog, &links);
+        assert_eq!(graph.groups.len(), 3, "novel, research, and no group");
+        let names: Vec<_> = graph
+            .groups
+            .iter()
+            .map(|group| group.name.as_str())
+            .collect();
+        assert_eq!(names, ["Novel", "research", "No group"]);
+        assert!(graph.groups[2].shade.is_none(), "no group has no color");
+        // Every dot is inside its own circle.
+        for node in &graph.nodes {
+            let group = &graph.groups[node.group];
+            assert!(
+                (node.x - group.x).hypot(node.y - group.y) <= group.r,
+                "{node:?}"
+            );
+        }
+        // No two circles overlap, with room between.
+        for (a, first) in graph.groups.iter().enumerate() {
+            for second in &graph.groups[a + 1..] {
+                let far = (first.x - second.x).hypot(first.y - second.y);
+                assert!(far >= first.r + second.r, "{first:?} {second:?}");
+            }
+        }
+        // The box holds every circle, and the picture is the same each time.
+        let (left, top, right, bottom) = graph.bounds;
+        for group in &graph.groups {
+            assert!(group.x - group.r >= left - 0.01 && group.x + group.r <= right + 0.01);
+            assert!(group.y - group.r >= top - 0.01 && group.y + group.r <= bottom + 0.01);
+        }
+        let again = super::build_graph(&catalog, &links);
+        assert_eq!(format!("{graph:?}"), format!("{again:?}"));
+        assert_eq!(super::build_graph(&[], &[]).nodes.len(), 0);
+    }
+
+    #[test]
+    fn groups_that_link_sit_nearer_than_groups_that_do_not() {
+        let mut catalog = Vec::new();
+        for (group, count) in [("a", 3), ("b", 3), ("c", 3)] {
+            for index in 0..count {
+                catalog.push(summary(&format!("{group}{index}"), &[group]));
+            }
+        }
+        let links = vec![
+            ("a0".to_owned(), "b0".to_owned()),
+            ("a1".to_owned(), "b1".to_owned()),
+            ("a2".to_owned(), "b2".to_owned()),
+        ];
+        let graph = super::build_graph(&catalog, &links);
+        let far = |x: usize, y: usize| {
+            let (first, second) = (&graph.groups[x], &graph.groups[y]);
+            (first.x - second.x).hypot(first.y - second.y)
         };
-        assert!(far(0, 1) < far(0, 4), "{places:?}");
-        assert!(far(3, 4) < far(2, 4), "{places:?}");
-        assert_eq!(
-            places,
-            super::graph_layout(6, &[(0, 1), (1, 2), (3, 4), (4, 5)])
-        );
-        assert!(super::graph_layout(0, &[]).is_empty());
-        assert_eq!(super::graph_layout(1, &[]), [(0.5, 0.5)]);
+        assert!(far(0, 1) < far(0, 2), "a and b link, a and c do not");
+        assert!(far(0, 1) < far(1, 2));
     }
 
     #[test]
@@ -10831,7 +11116,8 @@ mod app_tests {
         let data = app.graph.clone().expect("built when opened");
         assert_eq!(data.nodes.len(), 2);
         assert_eq!(data.edges, [(0, 1)]);
-        assert!(data.nodes[0].shade.is_some() && data.nodes[1].shade.is_none());
+        assert!(data.groups[data.nodes[0].group].shade.is_some());
+        assert!(data.groups[data.nodes[1].group].shade.is_none());
         drop(app.view());
         let _ = app.update(Message::ToggleGraph);
         assert!(app.graph.is_none(), "dropped when closed");
