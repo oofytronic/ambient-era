@@ -11,6 +11,7 @@
 use std::path::Path;
 
 mod draft;
+mod host;
 mod index;
 mod keys;
 mod notes;
@@ -18,6 +19,9 @@ mod session;
 mod sync;
 
 pub use draft::{Draft, Shortcut, shortcut};
+pub use host::{
+    BareHost, Host, MacHost, UnixHost, host, loopback_store_dir, set_host, system_host,
+};
 pub use notes::{CliError, run};
 pub use session::{
     DELETED_BODY, DeviceLine, NoteSnap, NoteSummary, Notebook, ShownHead, ShownNote,

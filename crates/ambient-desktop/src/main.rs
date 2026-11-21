@@ -12013,21 +12013,26 @@ mod app_tests {
     #[test]
     fn a_typed_place_can_start_with_the_home_folder() {
         use std::path::PathBuf;
+        let home = Some(PathBuf::from("/Users/me"));
+        let expand = |typed: &str| super::profile::expand_home_in(typed, home.clone());
+        assert_eq!(expand("/media/usb"), PathBuf::from("/media/usb"));
+        assert_eq!(expand("backups"), PathBuf::from("backups"));
+        assert_eq!(expand("~/Backups"), PathBuf::from("/Users/me/Backups"));
+        assert_eq!(expand("~"), PathBuf::from("/Users/me"));
+        assert_eq!(expand("~other/x"), PathBuf::from("~other/x"));
+        // With no home folder a `~` is left as it was typed.
         assert_eq!(
-            super::profile::expand_home("/media/usb"),
-            PathBuf::from("/media/usb")
+            super::profile::expand_home_in("~/x", None),
+            PathBuf::from("~/x")
         );
         assert_eq!(
-            super::profile::expand_home("backups"),
-            PathBuf::from("backups")
+            super::profile::backup_dir_in(home),
+            PathBuf::from("/Users/me/Aerodash backups")
         );
-        if let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) {
-            assert_eq!(
-                super::profile::expand_home("~/Backups"),
-                PathBuf::from(&home).join("Backups")
-            );
-            assert_eq!(super::profile::expand_home("~"), PathBuf::from(home));
-        }
+        assert_eq!(
+            super::profile::backup_dir_in(None),
+            PathBuf::from("Aerodash backups")
+        );
     }
 
     /// Type `text` the way a person does: one key at a time through `update`, with the pause that

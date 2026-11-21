@@ -31,6 +31,10 @@ Do not confuse the word group here with a multi-member Space, which is what ARCH
 
 Notes in a group are ordered alphabetically and can be reordered by a drag on a grip. That order is the local file `order` and does not sync, on purpose, until the owner decides it should (it would need a record with a merge rule and an ADR).
 
+## Platforms
+
+The owner chose the long-term path for a Mac and later phones: one Rust core with a native UI for each, not Iced everywhere. The first step is done: `Host` in `ambient-cli` is every question the notebook asks of the machine, with Linux, macOS, and bare implementations. Read [platforms.md](platforms.md), and keep to its rules for the core: no environment, programs, or path conventions outside `host.rs`, protocol crates stay browser-compatible, and no UI in the notebook layer. `ambient-core`, `ambient-ffi`, and a design system are all still to do, and the owner wants the UIs to look alike though built differently.
+
 ## Owner preferences learned
 
 - Short plain answers. Say what was done, what was not, and what was not seen. Do not claim a visual result.

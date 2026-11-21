@@ -56,21 +56,10 @@ pub(crate) fn relay_is_ours() -> bool {
     RELAY_OURS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Mail for the relay this window starts. Not a notebook, and not a public relay.
+/// Mail for the relay this window starts. Not a notebook, and not a public relay. Where it goes
+/// is the host's data folder, so each platform keeps it where that platform keeps such things.
 fn loopback_store() -> PathBuf {
-    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME")
-        && !xdg.is_empty()
-    {
-        return PathBuf::from(xdg).join("ambient").join("relay");
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".local")
-            .join("share")
-            .join("ambient")
-            .join("relay");
-    }
-    PathBuf::from("relay-data")
+    crate::host::loopback_store_dir(crate::host::host())
 }
 
 /// Relays shipped with the app, tried in order. Empty until a real one exists.

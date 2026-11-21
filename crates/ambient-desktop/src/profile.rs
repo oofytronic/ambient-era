@@ -189,20 +189,9 @@ pub(super) fn store_seen(dir: &Path, rows: &[(String, usize)]) -> Result<(), Str
     fs::write(dir.join("seen"), text).map_err(|_| "could not write seen".to_owned())
 }
 
+/// Whether the system is set to dark. When the host cannot tell, dark.
 pub(super) fn system_is_dark() -> bool {
-    if let Ok(output) = std::process::Command::new("gsettings")
-        .args(["get", "org.gnome.desktop.interface", "color-scheme"])
-        .output()
-    {
-        let text = String::from_utf8_lossy(&output.stdout);
-        if text.contains("prefer-dark") {
-            return true;
-        }
-        if text.contains("prefer-light") || text.contains("default") {
-            return false;
-        }
-    }
-    true
+    ambient_cli::host().prefers_dark().unwrap_or(true)
 }
 
 pub(super) fn export_notes(
@@ -249,22 +238,25 @@ pub(super) struct BackupReport {
 /// A place to put copies when none has been chosen: a folder named `Aerodash backups` in the home
 /// folder.
 pub(super) fn default_backup_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .filter(|home| !home.is_empty())
-        .map_or_else(
-            || PathBuf::from("Aerodash backups"),
-            |home| PathBuf::from(home).join("Aerodash backups"),
-        )
+    backup_dir_in(ambient_cli::host().home_dir())
+}
+
+pub(super) fn backup_dir_in(home: Option<PathBuf>) -> PathBuf {
+    home.map_or_else(
+        || PathBuf::from("Aerodash backups"),
+        |home| home.join("Aerodash backups"),
+    )
 }
 
 /// A typed place, with a leading `~/` turned into the home folder.
 pub(super) fn expand_home(typed: &str) -> PathBuf {
-    let home = std::env::var_os("HOME").filter(|home| !home.is_empty());
+    expand_home_in(typed, ambient_cli::host().home_dir())
+}
+
+pub(super) fn expand_home_in(typed: &str, home: Option<PathBuf>) -> PathBuf {
     match (typed.strip_prefix("~/"), home) {
-        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
-        _ if typed == "~" => {
-            std::env::var_os("HOME").map_or_else(|| PathBuf::from(typed), PathBuf::from)
-        }
+        (Some(rest), Some(home)) => home.join(rest),
+        (None, Some(home)) if typed == "~" => home,
         _ => PathBuf::from(typed),
     }
 }

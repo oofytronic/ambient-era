@@ -108,51 +108,17 @@ pub(super) fn note_media(root: &Path, body: &str) -> Vec<NoteMedia> {
     out
 }
 
+/// Ask the person for a file, the way this system does.
 pub(super) fn choose() -> Result<PathBuf, String> {
-    let attempts: &[(&str, &[&str])] = &[
-        ("zenity", &["--file-selection", "--title=Add a file"]),
-        ("kdialog", &["--getopenfilename", ".", "All files (*)"]),
-        ("yad", &["--file", "--title=Add a file"]),
-    ];
-    for (bin, args) in attempts {
-        match std::process::Command::new(bin).args(*args).output() {
-            Ok(output) => {
-                if !output.status.success() {
-                    return Err("No file chosen.".to_owned());
-                }
-                let text = String::from_utf8_lossy(&output.stdout);
-                let path = text.lines().next().unwrap_or("").trim();
-                if path.is_empty() {
-                    return Err("No file chosen.".to_owned());
-                }
-                return Ok(PathBuf::from(path));
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => {}
-        }
-    }
-    Err("No file chooser is installed. Drop the file onto the window.".to_owned())
+    ambient_cli::host().choose_file()
 }
 
+/// Open a link, if it is one this window opens at all. How is the system's.
 pub(super) fn open_url(url: &str) -> Result<(), String> {
     if !link_allowed(url) {
         return Err("That link is not opened from here.".to_owned());
     }
-    for (bin, extra) in [
-        ("xdg-open", None),
-        ("gio", Some("open")),
-        ("kde-open5", None),
-    ] {
-        let mut cmd = std::process::Command::new(bin);
-        if let Some(arg) = extra {
-            cmd.arg(arg);
-        }
-        cmd.arg(url);
-        if cmd.spawn().is_ok() {
-            return Ok(());
-        }
-    }
-    Err("Could not open that link.".to_owned())
+    ambient_cli::host().open_url(url)
 }
 
 fn link_allowed(url: &str) -> bool {
@@ -164,21 +130,7 @@ fn link_allowed(url: &str) -> bool {
 }
 
 pub(super) fn open_with_system(path: &Path) -> Result<(), String> {
-    for (bin, extra) in [
-        ("xdg-open", None),
-        ("gio", Some("open")),
-        ("kde-open5", None),
-    ] {
-        let mut cmd = std::process::Command::new(bin);
-        if let Some(arg) = extra {
-            cmd.arg(arg);
-        }
-        cmd.arg(path);
-        if cmd.spawn().is_ok() {
-            return Ok(());
-        }
-    }
-    Err("Could not open that file.".to_owned())
+    ambient_cli::host().open_path(path)
 }
 
 fn kind_piece(name: String, path: Option<PathBuf>) -> Piece {

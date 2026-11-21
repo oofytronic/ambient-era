@@ -39,6 +39,15 @@ These are not for an agent to settle.
 - **Fold state** of groups is not kept between runs.
 - **Reading a group** is in title order. There is no hand-set order, and no per-group word count.
 
+## Platforms, first step done
+
+See [platforms.md](platforms.md).
+
+- **`MacHost` has never been run on a Mac.** It is written from documentation and compiles. Its path rule and its dark-mode reading are tested as plain functions. The commands (`open`, `defaults`, `osascript`) are not.
+- **`/dev/urandom`** in `files.rs` should be `getrandom`.
+- **The `Host` trait lives in `ambient-cli`.** It should move to `ambient-core` when that facade exists, and a native shell should implement it through UniFFI.
+- **The shared design system** (the same colors, type sizes, spacing, and icon sizes for every UI) is undecided and not started.
+
 ## Offered, not built
 
 Small things that would help daily use.

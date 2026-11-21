@@ -430,3 +430,7 @@ The first key in the tag field made the tag suggestions appear, which changed th
 ## 2026-11-21 — The task field clears after every task
 
 The field was cleared only when the status message was empty after the write, and the message still held "Added to Tasks." from the task before. So the first task cleared the field and the next ones did not. The message is now cleared before the write, so a message after it means the write complained. A test adds four tasks in a row and checks the field each time. Nothing was seen in a window.
+
+## 2026-11-21 — The machine is asked through one trait
+
+The owner chose the long-term path for a Mac: one Rust core and a native UI for each platform, so Iced stays the Linux window. The first step is the notebook asking the machine through one trait, `Host`, in `ambient-cli`, instead of reading environment variables and running programs in several places. It answers the home and data folders, dark mode, opening a file or a link, and choosing a file. There are implementations for Linux (the old behavior, moved), macOS (written, never run on a Mac), and a bare one that refuses. The relay's mail folder, the system theme, the backup place, opening files and links, and the file chooser all go through it. Nothing about the folder or the wire changed. Rules for the core and what is left are in [docs/platforms.md](docs/platforms.md). A design system shared between the UIs is the owner's stated goal and is not started.
