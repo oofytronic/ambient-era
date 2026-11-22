@@ -13770,7 +13770,10 @@ mod app_tests {
         assert!(plus_ink(0.0, 10.0) && plus_ink(-10.0, 0.0) && !plus_ink(10.0, 10.0));
         assert!(quote_ink(0.0, 0.0) && quote_ink(14.0, 0.0) && quote_ink(-14.0, 5.0));
         assert!(!quote_ink(0.0, 10.0) && !quote_ink(30.0, 0.0));
-        assert!(send_ink(0.0, 0.0) && send_ink(18.0, 0.0), "the body and the tip");
+        assert!(
+            send_ink(0.0, 0.0) && send_ink(18.0, 0.0),
+            "the body and the tip"
+        );
         assert!(!send_ink(-14.0, 0.0), "the notch in the back");
         assert!(!send_ink(25.0, 0.0) && !send_ink(0.0, 25.0));
         for kind in [super::Mini::Plus, super::Mini::Quote, super::Mini::Send] {
