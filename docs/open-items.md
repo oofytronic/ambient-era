@@ -64,7 +64,7 @@ See [platforms.md](platforms.md).
 
 ## Narrow windows and popups, not done
 
-- **Nothing here was seen.** The layout was reasoned from the code and checked only by drawing every screen at nine widths with every popup open. An overflow, a card too tall for a short window, or a menu in the wrong place will not show in a test. Look at 1019, 760, 600, and 420 pixels first.
+- **Nothing here was seen.** The layout was reasoned from the code and checked only by building every screen at nine widths with every popup open. An overflow, a card too tall for a short window, a menu in the wrong place, or a popup that is never drawn will not show in a test: the last of those happened, see [HISTORY.md](../HISTORY.md). There is no test that draws a frame. Look at 1019, 760, 600, and 420 pixels first.
 - **`[[` suggestions in a note** still sit in the flow and move the page while typing. They could float at the caret.
 - **Panels do not slide.** The panel on the right comes in as a sheet at once, and the focus mode's slide is the only animation.
 - **A card taller than a short window** is cut, not scrolled, except the task views and the chat chooser, which scroll.

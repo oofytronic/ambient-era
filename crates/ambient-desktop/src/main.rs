@@ -203,8 +203,6 @@ struct App {
     cal_month: (i32, u32),
     /// What the Tasks tab is showing.
     task_view: TaskView,
-    /// On a narrow window, the ways to look at the tasks are a sheet, and this is whether it is up.
-    task_views_open: bool,
     /// What the clock said when it was last read: the day, the minute, and the zone. Everything
     /// on a screen is worked out from this one reading, so it all agrees about now.
     clock: clock::Clock,
@@ -537,8 +535,9 @@ enum Message {
     ClockTick,
     /// Look at the tasks this way.
     ShowTaskView(TaskView),
-    /// Open or shut the sheet of ways to look at the tasks, on a narrow window.
-    ToggleTaskViews,
+    /// Go back from a note, a conversation, a list of tasks, or the graph to the list it came from,
+    /// on a narrow window.
+    BackToList,
     /// Show or close the Tasks note over the Tasks tab.
     ToggleTasksNote,
     /// The icon at the top of the right panel: this note's settings, or its links.
@@ -1004,7 +1003,6 @@ impl App {
             cal: None,
             cal_month: (1970, 1),
             task_view: TaskView::Open,
-            task_views_open: false,
             clock: clock::Clock::read(&zone::Zone::utc(), None, clock::now_ms()),
             zone: zone::Zone::utc(),
             zone_name: None,
@@ -1669,9 +1667,6 @@ impl App {
                 if was_beside && !self.side_by_side_context() {
                     self.show_context = false;
                 }
-                if !self.compact() {
-                    self.task_views_open = false;
-                }
                 if !was_compact && self.compact() {
                     self.detail = match self.screen {
                         Screen::Notes => self.selected.is_some() || self.editor_dirty(),
@@ -1894,6 +1889,11 @@ impl App {
             }
             Message::ToggleGraph => {
                 self.graph_open = !self.graph_open;
+                // On a narrow window the graph is the thing opened from the list, and closing it
+                // goes back to the list.
+                if self.compact() {
+                    self.detail = self.graph_open;
+                }
                 self.refresh_graph();
                 Task::none()
             }
@@ -2054,12 +2054,18 @@ impl App {
                 self.trip_dismissed = Some(self.zone_key());
                 Task::none()
             }
-            Message::ToggleTaskViews => {
-                self.task_views_open = !self.task_views_open;
+            Message::BackToList => {
+                self.detail = false;
+                self.graph_open = false;
+                self.graph = None;
+                self.cal = None;
                 Task::none()
             }
             Message::ShowTaskView(view) => {
-                self.task_views_open = false;
+                // On a narrow window the views are the list, and choosing one opens its tasks.
+                if self.compact() {
+                    self.detail = true;
+                }
                 self.task_view = view;
                 Task::none()
             }
@@ -2226,17 +2232,20 @@ impl App {
         // The screen is always the first layer, so what is over it never moves it in the tree.
         let mut layers = stack![self.screen_view()].width(Fill).height(Fill);
         if let Some(sheet) = self.context_sheet() {
-            layers = layers.push(scrim(Message::ToggleContext)).push(sheet);
+            layers = layers.push(dim_layer(
+                sheet,
+                Message::ToggleContext,
+                iced::alignment::Horizontal::Right,
+                0.0,
+            ));
         }
         if let Some((card, close)) = self.modal() {
-            layers = layers.push(scrim(close)).push(
-                container(mouse_area(card).on_press(Message::FieldDone))
-                    .width(Fill)
-                    .height(Fill)
-                    .align_x(iced::alignment::Horizontal::Center)
-                    .align_y(iced::alignment::Vertical::Center)
-                    .padding(16),
-            );
+            layers = layers.push(dim_layer(
+                card,
+                close,
+                iced::alignment::Horizontal::Center,
+                16.0,
+            ));
         }
         Wheel {
             child: layers.into(),
@@ -2258,13 +2267,7 @@ impl App {
             && !self.side_by_side_context()
             && !self.focused()
             && (!self.compact() || self.detail);
-        showing.then(|| {
-            container(self.context_pane())
-                .width(Fill)
-                .height(Fill)
-                .align_x(iced::alignment::Horizontal::Right)
-                .into()
-        })
+        showing.then(|| self.context_pane())
     }
 
     /// A question or a choice that takes the middle of the window and the rest of it waits: the
@@ -2290,13 +2293,8 @@ impl App {
                 Message::CancelClearDone,
             ));
         }
-        if self.screen == Screen::Tasks && self.compact() {
-            if let Some(whose) = self.cal {
-                return Some((self.calendar_card(whose), Message::CloseCalendar));
-            }
-            if self.task_views_open {
-                return Some((self.task_views_card(), Message::ToggleTaskViews));
-            }
+        if let (Some(whose), true) = (self.cal, self.screen == Screen::Tasks && self.compact()) {
+            return Some((self.calendar_card(whose), Message::CloseCalendar));
         }
         None
     }
@@ -2338,28 +2336,6 @@ impl App {
         )
         .width(Fill)
         .max_width(380)
-        .padding(18)
-        .style(card_style)
-        .into()
-    }
-
-    /// The ways to look at the tasks, as a sheet, on a window too narrow for the panel.
-    fn task_views_card(&self) -> Element<'_, Message> {
-        container(
-            column![
-                row![
-                    text("Tasks").font(serif()).size(18),
-                    space().width(Fill),
-                    ghost_label("Close", Message::ToggleTaskViews),
-                ]
-                .align_y(iced::Alignment::Center),
-                vscroll(self.task_sidebar()).height(Fill),
-            ]
-            .spacing(10),
-        )
-        .width(Fill)
-        .max_width(380)
-        .max_height((self.size.height - 96.0).max(200.0))
         .padding(18)
         .style(card_style)
         .into()
@@ -3137,28 +3113,6 @@ impl App {
         .into()
     }
 
-    /// On a narrow window, the one button that opens the ways to look at the tasks: it says which
-    /// one is showing, and how many are open.
-    fn task_views_button(&self) -> Element<'_, Message> {
-        let ink = self.ink();
-        let open = self.tasks.iter().filter(|task| !task.done).count();
-        button(
-            row![
-                text("Showing").size(12).color(ink.muted),
-                text(self.task_view_name()).size(14).width(Fill),
-                text(format!("{open} open")).size(12).color(ink.muted),
-                text("›").size(16),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-        )
-        .width(Fill)
-        .padding([8, 12])
-        .on_press(Message::ToggleTaskViews)
-        .style(list_row(false))
-        .into()
-    }
-
     /// The Cite button of the add row. Its menu floats under it.
     fn task_cite_button(&self) -> Element<'_, Message> {
         anchored(
@@ -3177,13 +3131,15 @@ impl App {
 
     fn chat_cite_button(&self) -> Element<'_, Message> {
         anchored(
-            ghost_label(
+            panel_icon(
+                mini_handle(Mini::Quote, self.is_dark()),
                 if self.chat_cite.is_some() {
-                    "Cited"
+                    "A note is cited. Change it"
                 } else {
-                    "Cite"
+                    "Cite a note"
                 },
                 Message::ToggleChatCite,
+                self.chat_cite.is_some(),
             ),
             self.cite_open.then(|| self.cite_menu(false)),
             Message::ToggleChatCite,
@@ -3232,10 +3188,11 @@ impl App {
         let searching = self.task_search || !self.task_query.trim().is_empty();
         let tools = self.task_tools(searching);
         let list = self.task_groups(&ink);
-        let mut page = column![add].spacing(12).width(Fill).height(Fill);
+        let mut page = column![].spacing(12).width(Fill).height(Fill);
         if self.compact() {
-            page = page.push(self.task_views_button());
+            page = page.push(Self::detail_header("‹ Tasks", Vec::new()));
         }
+        page = page.push(add);
         if let Some(banner) = self.trip_banner() {
             page = page.push(banner);
         }
@@ -3259,9 +3216,7 @@ impl App {
                     .style(field_style),
             );
         }
-        page = page
-            .push(tools)
-            .push(text("This goes in a note named Tasks. A box in any other note shows up here too. Pick a due date with the Due button.").size(13).color(ink.muted));
+        page = page.push(tools);
         if self.confirm_clear {
             page = page.push(self.clear_confirm());
         }
@@ -4382,20 +4337,17 @@ impl App {
         let ink = self.ink();
         let mut body = column![].spacing(14).height(Fill);
         if self.compact() && self.detail {
-            body = body.push(
-                row![
-                    ghost_label("‹ Notes", Message::ShowNotes),
-                    space().width(Fill),
+            body = body.push(Self::detail_header(
+                "‹ Notes",
+                vec![
                     ghost_label("New", Message::NewNote),
                     mini_button(
                         mini_handle(Mini::Gear, self.is_dark()),
                         "Links and note settings",
                         Message::ToggleContext,
                     ),
-                ]
-                .spacing(4)
-                .align_y(iced::Alignment::Center),
-            );
+                ],
+            ));
         }
         if !self.open_error.is_empty() {
             body = body.push(text(format!(
@@ -4532,6 +4484,9 @@ impl App {
         }
         let composer = self.composer();
         let mut page = column![].spacing(12).width(Fill).height(Fill);
+        if self.compact() {
+            page = page.push(Self::detail_header("‹ Chats", Vec::new()));
+        }
         if self.chat_id.is_some() {
             page = page.push(self.chat_header());
         }
@@ -4547,7 +4502,6 @@ impl App {
 
     fn composer(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        let narrow = self.chat_inner() < 420.0;
         let field = text_editor::TextEditor::new(&self.draft_editor)
             .placeholder("Message")
             .height(72)
@@ -4555,34 +4509,27 @@ impl App {
             .on_action(Message::DraftEdited)
             .key_binding(composer_binding)
             .style(field_editor_style);
-        let controls: Element<'_, Message> = if narrow {
-            column![
-                field,
-                row![
-                    ghost_label("Add", Message::PickFile),
-                    self.chat_cite_button(),
-                    space().width(Fill),
-                    action_label("Send", Message::SendChat),
-                ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center)
-                .width(Fill),
-            ]
-            .spacing(8)
-            .width(Fill)
-            .into()
-        } else {
-            row![
-                ghost_label("Add", Message::PickFile),
-                self.chat_cite_button(),
-                field,
-                action_label("Send", Message::SendChat),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center)
-            .width(Fill)
-            .into()
-        };
+        // Icons, so the box has the width. The same line at every width.
+        let controls: Element<'_, Message> = row![
+            panel_icon(
+                mini_handle(Mini::Plus, self.is_dark()),
+                "Add a file",
+                Message::PickFile,
+                false,
+            ),
+            self.chat_cite_button(),
+            field,
+            panel_icon(
+                mini_handle(Mini::Send, self.is_dark()),
+                "Send",
+                Message::SendChat,
+                false,
+            ),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::End)
+        .width(Fill)
+        .into();
         let mut composer = column![].spacing(8).width(Fill);
         if !self.pending_files.is_empty() {
             let mut chips = column![].spacing(4);
@@ -4968,22 +4915,27 @@ impl App {
             return space().into();
         };
         let (dots, lines) = (data.nodes.len(), data.edges.len());
-        let summary = if dots == 0 {
-            "No notes yet.".to_owned()
-        } else {
-            format!(
-                "{dots} {} and {lines} {}. A dot is a note, a line is a link, a circle is a group. Click a dot to open it.",
-                if dots == 1 { "note" } else { "notes" },
-                if lines == 1 { "link" } else { "links" },
+        let summary = format!(
+            "{dots} {} · {lines} {}",
+            if dots == 1 { "note" } else { "notes" },
+            if lines == 1 { "link" } else { "links" },
+        );
+        let head: Element<'_, Message> = if self.compact() {
+            Self::detail_header(
+                "‹ Notes",
+                vec![text(summary).size(13).color(ink.muted).into()],
             )
-        };
-        column![
+        } else {
             row![
                 text(summary).size(13).color(ink.muted).width(Fill),
                 ghost_label("Back to the note", Message::ToggleGraph),
             ]
             .spacing(8)
-            .align_y(iced::Alignment::Center),
+            .align_y(iced::Alignment::Center)
+            .into()
+        };
+        column![
+            head,
             container(
                 canvas::Canvas::new(GraphView {
                     data,
@@ -6102,9 +6054,13 @@ impl App {
         let body = match self.sheet {
             Sheet::Invite => self.invite_sheet(),
             Sheet::Settings => self.settings_sheet(),
+            // Every tab is the same two steps on a narrow window: its list, then the thing chosen
+            // from it, with a way back at the top of the second.
+            Sheet::None if self.screen == Screen::Tasks && !self.detail => self.task_browser(),
             Sheet::None if self.screen == Screen::Tasks => self.tasks_pane(),
             Sheet::None if self.screen == Screen::Chat && !self.detail => self.chat_browser(),
             Sheet::None if self.screen == Screen::Chat => self.chat_pane(),
+            Sheet::None if self.graph_open && self.detail => self.graph_pane(),
             Sheet::None if !self.detail => self.note_browser(),
             Sheet::None => self.notes_pane(),
         };
@@ -6113,6 +6069,27 @@ impl App {
             .width(Fill)
             .height(Fill)
             .into()
+    }
+
+    /// The list at the top of a detail screen on a narrow window: the way back, named for the list,
+    /// and what else goes with it.
+    fn detail_header<'a>(
+        back: &'static str,
+        trailing: Vec<Element<'a, Message>>,
+    ) -> Element<'a, Message> {
+        let mut head = row![ghost_label(back, Message::BackToList), space().width(Fill)]
+            .spacing(4)
+            .align_y(iced::Alignment::Center);
+        for item in trailing {
+            head = head.push(item);
+        }
+        head.into()
+    }
+
+    /// The Tasks tab's list on a narrow window: the ways to look at the tasks, which the panel on
+    /// the left is on a wide one.
+    fn task_browser(&self) -> Element<'_, Message> {
+        vscroll(self.task_sidebar()).height(Fill).width(Fill).into()
     }
 
     fn note_browser(&self) -> Element<'_, Message> {
@@ -10207,12 +10184,23 @@ fn hover_label(
     .into()
 }
 
-/// A dim layer over the window while a card or a sheet is up. Pressing it closes them.
-fn scrim(close: Message) -> Element<'static, Message> {
+/// One layer over the window, dimmed, with `content` on it: a card in the middle, or a sheet at
+/// an edge. A press on the dim part sends `close`. A press on the content is the content's, and
+/// is not taken as a press outside it. It is one layer and not two, so that nothing above the
+/// dim part can take the press away from it.
+fn dim_layer(
+    content: Element<'_, Message>,
+    close: Message,
+    align: iced::alignment::Horizontal,
+    pad: f32,
+) -> Element<'_, Message> {
     mouse_area(
-        container(space())
+        container(mouse_area(content).on_press(Message::FieldDone))
             .width(Fill)
             .height(Fill)
+            .align_x(align)
+            .align_y(iced::alignment::Vertical::Center)
+            .padding(pad)
             .style(|_theme: &Theme| container::Style {
                 background: Some(iced::Background::Color(Color::from_rgba(
                     0.0, 0.0, 0.0, 0.38,
@@ -10542,6 +10530,22 @@ impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for Wheel<'_
         self.child
             .as_widget_mut()
             .operate(child, layout, renderer, operation);
+    }
+
+    /// What floats over the window belongs to something inside it, and has to be passed up. It
+    /// was not, and so no menu under a button and no hover label was ever drawn.
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut iced::advanced::widget::Tree,
+        layout: iced::advanced::Layout<'b>,
+        renderer: &iced::Renderer,
+        viewport: &iced::Rectangle,
+        translation: iced::Vector,
+    ) -> Option<iced::advanced::overlay::Element<'b, Message, Theme, iced::Renderer>> {
+        let child = tree.children.first_mut()?;
+        self.child
+            .as_widget_mut()
+            .overlay(child, layout, renderer, viewport, translation)
     }
 }
 
@@ -11027,6 +11031,9 @@ enum Mini {
     Gear,
     Graph,
     Grip,
+    Plus,
+    Quote,
+    Send,
 }
 
 fn mini_button(
@@ -11043,7 +11050,7 @@ fn mini_button(
 
 fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
     use std::sync::OnceLock;
-    static HANDLES: OnceLock<[iced_image::Handle; 18]> = OnceLock::new();
+    static HANDLES: OnceLock<[iced_image::Handle; 24]> = OnceLock::new();
     let handles = HANDLES.get_or_init(|| {
         let ink = [0xED, 0xEA, 0xDE];
         let day = [0x1C, 0x19, 0x17];
@@ -11066,6 +11073,12 @@ fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
             iced_image::Handle::from_bytes(icon_png(day, graph_ink)),
             iced_image::Handle::from_bytes(icon_png(ink, grip_ink)),
             iced_image::Handle::from_bytes(icon_png(day, grip_ink)),
+            iced_image::Handle::from_bytes(icon_png(ink, plus_ink)),
+            iced_image::Handle::from_bytes(icon_png(day, plus_ink)),
+            iced_image::Handle::from_bytes(icon_png(ink, quote_ink)),
+            iced_image::Handle::from_bytes(icon_png(day, quote_ink)),
+            iced_image::Handle::from_bytes(icon_png(ink, send_ink)),
+            iced_image::Handle::from_bytes(icon_png(day, send_ink)),
         ]
     });
     let index = match kind {
@@ -11078,6 +11091,9 @@ fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
         Mini::Gear => 12,
         Mini::Graph => 14,
         Mini::Grip => 16,
+        Mini::Plus => 18,
+        Mini::Quote => 20,
+        Mini::Send => 22,
     } + usize::from(!dark);
     handles
         .get(index)
@@ -11139,6 +11155,38 @@ fn focus_ink(dx: f64, dy: f64) -> bool {
     let upright = (16.0..20.5).contains(&x) && (8.0..=20.5).contains(&y);
     let across = (16.0..20.5).contains(&y) && (8.0..=20.5).contains(&x);
     upright || across || x.hypot(y) < 4.5
+}
+
+/// A cross: add.
+fn plus_ink(dx: f64, dy: f64) -> bool {
+    (dx.abs() < 3.2 && dy.abs() < 18.0) || (dy.abs() < 3.2 && dx.abs() < 18.0)
+}
+
+/// A pair of square brackets round a dot: a reference to another note.
+fn quote_ink(dx: f64, dy: f64) -> bool {
+    let x = dx.abs();
+    let y = dy.abs();
+    let stem = (12.0..16.5).contains(&x) && y < 19.0;
+    let serif = (12.0..21.0).contains(&x) && (15.0..19.0).contains(&y);
+    stem || serif || dx.hypot(dy) < 3.8
+}
+
+/// A paper plane pointing right: send.
+fn send_ink(dx: f64, dy: f64) -> bool {
+    // A dart: tip at the right, a notch in the middle of the back. Even-odd test on four points.
+    let points = [(-19.0, -16.0), (21.0, 0.0), (-19.0, 16.0), (-9.0, 0.0)];
+    let mut inside = false;
+    // Each edge runs from the point before it, round to the first.
+    for (edge, (px, py)) in points.iter().enumerate() {
+        let (qx, qy) = points
+            .get(edge.checked_sub(1).unwrap_or(points.len() - 1))
+            .copied()
+            .unwrap_or((*px, *py));
+        if (*py > dy) != (qy > dy) && dx < (qx - px) * (dy - py) / (qy - py) + px {
+            inside = !inside;
+        }
+    }
+    inside
 }
 
 /// Two columns of three dots: something to take hold of.
@@ -13603,21 +13651,12 @@ mod app_tests {
         drop(app.view());
         let _ = app.update(Message::CloseCalendar);
         assert!(app.modal().is_none());
-        // Clearing done tasks, and the ways to look at the tasks on a narrow screen.
+        // Clearing done tasks.
         app.tasks = vec![task_row("n", 0, true, "finished")];
         let _ = app.update(Message::AskClearDone);
         assert!(app.modal().is_some());
         drop(app.view());
         let _ = app.update(Message::CancelClearDone);
-        let _ = app.update(Message::ToggleTaskViews);
-        assert!(app.modal().is_some());
-        drop(app.view());
-        let _ = app.update(Message::ShowTaskView(super::TaskView::Today));
-        assert!(app.modal().is_none(), "choosing one puts it away");
-        // On a wide window the views are the panel, not a sheet.
-        let _ = app.update(Message::ToggleTaskViews);
-        let _ = app.update(Message::Resized(iced::Size::new(1100.0, 760.0)));
-        assert!(!app.task_views_open && app.modal().is_none());
         // Deleting and sending are cards over the page, not buttons in its corner.
         let _ = app.update(Message::ShowNotes);
         let _ = app.update(Message::AskDelete);
@@ -13625,6 +13664,57 @@ mod app_tests {
         drop(app.view());
         let _ = app.update(Message::CancelDelete);
         assert!(app.modal().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_tab_is_a_list_then_the_thing_chosen_with_a_way_back_on_a_narrow_window() {
+        use super::{Screen, TaskView};
+        let _turn = one_at_a_time();
+        let dir = folder("two-steps");
+        let mut app = open_app(&dir);
+        pinned(&mut app, 10 * 60);
+        app.catalog = vec![summary("a", &[]), summary("b", &[])];
+        let _ = app.update(Message::Resized(iced::Size::new(420.0, 760.0)));
+        // Tasks: the list is the views. Choosing one opens its tasks, and Back is the list again.
+        let _ = app.update(Message::ShowTasks);
+        assert!(app.screen == Screen::Tasks && !app.detail);
+        drop(app.view());
+        let _ = app.update(Message::ShowTaskView(TaskView::Today));
+        assert!(app.detail, "its tasks");
+        drop(app.view());
+        let _ = app.update(Message::BackToList);
+        assert!(!app.detail);
+        drop(app.view());
+        // The Tasks tab itself always lands on the list.
+        let _ = app.update(Message::ShowTaskView(TaskView::Open));
+        let _ = app.update(Message::ShowTasks);
+        assert!(!app.detail);
+        // Chat: a conversation, and Back to the list of them.
+        let _ = app.update(Message::ShowChat);
+        assert!(app.screen == Screen::Chat && !app.detail);
+        app.chat_id = Some("c".to_owned());
+        app.detail = true;
+        drop(app.view());
+        let _ = app.update(Message::BackToList);
+        assert!(!app.detail);
+        drop(app.view());
+        // Notes: the graph is opened from the list, covers it, and Back closes it.
+        let _ = app.update(Message::ShowNotes);
+        assert!(!app.detail);
+        let _ = app.update(Message::ToggleGraph);
+        assert!(app.graph_open && app.detail, "the list is out of the way");
+        drop(app.view());
+        let _ = app.update(Message::BackToList);
+        assert!(!app.graph_open && !app.detail);
+        // Choosing a note from the graph opens it, and the graph is put away.
+        let _ = app.update(Message::ToggleGraph);
+        let _ = app.update(Message::GraphPick("a".to_owned()));
+        assert!(!app.graph_open && app.detail);
+        drop(app.view());
+        // On a wide window none of this changes what is shown.
+        let _ = app.update(Message::Resized(iced::Size::new(1300.0, 800.0)));
+        drop(app.view());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -13672,6 +13762,22 @@ mod app_tests {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_new_icons_are_drawn_where_they_should_be() {
+        use super::{plus_ink, quote_ink, send_ink};
+        assert!(plus_ink(0.0, 10.0) && plus_ink(-10.0, 0.0) && !plus_ink(10.0, 10.0));
+        assert!(quote_ink(0.0, 0.0) && quote_ink(14.0, 0.0) && quote_ink(-14.0, 5.0));
+        assert!(!quote_ink(0.0, 10.0) && !quote_ink(30.0, 0.0));
+        assert!(send_ink(0.0, 0.0) && send_ink(18.0, 0.0), "the body and the tip");
+        assert!(!send_ink(-14.0, 0.0), "the notch in the back");
+        assert!(!send_ink(25.0, 0.0) && !send_ink(0.0, 25.0));
+        for kind in [super::Mini::Plus, super::Mini::Quote, super::Mini::Send] {
+            for dark in [true, false] {
+                drop(super::mini_handle(kind, dark));
+            }
+        }
     }
 
     #[test]

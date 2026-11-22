@@ -467,3 +467,13 @@ A pass over how the window behaves when it is small, and over what opens and whe
 - A narrow window can reach the ways to look at the tasks through a Showing button that opens them as a card. They had no way in. The add row of the Tasks tab, the tag row, and the row of task tools wrap when there is no room.
 
 Nothing was seen in a window. The new test draws every screen at nine widths with every popup open, which catches a panic and not an overflow.
+
+## 2026-11-22 — Popups were never drawn, and the narrow window is one model
+
+The owner found that the calendar and the Cite menu did not appear on a wide window and the sync card did not appear at any width. The cause was `Wheel`, the wrapper added to make the wheel scroll a page step: it did not pass up the overlays of what it held, so nothing drawn as an overlay, which includes every hover label, reached the window. It does now, and that is the first thing a widget of ours that wraps a child must do. The tests built the views and could not have seen it.
+
+The same report found that the centered cards on a narrow window could not be closed except by acting on the page behind them. They were two layers, a dim part and a card layer over it, and a stack hides the layers under the one the pointer is over. Each is now one layer.
+
+The owner also found the narrow window confusing: the Tasks tab's list had become a popup behind a button, the graph could not be opened from the list, and a conversation had no way back to the list of conversations. Every tab is now the same two steps: its list, then the thing chosen, with a Back at the top of the second. For Tasks the list is the views, which the panel on the left is on a wide window, and the popup and its button are gone. In a conversation, Add, Cite, and Send are icons on one line with the box.
+
+The explanation under the add row of the Tasks tab, and the legend above the graph, are gone. An onboarding sequence will explain things. Nothing was seen in a window.
