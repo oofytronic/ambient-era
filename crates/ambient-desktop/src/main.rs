@@ -203,6 +203,8 @@ struct App {
     cal_month: (i32, u32),
     /// What the Tasks tab is showing.
     task_view: TaskView,
+    /// On a narrow window, the ways to look at the tasks are a sheet, and this is whether it is up.
+    task_views_open: bool,
     /// What the clock said when it was last read: the day, the minute, and the zone. Everything
     /// on a screen is worked out from this one reading, so it all agrees about now.
     clock: clock::Clock,
@@ -535,6 +537,8 @@ enum Message {
     ClockTick,
     /// Look at the tasks this way.
     ShowTaskView(TaskView),
+    /// Open or shut the sheet of ways to look at the tasks, on a narrow window.
+    ToggleTaskViews,
     /// Show or close the Tasks note over the Tasks tab.
     ToggleTasksNote,
     /// The icon at the top of the right panel: this note's settings, or its links.
@@ -1000,6 +1004,7 @@ impl App {
             cal: None,
             cal_month: (1970, 1),
             task_view: TaskView::Open,
+            task_views_open: false,
             clock: clock::Clock::read(&zone::Zone::utc(), None, clock::now_ms()),
             zone: zone::Zone::utc(),
             zone_name: None,
@@ -1658,7 +1663,15 @@ impl App {
             }
             Message::Resized(size) => {
                 let was_compact = self.compact();
+                let was_beside = self.side_by_side_context();
                 self.size = size;
+                // A panel that was beside the page does not jump over it when the window narrows.
+                if was_beside && !self.side_by_side_context() {
+                    self.show_context = false;
+                }
+                if !self.compact() {
+                    self.task_views_open = false;
+                }
                 if !was_compact && self.compact() {
                     self.detail = match self.screen {
                         Screen::Notes => self.selected.is_some() || self.editor_dirty(),
@@ -2041,7 +2054,12 @@ impl App {
                 self.trip_dismissed = Some(self.zone_key());
                 Task::none()
             }
+            Message::ToggleTaskViews => {
+                self.task_views_open = !self.task_views_open;
+                Task::none()
+            }
             Message::ShowTaskView(view) => {
+                self.task_views_open = false;
                 self.task_view = view;
                 Task::none()
             }
@@ -2205,9 +2223,145 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        Wheel {
-            child: self.screen_view(),
+        // The screen is always the first layer, so what is over it never moves it in the tree.
+        let mut layers = stack![self.screen_view()].width(Fill).height(Fill);
+        if let Some(sheet) = self.context_sheet() {
+            layers = layers.push(scrim(Message::ToggleContext)).push(sheet);
         }
+        if let Some((card, close)) = self.modal() {
+            layers = layers.push(scrim(close)).push(
+                container(mouse_area(card).on_press(Message::FieldDone))
+                    .width(Fill)
+                    .height(Fill)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .align_y(iced::alignment::Vertical::Center)
+                    .padding(16),
+            );
+        }
+        Wheel {
+            child: layers.into(),
+        }
+        .into()
+    }
+
+    /// Whether a screen is up that anything can float over.
+    fn has_screen(&self) -> bool {
+        self.notebook.is_some() && self.welcome.is_none() && !self.breeze_on()
+    }
+
+    /// The panel on the right as a sheet from the right edge, when there is no room for it beside
+    /// the page, or on a narrow window.
+    fn context_sheet(&self) -> Option<Element<'_, Message>> {
+        let showing = self.has_screen()
+            && self.show_context
+            && self.context_room()
+            && !self.side_by_side_context()
+            && !self.focused()
+            && (!self.compact() || self.detail);
+        showing.then(|| {
+            container(self.context_pane())
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::alignment::Horizontal::Right)
+                .into()
+        })
+    }
+
+    /// A question or a choice that takes the middle of the window and the rest of it waits: the
+    /// same on a large window and a small one. The card and what closes it.
+    fn modal(&self) -> Option<(Element<'_, Message>, Message)> {
+        if !self.has_screen() {
+            return None;
+        }
+        if self.confirm_delete {
+            return Some((self.delete_confirm(), Message::CancelDelete));
+        }
+        if self.send_open {
+            return Some((self.send_card(), Message::CancelSend));
+        }
+        if self.confirm_clear && self.screen == Screen::Tasks {
+            return Some((
+                container(self.clear_confirm())
+                    .width(Fill)
+                    .max_width(380)
+                    .padding(18)
+                    .style(card_style)
+                    .into(),
+                Message::CancelClearDone,
+            ));
+        }
+        if self.screen == Screen::Tasks && self.compact() {
+            if let Some(whose) = self.cal {
+                return Some((self.calendar_card(whose), Message::CloseCalendar));
+            }
+            if self.task_views_open {
+                return Some((self.task_views_card(), Message::ToggleTaskViews));
+            }
+        }
+        None
+    }
+
+    /// Which chat to send the open note to.
+    fn send_card(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let mut choices = column![].spacing(4).width(Fill);
+        for chat in &self.chats {
+            let chosen = self.send_choice.as_deref() == Some(chat.id.as_str());
+            choices = choices.push(
+                button(text(self.chat_name(chat)).size(15).width(Fill))
+                    .width(Fill)
+                    .padding([8.0, 10.0])
+                    .on_press(Message::ChooseSend(chat.id.clone()))
+                    .style(list_row(chosen)),
+            );
+        }
+        let list_h = self
+            .chats
+            .iter()
+            .fold(0.0_f32, |height, _| (height + 40.0).min(240.0))
+            .max(40.0);
+        container(
+            column![
+                text("Send to which chat?").font(serif()).size(18),
+                text("The words are copied into the chat. The note stays as it is.")
+                    .size(12)
+                    .color(ink.muted),
+                vscroll(choices).height(list_h).width(Fill),
+                row![
+                    ghost_label("Cancel", Message::CancelSend),
+                    space().width(Fill),
+                    action_label("Send", Message::ConfirmSend),
+                ]
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(10),
+        )
+        .width(Fill)
+        .max_width(380)
+        .padding(18)
+        .style(card_style)
+        .into()
+    }
+
+    /// The ways to look at the tasks, as a sheet, on a window too narrow for the panel.
+    fn task_views_card(&self) -> Element<'_, Message> {
+        container(
+            column![
+                row![
+                    text("Tasks").font(serif()).size(18),
+                    space().width(Fill),
+                    ghost_label("Close", Message::ToggleTaskViews),
+                ]
+                .align_y(iced::Alignment::Center),
+                vscroll(self.task_sidebar()).height(Fill),
+            ]
+            .spacing(10),
+        )
+        .width(Fill)
+        .max_width(380)
+        .max_height((self.size.height - 96.0).max(200.0))
+        .padding(18)
+        .style(card_style)
         .into()
     }
 
@@ -2250,7 +2404,7 @@ impl App {
         if self.context_room() {
             right = right.push(self.edge_toggle(false));
             right_full += 28.0;
-            if self.show_context {
+            if self.show_context && self.side_by_side_context() {
                 right = right.push(hairline_v()).push(self.context_pane());
                 right_full += CONTEXT_WIDTH + 1.0;
             }
@@ -2306,6 +2460,7 @@ impl App {
         bar = bar.push(anchored(
             icon_button(globe_handle(self.globe_color()), Message::ToggleSyncPop),
             self.sync_open.then(|| self.sync_card()),
+            Message::ToggleSyncPop,
         ));
         container(bar).width(Fill).into()
     }
@@ -2982,18 +3137,31 @@ impl App {
         .into()
     }
 
-    fn tasks_pane(&self) -> Element<'_, Message> {
+    /// On a narrow window, the one button that opens the ways to look at the tasks: it says which
+    /// one is showing, and how many are open.
+    fn task_views_button(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        let add = row![
-            text_input("Add a task", &self.task_draft)
-                .id(iced::widget::Id::new("task-input"))
-                .on_input(Message::TaskDraft)
-                .on_submit(Message::AddTask)
-                .padding(10)
-                .width(Fill)
-                .style(field_style),
-            self.due_button(CalFor::New, 10.0),
-            action_label("Add", Message::AddTask),
+        let open = self.tasks.iter().filter(|task| !task.done).count();
+        button(
+            row![
+                text("Showing").size(12).color(ink.muted),
+                text(self.task_view_name()).size(14).width(Fill),
+                text(format!("{open} open")).size(12).color(ink.muted),
+                text("›").size(16),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        )
+        .width(Fill)
+        .padding([8, 12])
+        .on_press(Message::ToggleTaskViews)
+        .style(list_row(false))
+        .into()
+    }
+
+    /// The Cite button of the add row. Its menu floats under it.
+    fn task_cite_button(&self) -> Element<'_, Message> {
+        anchored(
             ghost_label(
                 if self.task_cite.is_some() {
                     "Cited"
@@ -3002,14 +3170,72 @@ impl App {
                 },
                 Message::ToggleTaskCite,
             ),
-        ]
-        .spacing(8)
-        .align_y(iced::Alignment::Center)
-        .width(Fill);
+            self.task_cite_open.then(|| self.cite_menu(true)),
+            Message::ToggleTaskCite,
+        )
+    }
+
+    fn chat_cite_button(&self) -> Element<'_, Message> {
+        anchored(
+            ghost_label(
+                if self.chat_cite.is_some() {
+                    "Cited"
+                } else {
+                    "Cite"
+                },
+                Message::ToggleChatCite,
+            ),
+            self.cite_open.then(|| self.cite_menu(false)),
+            Message::ToggleChatCite,
+        )
+    }
+
+    fn tasks_pane(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let field = text_input("Add a task", &self.task_draft)
+            .id(iced::widget::Id::new("task-input"))
+            .on_input(Message::TaskDraft)
+            .on_submit(Message::AddTask)
+            .padding(10)
+            .width(Fill)
+            .style(field_style);
+        // The field and its buttons share a line when there is room. When there is not, the
+        // field has the line and the buttons have the one under it, so nothing is squeezed.
+        let add: Element<'_, Message> = if self.pane_inner() < 560.0 {
+            column![
+                field,
+                row![
+                    self.due_button(CalFor::New, 8.0),
+                    self.task_cite_button(),
+                    space().width(Fill),
+                    action_label("Add", Message::AddTask),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center)
+                .width(Fill),
+            ]
+            .spacing(8)
+            .width(Fill)
+            .into()
+        } else {
+            row![
+                field,
+                self.due_button(CalFor::New, 10.0),
+                action_label("Add", Message::AddTask),
+                self.task_cite_button(),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .width(Fill)
+            .into()
+        };
         let searching = self.task_search || !self.task_query.trim().is_empty();
         let tools = self.task_tools(searching);
         let list = self.task_groups(&ink);
         let mut page = column![add].spacing(12).width(Fill).height(Fill);
+        if self.compact() {
+            page = page.push(self.task_views_button());
+        }
         if let Some(banner) = self.trip_banner() {
             page = page.push(banner);
         }
@@ -3022,9 +3248,6 @@ impl App {
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
             );
-        }
-        if self.task_cite_open {
-            page = page.push(self.cite_menu(true));
         }
         if searching {
             page = page.push(
@@ -3043,27 +3266,6 @@ impl App {
             page = page.push(self.clear_confirm());
         }
         let page = page.push(vscroll(list).height(Fill).width(Fill));
-        if let Some(whose) = self.cal {
-            // Over the page, in the middle under the top, with the rest of the page a way to
-            // close it. The card is as wide as the pane allows, up to a limit.
-            return stack![
-                page,
-                mouse_area(space().width(Fill).height(Fill)).on_press(Message::CloseCalendar),
-                container(self.calendar_card(whose))
-                    .width(Fill)
-                    .height(Fill)
-                    .align_x(iced::alignment::Horizontal::Center)
-                    .padding(iced::Padding {
-                        top: 56.0,
-                        right: 12.0,
-                        bottom: 12.0,
-                        left: 12.0,
-                    }),
-            ]
-            .width(Fill)
-            .height(Fill)
-            .into();
-        }
         if self.tasks_note_open {
             return stack![
                 page,
@@ -3071,7 +3273,8 @@ impl App {
                     .width(Fill)
                     .height(Fill)
                     .align_x(iced::alignment::Horizontal::Center)
-                    .align_y(iced::alignment::Vertical::Center),
+                    .align_y(iced::alignment::Vertical::Center)
+                    .padding(12),
             ]
             .width(Fill)
             .height(Fill)
@@ -3266,7 +3469,8 @@ impl App {
         if self.catalog.iter().any(is_tasks_note) {
             tools = tools.push(ghost_label("The Tasks note", Message::ToggleTasksNote));
         }
-        tools.into()
+        // Wraps onto a second line on a narrow window instead of running off the edge.
+        tools.wrap().vertical_spacing(4).into()
     }
 
     /// The button that opens the calendar. It says which moment is picked, or asks for one.
@@ -3275,11 +3479,17 @@ impl App {
             || "Due date".to_owned(),
             |found| format!("Due {}", self.due_words(&found, true)),
         );
-        button(text(label).size(14))
+        let face = button(text(label).size(14))
             .padding([pad, 12.0])
             .on_press(Message::OpenCalendar(whose))
-            .style(ghost_style)
-            .into()
+            .style(ghost_style);
+        // Under the button on a wide window. On a narrow one the calendar is a centered sheet,
+        // drawn over the whole window by `modal`, so it is not given here.
+        anchored(
+            face,
+            (self.cal == Some(whose) && !self.compact()).then(|| self.calendar_card(whose)),
+            Message::CloseCalendar,
+        )
     }
 
     /// A due moment for a person: `Today 14:30`, `Fri, Nov 27 · Every week`. With `short`, the day
@@ -3397,16 +3607,12 @@ impl App {
                 ]
                 .align_y(iced::Alignment::Center),
             );
-        // A click on the card is the card's own, and is not taken as a click outside it.
-        mouse_area(
-            container(card)
-                .width(Fill)
-                .max_width(400)
-                .padding(18)
-                .style(card_style),
-        )
-        .on_press(Message::FieldDone)
-        .into()
+        container(card)
+            .width(Fill)
+            .max_width(400)
+            .padding(18)
+            .style(card_style)
+            .into()
     }
 
     /// Hours and minutes to step, or a few usual times when there is none. On a twelve hour clock
@@ -4178,13 +4384,16 @@ impl App {
         if self.compact() && self.detail {
             body = body.push(
                 row![
-                    ghost_label("‹", Message::ShowNotes),
+                    ghost_label("‹ Notes", Message::ShowNotes),
                     space().width(Fill),
-                    ghost_label(
-                        if self.show_context { "›" } else { "‹" },
+                    ghost_label("New", Message::NewNote),
+                    mini_button(
+                        mini_handle(Mini::Gear, self.is_dark()),
+                        "Links and note settings",
                         Message::ToggleContext,
                     ),
                 ]
+                .spacing(4)
                 .align_y(iced::Alignment::Center),
             );
         }
@@ -4207,41 +4416,7 @@ impl App {
             body = body.push(vscroll(versions).height(160));
         }
         body = body.push(self.note_column());
-        let page = if self.send_open {
-            body = body.push(text("Which chat?").size(13).color(ink.muted));
-            let mut choices = column![].spacing(4).width(Fill);
-            for chat in &self.chats {
-                let chosen = self.send_choice.as_deref() == Some(chat.id.as_str());
-                let id = chat.id.clone();
-                choices = choices.push(
-                    button(text(self.chat_name(chat)).size(15).width(Fill))
-                        .width(Fill)
-                        .padding([8.0, 10.0])
-                        .on_press(Message::ChooseSend(id))
-                        .style(list_row(chosen)),
-                );
-            }
-            let list_h = self
-                .chats
-                .iter()
-                .fold(0.0_f32, |height, _| (height + 40.0).min(168.0))
-                .max(40.0);
-            body = body.push(vscroll(choices).height(list_h).width(Fill));
-            body = body.push(
-                row![
-                    action_label("Send", Message::ConfirmSend),
-                    ghost_label("Cancel", Message::CancelSend),
-                ]
-                .spacing(8),
-            );
-            body.into()
-        } else if self.confirm_delete {
-            Self::overlay_corner(body.into(), self.delete_confirm())
-        } else if self.compact() {
-            self.overlay_tools(body.into(), true)
-        } else {
-            body.into()
-        };
+        let page: Element<'_, Message> = body.into();
         self.focus_chrome(page)
     }
 
@@ -4296,66 +4471,6 @@ impl App {
         .into()
     }
 
-    /// Put `card` over the page in the lower right corner, where the round buttons are. A
-    /// question about something those buttons did appears under the pointer, not across the page.
-    fn overlay_corner<'a>(
-        page: Element<'a, Message>,
-        card: Element<'a, Message>,
-    ) -> Element<'a, Message> {
-        stack![
-            page,
-            container(card)
-                .width(Fill)
-                .height(Fill)
-                .align_x(iced::alignment::Horizontal::Right)
-                .align_y(iced::alignment::Vertical::Bottom)
-                .padding(iced::Padding {
-                    top: 0.0,
-                    right: 2.0,
-                    bottom: 2.0,
-                    left: 0.0,
-                }),
-        ]
-        .width(Fill)
-        .height(Fill)
-        .into()
-    }
-
-    /// The round buttons, on a narrow screen. A wide window has the same things in the left
-    /// panel (add, delete on a row) and the note's settings (send to a chat).
-    fn overlay_tools<'a>(
-        &'a self,
-        page: Element<'a, Message>,
-        editing: bool,
-    ) -> Element<'a, Message> {
-        let (cluster, _) = self.tool_cluster(editing);
-        Self::overlay_corner(page, cluster)
-    }
-
-    /// The round buttons, and how many there are.
-    fn tool_cluster(&self, editing: bool) -> (Element<'_, Message>, usize) {
-        let mut tools = row![circle_button("+", "New note", Message::NewNote)].spacing(8);
-        let mut count = 1;
-        if editing && (self.selected.is_some() || self.editor_dirty()) {
-            let hint = if self.selected.is_some() {
-                "Delete"
-            } else {
-                "Discard"
-            };
-            tools = tools.push(circle_button("×", hint, Message::AskDelete));
-            count += 1;
-        }
-        if editing
-            && (self.selected.is_some()
-                || !self.body.text().is_empty()
-                || !self.title_text.is_empty())
-        {
-            tools = tools.push(circle_button("↗", "Send to chat", Message::SendNoteToChat));
-            count += 1;
-        }
-        (tools.into(), count)
-    }
-
     fn delete_confirm(&self) -> Element<'_, Message> {
         let ink = self.ink();
         let saved = self.selected.is_some();
@@ -4378,7 +4493,8 @@ impl App {
             ]
             .spacing(12),
         )
-        .width(320)
+        .width(Fill)
+        .max_width(320)
         .padding(14)
         .style(card_style)
         .into()
@@ -4444,14 +4560,7 @@ impl App {
                 field,
                 row![
                     ghost_label("Add", Message::PickFile),
-                    ghost_label(
-                        if self.chat_cite.is_some() {
-                            "Cited"
-                        } else {
-                            "Cite"
-                        },
-                        Message::ToggleChatCite,
-                    ),
+                    self.chat_cite_button(),
                     space().width(Fill),
                     action_label("Send", Message::SendChat),
                 ]
@@ -4465,14 +4574,7 @@ impl App {
         } else {
             row![
                 ghost_label("Add", Message::PickFile),
-                ghost_label(
-                    if self.chat_cite.is_some() {
-                        "Cited"
-                    } else {
-                        "Cite"
-                    },
-                    Message::ToggleChatCite,
-                ),
+                self.chat_cite_button(),
                 field,
                 action_label("Send", Message::SendChat),
             ]
@@ -4516,9 +4618,6 @@ impl App {
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
             );
-        }
-        if self.cite_open {
-            composer = composer.push(self.cite_menu(false));
         }
         composer
             .push(controls)
@@ -4936,7 +5035,8 @@ impl App {
             ]
             .spacing(10),
         )
-        .width(460)
+        .width(Fill)
+        .max_width(460)
         .height(360)
         .padding(16)
         .style(card_style)
@@ -5180,7 +5280,9 @@ impl App {
                     .style(ghost_style),
             );
         }
-        column![chips, more].spacing(0).into()
+        column![chips.wrap().vertical_spacing(4), more]
+            .spacing(0)
+            .into()
     }
 
     /// Tags already used in other notes that fit what is typed, and are not on this note. Those
@@ -5599,7 +5701,7 @@ impl App {
         }
         container(list)
             .padding(6)
-            .width(Fill)
+            .width(280)
             .style(card_style)
             .into()
     }
@@ -5777,6 +5879,13 @@ impl App {
         self.size.width < 720.0
     }
 
+    /// Whether the panel on the right can sit beside the page. There is room for it, and for the
+    /// list, and for a page worth writing on, from this wide. Narrower, it comes in over the page
+    /// as a sheet, so it never squeezes the writing.
+    fn side_by_side_context(&self) -> bool {
+        !self.compact() && self.size.width >= 1020.0
+    }
+
     fn side_width(&self) -> f32 {
         if self.size.width < 1040.0 {
             210.0
@@ -5796,7 +5905,7 @@ impl App {
         }
         if self.context_room() {
             chrome += 28.0;
-            if self.show_context {
+            if self.show_context && self.side_by_side_context() {
                 chrome += CONTEXT_WIDTH + 1.0;
             }
         }
@@ -5968,6 +6077,7 @@ impl App {
         nav = nav.push(anchored(
             icon_button(globe_handle(self.globe_color()), Message::ToggleSyncPop),
             self.sync_open.then(|| self.sync_card()),
+            Message::ToggleSyncPop,
         ));
         bar = bar.push(container(nav).padding([6, 8]).width(Fill));
         bar.into()
@@ -6655,33 +6765,34 @@ impl App {
     /// under both.
     fn panel_header(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        column![
-            row![
-                text(if self.note_panel {
-                    "This note"
+        let mut head = row![
+            text(if self.note_panel {
+                "This note"
+            } else {
+                "Links"
+            })
+            .font(serif())
+            .size(22)
+            .color(ink.text),
+            space().width(Fill),
+            panel_icon(
+                mini_handle(Mini::Gear, self.is_dark()),
+                if self.note_panel {
+                    "Links and backlinks"
                 } else {
-                    "Links"
-                })
-                .font(serif())
-                .size(22)
-                .color(ink.text),
-                space().width(Fill),
-                panel_icon(
-                    mini_handle(Mini::Gear, self.is_dark()),
-                    if self.note_panel {
-                        "Links and backlinks"
-                    } else {
-                        "Note settings"
-                    },
-                    Message::ToggleNoteSettings,
-                    self.note_panel,
-                ),
-            ]
-            .align_y(iced::Alignment::Center),
-            hairline(),
+                    "Note settings"
+                },
+                Message::ToggleNoteSettings,
+                self.note_panel,
+            ),
         ]
-        .spacing(12)
-        .into()
+        .spacing(4)
+        .align_y(iced::Alignment::Center);
+        if !self.side_by_side_context() {
+            // As a sheet over the page it has a way to go, as well as a press on the page.
+            head = head.push(ghost_label("Close", Message::ToggleContext));
+        }
+        column![head, hairline(),].spacing(12).into()
     }
 
     /// A small heading with a count, and one button per note under it.
@@ -10081,6 +10192,38 @@ fn settings_card<'a>(title: &'static str, body: Element<'a, Message>) -> Element
     .into()
 }
 
+fn hover_label(
+    face: impl Into<Element<'static, Message>>,
+    label: &'static str,
+) -> Element<'static, Message> {
+    tooltip(
+        face,
+        container(text(label).size(12))
+            .padding([4, 8])
+            .style(card_style),
+        tooltip::Position::Top,
+    )
+    .gap(6)
+    .into()
+}
+
+/// A dim layer over the window while a card or a sheet is up. Pressing it closes them.
+fn scrim(close: Message) -> Element<'static, Message> {
+    mouse_area(
+        container(space())
+            .width(Fill)
+            .height(Fill)
+            .style(|_theme: &Theme| container::Style {
+                background: Some(iced::Background::Color(Color::from_rgba(
+                    0.0, 0.0, 0.0, 0.38,
+                ))),
+                ..Default::default()
+            }),
+    )
+    .on_press(close)
+    .into()
+}
+
 fn bubble_style(theme: &Theme) -> container::Style {
     let ink = ink_of(theme);
     container::Style {
@@ -10263,85 +10406,6 @@ fn push_tasks(rows: &mut Vec<TaskRow>, id: &str, title: &str, body: &str) {
             due: due::Due::of(&markdown::without_cites(&task.text)),
             text: task.text,
         });
-    }
-}
-
-fn circle_button(
-    glyph: &'static str,
-    hint_text: &'static str,
-    message: Message,
-) -> Element<'static, Message> {
-    let face = button(canvas(Glyph { content: glyph }).width(Fill).height(Fill))
-        .width(40)
-        .height(40)
-        .padding(0)
-        .on_press(message)
-        .style(circle_style);
-    hover_label(face, hint_text)
-}
-
-fn hover_label(
-    face: impl Into<Element<'static, Message>>,
-    label: &'static str,
-) -> Element<'static, Message> {
-    tooltip(
-        face,
-        container(text(label).size(12))
-            .padding([4, 8])
-            .style(card_style),
-        tooltip::Position::Top,
-    )
-    .gap(6)
-    .into()
-}
-
-struct Glyph {
-    content: &'static str,
-}
-
-impl canvas::Program<Message> for Glyph {
-    type State = ();
-
-    fn draw(
-        &self,
-        _state: &Self::State,
-        renderer: &iced::Renderer,
-        theme: &Theme,
-        bounds: iced::Rectangle,
-        _cursor: iced::mouse::Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let mut frame = canvas::Frame::new(renderer, bounds.size());
-        let ink = ink_of(theme);
-        frame.fill_text(canvas::Text {
-            content: self.content.to_owned(),
-            position: iced::Point::new(bounds.width / 2.0, bounds.height / 2.0),
-            color: ink.text,
-            size: iced::Pixels(22.0),
-            font: sans(),
-            align_x: iced::alignment::Horizontal::Center.into(),
-            align_y: iced::alignment::Vertical::Center,
-            ..canvas::Text::default()
-        });
-        vec![frame.into_geometry()]
-    }
-}
-
-fn circle_style(theme: &Theme, status: button::Status) -> button::Style {
-    let ink = ink_of(theme);
-    let background = match status {
-        button::Status::Hovered => mix(ink.surface, ink.accent, 0.18),
-        button::Status::Pressed => mix(ink.surface, ink.accent, 0.32),
-        _ => ink.surface,
-    };
-    button::Style {
-        background: Some(iced::Background::Color(background)),
-        text_color: ink.text,
-        border: iced::Border {
-            radius: 20.0.into(),
-            width: 1.0,
-            color: ink.hairline,
-        },
-        ..Default::default()
     }
 }
 
@@ -11507,13 +11571,18 @@ fn generate_qr(data: &str) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+/// `card` floating just under `anchor`, over everything else and pushing nothing aside. It keeps
+/// clear of the edges of the window, goes above the anchor when there is no room below, and a
+/// press anywhere else sends `dismiss`.
 fn anchored<'a>(
     anchor: impl Into<Element<'a, Message>>,
     card: Option<Element<'a, Message>>,
+    dismiss: Message,
 ) -> Element<'a, Message> {
     Anchored {
         anchor: anchor.into(),
         card,
+        dismiss,
     }
     .into()
 }
@@ -11521,6 +11590,7 @@ fn anchored<'a>(
 struct Anchored<'a> {
     anchor: Element<'a, Message>,
     card: Option<Element<'a, Message>>,
+    dismiss: Message,
 }
 
 impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for Anchored<'_> {
@@ -11642,6 +11712,7 @@ impl iced::advanced::widget::Widget<Message, Theme, iced::Renderer> for Anchored
             viewport: *viewport,
             card,
             tree: card_tree,
+            dismiss: self.dismiss.clone(),
         }));
         let mut layers = Vec::new();
         if let Some(layer) = anchor_overlay {
@@ -11663,6 +11734,7 @@ struct CardOverlay<'a, 'b> {
     viewport: iced::Rectangle,
     card: &'b mut Element<'a, Message>,
     tree: &'b mut iced::advanced::widget::Tree,
+    dismiss: Message,
 }
 
 impl iced::advanced::Overlay<Message, Theme, iced::Renderer> for CardOverlay<'_, '_> {
@@ -11674,7 +11746,14 @@ impl iced::advanced::Overlay<Message, Theme, iced::Renderer> for CardOverlay<'_,
         let node = self.card.as_widget_mut().layout(
             self.tree,
             renderer,
-            &iced::advanced::layout::Limits::new(iced::Size::ZERO, bounds),
+            // A margin of eight pixels each side, so a wide card never touches the window.
+            &iced::advanced::layout::Limits::new(
+                iced::Size::ZERO,
+                iced::Size::new(
+                    (bounds.width - 16.0).max(0.0),
+                    (bounds.height - 16.0).max(0.0),
+                ),
+            ),
         );
         let size = node.size();
         let mut x = self.anchor.x + self.anchor.width - size.width;
@@ -11710,7 +11789,7 @@ impl iced::advanced::Overlay<Message, Theme, iced::Renderer> for CardOverlay<'_,
         let on_card = cursor.is_over(layout.bounds());
         let on_anchor = cursor.is_over(self.anchor);
         if press && !on_card && !on_anchor {
-            shell.publish(Message::ToggleSyncPop);
+            shell.publish(self.dismiss.clone());
             shell.capture_event();
             return;
         }
@@ -13462,6 +13541,137 @@ mod app_tests {
         assert!(blank.home_zone.is_empty() && blank.trip.is_none());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(folder("home-zone-blank"));
+    }
+
+    #[test]
+    fn the_right_panel_sits_beside_the_page_only_when_there_is_room_and_is_a_sheet_otherwise() {
+        let _turn = one_at_a_time();
+        let dir = folder("panel-modes");
+        let mut app = open_app(&dir);
+        let _ = app.update(Message::TitleChanged("A note".to_owned()));
+        let _ = app.update(Message::Resized(iced::Size::new(1300.0, 800.0)));
+        let _ = app.update(Message::ToggleContext);
+        assert!(app.show_context && app.side_by_side_context());
+        assert!(
+            app.context_sheet().is_none(),
+            "beside the page, not over it"
+        );
+        let wide_page = app.pane_inner();
+        drop(app.view());
+        // Narrowing past the point where it fits closes it, and does not put it over the writing.
+        let _ = app.update(Message::Resized(iced::Size::new(900.0, 800.0)));
+        assert!(!app.side_by_side_context() && !app.show_context);
+        assert!(app.context_sheet().is_none());
+        drop(app.view());
+        // Opened on purpose at this width it is a sheet, and the page keeps all its width.
+        let _ = app.update(Message::ToggleContext);
+        assert!(app.context_sheet().is_some());
+        assert!(
+            app.pane_inner() > 400.0,
+            "the page was not squeezed: {}",
+            app.pane_inner()
+        );
+        assert!(wide_page < 1300.0);
+        drop(app.view());
+        let _ = app.update(Message::ToggleContext);
+        assert!(app.context_sheet().is_none());
+        // A narrow window has it as a sheet too, but only over a note, not over the list.
+        let _ = app.update(Message::Resized(iced::Size::new(420.0, 760.0)));
+        let _ = app.update(Message::ToggleContext);
+        drop(app.view());
+        assert_eq!(app.context_sheet().is_some(), app.detail);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_question_is_a_centered_card_at_every_width_and_the_calendar_is_one_on_a_narrow_screen() {
+        use super::CalFor;
+        let _turn = one_at_a_time();
+        let dir = folder("modals");
+        let mut app = open_app(&dir);
+        pinned(&mut app, 10 * 60);
+        let _ = app.update(Message::TitleChanged("A note".to_owned()));
+        let _ = app.update(Message::ShowTasks);
+        // The calendar is under its button on a wide window, so it is not a card over the page.
+        let _ = app.update(Message::Resized(iced::Size::new(1100.0, 760.0)));
+        let _ = app.update(Message::OpenCalendar(CalFor::New));
+        assert!(app.modal().is_none(), "anchored under the Due button");
+        drop(app.view());
+        // On a narrow one it is the standard card, with the page dimmed behind it.
+        let _ = app.update(Message::Resized(iced::Size::new(420.0, 760.0)));
+        assert!(app.modal().is_some());
+        drop(app.view());
+        let _ = app.update(Message::CloseCalendar);
+        assert!(app.modal().is_none());
+        // Clearing done tasks, and the ways to look at the tasks on a narrow screen.
+        app.tasks = vec![task_row("n", 0, true, "finished")];
+        let _ = app.update(Message::AskClearDone);
+        assert!(app.modal().is_some());
+        drop(app.view());
+        let _ = app.update(Message::CancelClearDone);
+        let _ = app.update(Message::ToggleTaskViews);
+        assert!(app.modal().is_some());
+        drop(app.view());
+        let _ = app.update(Message::ShowTaskView(super::TaskView::Today));
+        assert!(app.modal().is_none(), "choosing one puts it away");
+        // On a wide window the views are the panel, not a sheet.
+        let _ = app.update(Message::ToggleTaskViews);
+        let _ = app.update(Message::Resized(iced::Size::new(1100.0, 760.0)));
+        assert!(!app.task_views_open && app.modal().is_none());
+        // Deleting and sending are cards over the page, not buttons in its corner.
+        let _ = app.update(Message::ShowNotes);
+        let _ = app.update(Message::AskDelete);
+        assert!(app.modal().is_some());
+        drop(app.view());
+        let _ = app.update(Message::CancelDelete);
+        assert!(app.modal().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_screen_draws_at_every_width_with_every_popup_open() {
+        let _turn = one_at_a_time();
+        let dir = folder("sweep");
+        let mut app = open_app(&dir);
+        pinned(&mut app, 10 * 60);
+        app.catalog = vec![summary("a", &["Novel"]), summary("b", &[])];
+        app.trip = Some(super::clock::Trip {
+            home_name: "America/Los_Angeles".to_owned(),
+            home: None,
+        });
+        let _ = app.update(Message::TitleChanged("A note".to_owned()));
+        for width in [
+            1400.0, 1100.0, 1019.0, 900.0, 760.0, 719.0, 600.0, 420.0, 340.0,
+        ] {
+            let _ = app.update(Message::Resized(iced::Size::new(width, 760.0)));
+            for screen in [
+                Message::ShowNotes,
+                Message::ShowTasks,
+                Message::ShowChat,
+                Message::ShowSettings,
+                Message::ShowInvite,
+                Message::ShowNotes,
+            ] {
+                let _ = app.update(screen);
+                drop(app.view());
+                let _ = app.update(Message::ToggleContext);
+                drop(app.view());
+                let _ = app.update(Message::ToggleNoteSettings);
+                drop(app.view());
+                let _ = app.update(Message::ToggleTaskCite);
+                let _ = app.update(Message::ToggleChatCite);
+                drop(app.view());
+                let _ = app.update(Message::ToggleTaskCite);
+                let _ = app.update(Message::ToggleChatCite);
+                let _ = app.update(Message::ToggleGraph);
+                drop(app.view());
+                let _ = app.update(Message::ToggleGraph);
+                let _ = app.update(Message::ToggleFocus);
+                drop(app.view());
+                let _ = app.update(Message::ToggleFocus);
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -35,6 +35,10 @@ Notes in a group are ordered alphabetically and can be reordered by a drag on a 
 
 The owner chose the long-term path for a Mac and later phones: one Rust core with a native UI for each, not Iced everywhere. The first step is done: `Host` in `ambient-cli` is every question the notebook asks of the machine, with Linux, macOS, and bare implementations. Read [platforms.md](platforms.md), and keep to its rules for the core: no environment, programs, or path conventions outside `host.rs`, protocol crates stay browser-compatible, and no UI in the notebook layer. `ambient-core`, `ambient-ffi`, and a design system are all still to do, and the owner wants the UIs to look alike though built differently.
 
+## Popups
+
+Nothing that opens may push the page. A menu under a button is `anchored`, a question is `modal()`, the panel on the right is beside the page from 1020 pixels and a sheet below. See the last section of `crates/ambient-desktop/AGENTS.md`. When you add something that opens, use one of those, and add it to the sweep test.
+
 ## Time
 
 Dates are `dates.rs`, a due moment is `due.rs`, the time zone is `zone.rs`, and what time it is comes from one reading, `App::clock`. Do not call `clock::now_ms` to decide anything on screen: refresh the reading and use it. A due moment is written only by the calendar. The zone reader handles the rule at the end of a zone file, which an earlier version missed and was an hour wrong all summer. Tests that depend on the day fix the clock with `pinned_clock`. How times are shown is a setting (`clock::hour12`), 12 hour by default, and only display uses it: `due::Time` is always `HH:MM`. A computer in a zone other than home gets a notice and no change to any task.

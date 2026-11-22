@@ -456,3 +456,14 @@ Then the rest of the task features the owner asked for, except reminders, which 
 - A person on a trip is noticed. The first named zone the folder is opened in is home. A later zone with a different name that sets the clock differently over the next year gets one notice on the Tasks tab, naming both and saying what the clock at home reads, and nothing on any task is changed. Two names for one place are not a trip. `Host` gained `zone_named` to read the home zone's file.
 
 Nothing was seen in a window.
+
+## 2026-11-22 — Popups float, panels do not squeeze, narrow windows lose the old buttons
+
+A pass over how the window behaves when it is small, and over what opens and where.
+
+- The round buttons were still on a narrow window's note. They are gone. The list has New note at the bottom, and a note has New and a gear in its header, which opens the panel with Send and Delete.
+- The panel on the right was squeezing the page down to a hundred or so pixels between 720 and 1020. It is beside the page from 1020 and a sheet over a dimmed page below that, and narrowing past 1020 closes it.
+- The Due date calendar floats under its button, and flips above it when there is no room. On a narrow window it is a centered card over a dimmed page. The Cite menus float under their buttons and no longer push the field and the list down. Delete, send to a chat, and clear done tasks are centered cards, where send used to push the note down and delete was in the corner. All of them are built on the one `anchored` overlay the sync card already used, which now takes the message that closes it, or on `modal`.
+- A narrow window can reach the ways to look at the tasks through a Showing button that opens them as a card. They had no way in. The add row of the Tasks tab, the tag row, and the row of task tools wrap when there is no room.
+
+Nothing was seen in a window. The new test draws every screen at nine widths with every popup open, which catches a panic and not an overflow.

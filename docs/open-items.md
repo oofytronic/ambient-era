@@ -62,6 +62,14 @@ See [platforms.md](platforms.md).
 - **No reminders.** Waiting on notifications, which do not exist yet.
 - **The task panel's counts and the groups** are rebuilt on every draw. That is fine at a few hundred tasks and has not been measured past that.
 
+## Narrow windows and popups, not done
+
+- **Nothing here was seen.** The layout was reasoned from the code and checked only by drawing every screen at nine widths with every popup open. An overflow, a card too tall for a short window, or a menu in the wrong place will not show in a test. Look at 1019, 760, 600, and 420 pixels first.
+- **`[[` suggestions in a note** still sit in the flow and move the page while typing. They could float at the caret.
+- **Panels do not slide.** The panel on the right comes in as a sheet at once, and the focus mode's slide is the only animation.
+- **A card taller than a short window** is cut, not scrolled, except the task views and the chat chooser, which scroll.
+- **Settings, the invite page, and the chat list** were looked at only as far as the widths above. They have not been combed for spacing.
+
 ## Offered, not built
 
 Small things that would help daily use.
