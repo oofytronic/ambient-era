@@ -37,7 +37,7 @@ The owner chose the long-term path for a Mac and later phones: one Rust core wit
 
 ## Time
 
-Dates are `dates.rs`, a due moment is `due.rs`, the time zone is `zone.rs`, and what time it is comes from one reading, `App::clock`. Do not call `clock::now_ms` to decide anything on screen: refresh the reading and use it. A due moment is written only by the calendar. The zone reader handles the rule at the end of a zone file, which an earlier version missed and was an hour wrong all summer. Tests that depend on the day fix the clock with `pinned_clock`.
+Dates are `dates.rs`, a due moment is `due.rs`, the time zone is `zone.rs`, and what time it is comes from one reading, `App::clock`. Do not call `clock::now_ms` to decide anything on screen: refresh the reading and use it. A due moment is written only by the calendar. The zone reader handles the rule at the end of a zone file, which an earlier version missed and was an hour wrong all summer. Tests that depend on the day fix the clock with `pinned_clock`. How times are shown is a setting (`clock::hour12`), 12 hour by default, and only display uses it: `due::Time` is always `HH:MM`. A computer in a zone other than home gets a notice and no change to any task.
 
 ## Owner preferences learned
 

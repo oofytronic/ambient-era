@@ -210,6 +210,16 @@ struct App {
     zone: zone::Zone,
     /// The zone's name, when the system gave one.
     zone_name: Option<String>,
+    /// Times read `3:42 PM` when true and `15:42` when false.
+    hour12: bool,
+    /// Weeks begin on Monday in the calendar when true, on Sunday when false.
+    week_monday: bool,
+    /// The zone the person lives in, by name. Empty until the first named zone is seen.
+    home_zone: String,
+    /// Set while this computer is somewhere other than home.
+    trip: Option<clock::Trip>,
+    /// The zone a trip notice was put away for, so it does not come back until the zone changes.
+    trip_dismissed: Option<String>,
     /// A reading to keep. Only tests set it, so they do not depend on the day they run.
     pinned_clock: Option<clock::Clock>,
     find_open: bool,
@@ -513,6 +523,14 @@ enum Message {
     SetRepeat(Option<due::Repeat>),
     /// Make the repeat come round every this many more or fewer units.
     RepeatEvery(i32),
+    /// Read times on a twelve hour clock (true) or a twenty four hour one (false).
+    PickHour12(bool),
+    /// Start the calendar's week on Monday (true) or Sunday (false).
+    PickWeekMonday(bool),
+    /// This computer's zone is home from now on.
+    SetHomeHere,
+    /// Put the notice that this computer is away from home away until the zone changes.
+    DismissTrip,
     /// Time has passed, or the window was brought back. Read the clock again.
     ClockTick,
     /// Look at the tasks this way.
@@ -986,6 +1004,11 @@ impl App {
             zone: zone::Zone::utc(),
             zone_name: None,
             pinned_clock: None,
+            hour12: true,
+            week_monday: false,
+            home_zone: String::new(),
+            trip: None,
+            trip_dismissed: None,
             find_open: false,
             find_query: String::new(),
             find_at: usize::MAX,
@@ -1049,6 +1072,10 @@ impl App {
         app.device_draft.clone_from(&saved.device);
         app.backup_to.clone_from(&saved.backup_to);
         app.backup_at = saved.backup_at;
+        app.hour12 = saved.hour12;
+        clock::set_hour12(saved.hour12);
+        app.week_monday = saved.week_monday;
+        app.home_zone.clone_from(&saved.home_zone);
         app.system_dark = profile::system_is_dark();
         for (id, name) in profile::load_names(&app.dir) {
             app.aliases.insert(id, name);
@@ -1990,6 +2017,30 @@ impl App {
                 self.refresh_clock();
                 Task::none()
             }
+            Message::PickHour12(on) => {
+                self.hour12 = on;
+                clock::set_hour12(on);
+                self.persist_profile();
+                Task::none()
+            }
+            Message::PickWeekMonday(on) => {
+                self.week_monday = on;
+                self.persist_profile();
+                Task::none()
+            }
+            Message::SetHomeHere => {
+                if let Some(name) = self.zone_name.clone() {
+                    self.home_zone = name;
+                    self.trip = None;
+                    self.persist_profile();
+                    self.say("This is home now.");
+                }
+                Task::none()
+            }
+            Message::DismissTrip => {
+                self.trip_dismissed = Some(self.zone_key());
+                Task::none()
+            }
             Message::ShowTaskView(view) => {
                 self.task_view = view;
                 Task::none()
@@ -2544,13 +2595,9 @@ impl App {
                 text(format!("{}, {month} {}", today.weekday_full(), today.day))
                     .font(serif())
                     .size(17),
-                text(format!(
-                    "{:02}:{:02} · {zone}",
-                    self.clock.minutes / 60,
-                    self.clock.minutes % 60
-                ))
-                .size(12)
-                .color(ink.muted),
+                text(format!("{} · {zone}", self.clock.time_label()))
+                    .size(12)
+                    .color(ink.muted),
             ]
             .spacing(2),
         )
@@ -2963,6 +3010,9 @@ impl App {
         let tools = self.task_tools(searching);
         let list = self.task_groups(&ink);
         let mut page = column![add].spacing(12).width(Fill).height(Fill);
+        if let Some(banner) = self.trip_banner() {
+            page = page.push(banner);
+        }
         if let Some((_, title)) = &self.task_cite {
             page = page.push(
                 row![
@@ -2994,18 +3044,20 @@ impl App {
         }
         let page = page.push(vscroll(list).height(Fill).width(Fill));
         if let Some(whose) = self.cal {
+            // Over the page, in the middle under the top, with the rest of the page a way to
+            // close it. The card is as wide as the pane allows, up to a limit.
             return stack![
                 page,
-                // Under the field it belongs to, at the right.
+                mouse_area(space().width(Fill).height(Fill)).on_press(Message::CloseCalendar),
                 container(self.calendar_card(whose))
                     .width(Fill)
                     .height(Fill)
-                    .align_x(iced::alignment::Horizontal::Right)
+                    .align_x(iced::alignment::Horizontal::Center)
                     .padding(iced::Padding {
-                        top: 52.0,
-                        right: 4.0,
-                        bottom: 0.0,
-                        left: 0.0,
+                        top: 56.0,
+                        right: 12.0,
+                        bottom: 12.0,
+                        left: 12.0,
                     }),
             ]
             .width(Fill)
@@ -3110,7 +3162,47 @@ impl App {
         let now = clock::Clock::read(&self.zone, self.zone_name.as_deref(), clock::now_ms());
         let changed = now != self.clock;
         self.clock = now;
+        self.check_trip();
         changed
+    }
+
+    /// Something that tells one zone from another for as long as the zone stays the same: its name,
+    /// or its short name and offset when it has none.
+    fn zone_key(&self) -> String {
+        self.zone_name
+            .clone()
+            .unwrap_or_else(|| format!("{} {}", self.clock.zone, self.clock.offset))
+    }
+
+    /// Notice a computer that is somewhere other than home. The first named zone this folder is
+    /// opened in is taken as home, quietly. After that a different one is a trip, and is said, once
+    /// for each zone, and times on tasks are left as they are: they follow the clock on the wall.
+    fn check_trip(&mut self) {
+        if self.notebook.is_none() {
+            return;
+        }
+        if self.home_zone.is_empty() {
+            if let Some(name) = self.zone_name.clone() {
+                self.home_zone = name;
+                self.persist_profile();
+            }
+            self.trip = None;
+            return;
+        }
+        if self.zone_name.as_deref() == Some(self.home_zone.as_str()) {
+            self.trip = None;
+            return;
+        }
+        let home = ambient_cli::host()
+            .zone_named(&self.home_zone)
+            .and_then(|bytes| zone::Zone::parse(&bytes));
+        self.trip = clock::away_from_home(
+            self.zone_name.as_deref(),
+            &self.zone,
+            &self.home_zone,
+            home.as_ref(),
+            clock::now_ms(),
+        );
     }
 
     fn draft(&self, whose: CalFor) -> &DueDraft {
@@ -3204,7 +3296,7 @@ impl App {
         }
         if let Some(time) = found.time {
             words.push(' ');
-            words.push_str(&time.to_string());
+            words.push_str(&clock::clock_text(time.hour, time.minute));
         }
         if let Some(repeat) = found.repeat {
             words.push_str(" · ");
@@ -3214,7 +3306,8 @@ impl App {
     }
 
     /// A month to pick a day from, with a time and a repeat under it. The only way a due moment
-    /// gets written, so it is always in the one form and always a day that exists.
+    /// gets written, so it is always in the one form and always a day that exists. It is as wide
+    /// as the room allows, up to a limit, and every row spreads across all of it.
     fn calendar_card(&self, whose: CalFor) -> Element<'_, Message> {
         let ink = self.ink();
         let today = self.clock.today;
@@ -3227,20 +3320,25 @@ impl App {
             .unwrap_or("");
         let step = |glyph: &'static str, delta: i32| {
             button(
-                container(text(glyph).size(16))
+                container(text(glyph).size(18))
                     .width(Fill)
                     .align_x(iced::alignment::Horizontal::Center),
             )
-            .width(32)
+            .width(40)
             .padding([2, 0])
             .on_press(Message::CalMonth(delta))
             .style(ghost_style)
         };
         let quick = |label: &'static str, days: i64| {
-            button(text(label).size(12))
-                .padding([4, 8])
+            button(text(label).size(13))
+                .padding([5, 10])
                 .on_press(Message::PickQuick(days))
                 .style(ghost_style)
+        };
+        let letters = if self.week_monday {
+            ["M", "T", "W", "T", "F", "S", "S"]
+        } else {
+            ["S", "M", "T", "W", "T", "F", "S"]
         };
         let mut card = column![
             row![
@@ -3248,8 +3346,8 @@ impl App {
                 quick("Tomorrow", 1),
                 quick("Next week", 7),
                 space().width(Fill),
-                button(text("No date").size(12))
-                    .padding([4, 8])
+                button(text("No date").size(13))
+                    .padding([5, 10])
                     .on_press(Message::ClearDue)
                     .style(ghost_style),
             ]
@@ -3258,79 +3356,100 @@ impl App {
             hairline(),
             row![
                 step("‹", -1),
-                container(text(format!("{name} {year}")).font(serif()).size(16))
+                container(text(format!("{name} {year}")).font(serif()).size(18))
                     .width(Fill)
                     .align_x(iced::alignment::Horizontal::Center),
                 step("›", 1),
             ]
             .align_y(iced::Alignment::Center),
-            row(["S", "M", "T", "W", "T", "F", "S"].map(|letter| {
-                container(text(letter).size(11).color(ink.muted))
-                    .width(36)
+            row(letters.map(|letter| {
+                container(text(letter).size(12).color(ink.muted))
+                    .width(Fill)
                     .align_x(iced::alignment::Horizontal::Center)
                     .into()
-            })),
+            }))
+            .spacing(2),
         ]
-        .spacing(6);
-        for week in dates::month_grid(year, month) {
+        .spacing(8)
+        .width(Fill);
+        for week in dates::month_grid(year, month, self.week_monday) {
             card = card.push(Self::calendar_week(&week, chosen, today));
         }
         card = card
             .push(hairline())
             .push(self.calendar_time_row(draft))
             .push(self.calendar_repeat_rows(draft))
+            .push(hairline())
             .push(
                 row![
                     text(format!(
-                        "{} {} · {}",
-                        today.relative(today),
-                        format_args!(
-                            "{:02}:{:02}",
-                            self.clock.minutes / 60,
-                            self.clock.minutes % 60
-                        ),
+                        "Now {} · {}",
+                        self.clock.time_label(),
                         self.clock.offset_label()
                     ))
-                    .size(11)
+                    .size(12)
                     .color(ink.muted),
                     space().width(Fill),
-                    button(text("Done").size(12))
-                        .padding([4, 8])
+                    button(text("Done").size(13))
+                        .padding([5, 12])
                         .on_press(Message::CloseCalendar)
                         .style(ghost_style),
                 ]
                 .align_y(iced::Alignment::Center),
             );
-        container(card)
-            .width(iced::Length::Shrink)
-            .padding(12)
-            .style(card_style)
-            .into()
+        // A click on the card is the card's own, and is not taken as a click outside it.
+        mouse_area(
+            container(card)
+                .width(Fill)
+                .max_width(400)
+                .padding(18)
+                .style(card_style),
+        )
+        .on_press(Message::FieldDone)
+        .into()
     }
 
-    /// Hours and minutes to step, or a few usual times when there is none.
+    /// Hours and minutes to step, or a few usual times when there is none. On a twelve hour clock
+    /// the hour is read 1 to 12 with AM or PM beside it, and what is kept is still `HH:MM`.
     fn calendar_time_row(&self, draft: &DueDraft) -> Element<'_, Message> {
         let ink = self.ink();
         let small = |label: String, message: Message| {
-            button(text(label).size(12))
-                .padding([4, 8])
+            button(text(label).size(13))
+                .padding([5, 10])
                 .on_press(message)
                 .style(ghost_style)
         };
-        let head = text("TIME").size(11).color(ink.muted).width(44);
+        let head = text("TIME").size(11).color(ink.muted).width(52);
         let Some(time) = due::Time::parse(&draft.time) else {
+            let chip = |hour: u32| {
+                small(
+                    clock::clock_text(hour, 0),
+                    Message::SetTime(format!("{hour:02}:00")),
+                )
+            };
             return row![
                 head,
-                small("09:00".to_owned(), Message::SetTime("09:00".to_owned())),
-                small("12:00".to_owned(), Message::SetTime("12:00".to_owned())),
-                small("17:00".to_owned(), Message::SetTime("17:00".to_owned())),
-                text("none").size(12).color(ink.muted),
+                chip(9),
+                chip(12),
+                chip(17),
+                space().width(Fill),
+                text("no time").size(12).color(ink.muted),
             ]
             .spacing(2)
             .align_y(iced::Alignment::Center)
             .into();
         };
-        row![
+        let shown_hour = if self.hour12 {
+            (time.hour + 11) % 12 + 1
+        } else {
+            time.hour
+        };
+        let hour_text = if self.hour12 {
+            shown_hour.to_string()
+        } else {
+            format!("{shown_hour:02}")
+        };
+        let mut line = row![
             head,
             small(
                 "‹".to_owned(),
@@ -3339,7 +3458,7 @@ impl App {
                     minutes: 0
                 }
             ),
-            text(format!("{:02}", time.hour)).size(14),
+            text(hour_text).size(15),
             small(
                 "›".to_owned(),
                 Message::StepTime {
@@ -3347,7 +3466,7 @@ impl App {
                     minutes: 0
                 }
             ),
-            text(":").size(14),
+            text(":").size(15),
             small(
                 "‹".to_owned(),
                 Message::StepTime {
@@ -3355,7 +3474,7 @@ impl App {
                     minutes: -5
                 }
             ),
-            text(format!("{:02}", time.minute)).size(14),
+            text(format!("{:02}", time.minute)).size(15),
             small(
                 "›".to_owned(),
                 Message::StepTime {
@@ -3363,18 +3482,29 @@ impl App {
                     minutes: 5
                 }
             ),
-            space().width(Fill),
-            small("No time".to_owned(), Message::SetTime(String::new())),
         ]
         .spacing(2)
-        .align_y(iced::Alignment::Center)
-        .into()
+        .align_y(iced::Alignment::Center);
+        if self.hour12 {
+            line = line.push(
+                button(text(if time.hour < 12 { "AM" } else { "PM" }).size(13))
+                    .padding([5, 10])
+                    .on_press(Message::StepTime {
+                        hours: 12,
+                        minutes: 0,
+                    })
+                    .style(list_row(true)),
+            );
+        }
+        line.push(space().width(Fill))
+            .push(small("No time".to_owned(), Message::SetTime(String::new())))
+            .into()
     }
 
     /// How often it comes round: never, or a unit, and how many of the unit.
     fn calendar_repeat_rows(&self, draft: &DueDraft) -> Element<'_, Message> {
         let ink = self.ink();
-        let mut choices = row![text("REPEAT").size(11).color(ink.muted).width(44)]
+        let mut choices = row![text("REPEAT").size(11).color(ink.muted).width(52)]
             .spacing(2)
             .align_y(iced::Alignment::Center);
         let units = [
@@ -3394,13 +3524,18 @@ impl App {
                 unit,
             });
             choices = choices.push(
-                button(text(label).size(12))
-                    .padding([4, 6])
-                    .on_press(Message::SetRepeat(make))
-                    .style(list_row(chosen)),
+                button(
+                    container(text(label).size(12))
+                        .width(Fill)
+                        .align_x(iced::alignment::Horizontal::Center),
+                )
+                .width(Fill)
+                .padding([5, 2])
+                .on_press(Message::SetRepeat(make))
+                .style(list_row(chosen)),
             );
         }
-        let mut rows = column![choices].spacing(4);
+        let mut rows = column![choices].spacing(6);
         if let Some(repeat) = draft
             .repeat
             .filter(|repeat| repeat.unit != due::Unit::Weekday)
@@ -3412,24 +3547,24 @@ impl App {
                 _ => "days",
             };
             let small = |label: &'static str, delta: i32| {
-                button(text(label).size(12))
-                    .padding([4, 8])
+                button(text(label).size(13))
+                    .padding([5, 10])
                     .on_press(Message::RepeatEvery(delta))
                     .style(ghost_style)
             };
             rows = rows.push(
                 row![
-                    space().width(44),
-                    text("every").size(12).color(ink.muted),
+                    space().width(52),
+                    text("every").size(13).color(ink.muted),
                     small("‹", -1),
-                    text(repeat.every.to_string()).size(14),
+                    text(repeat.every.to_string()).size(15),
                     small("›", 1),
                     text(if repeat.every == 1 {
                         plural.trim_end_matches('s')
                     } else {
                         plural
                     })
-                    .size(12)
+                    .size(13)
                     .color(ink.muted),
                 ]
                 .spacing(4)
@@ -3439,7 +3574,8 @@ impl App {
         rows.into()
     }
 
-    /// One row of the calendar: seven days, the picked one filled and today outlined.
+    /// One row of the calendar: seven days sharing the width, the picked one filled and today
+    /// outlined.
     fn calendar_week(
         week: &[Option<dates::Date>; 7],
         chosen: Option<dates::Date>,
@@ -3447,18 +3583,20 @@ impl App {
     ) -> Element<'static, Message> {
         let cells = week.map(|cell| -> Element<'static, Message> {
             let Some(day) = cell else {
-                return space().width(36).height(30).into();
+                return space().width(Fill).height(36).into();
             };
             let picked = chosen == Some(day);
             let now = day == today;
             button(
-                container(text(day.day.to_string()).size(13))
+                container(text(day.day.to_string()).size(14))
                     .width(Fill)
-                    .align_x(iced::alignment::Horizontal::Center),
+                    .height(Fill)
+                    .align_x(iced::alignment::Horizontal::Center)
+                    .align_y(iced::alignment::Vertical::Center),
             )
-            .width(36)
-            .height(30)
-            .padding([5, 0])
+            .width(Fill)
+            .height(36)
+            .padding(0)
             .on_press(Message::PickDay(day.to_string()))
             .style(move |theme: &Theme, status| {
                 let palette = ink_of(theme);
@@ -3474,7 +3612,7 @@ impl App {
             })
             .into()
         });
-        row(cells).into()
+        row(cells).spacing(2).into()
     }
 
     /// What the list on the right is called, from the view chosen on the left.
@@ -7844,6 +7982,9 @@ impl App {
             seen: self.seen,
             backup_to: self.backup_to.clone(),
             backup_at: self.backup_at,
+            hour12: self.hour12,
+            week_monday: self.week_monday,
+            home_zone: self.home_zone.clone(),
         };
         if let Err(err) = profile::store_profile(&self.dir, &profile) {
             self.message = err;
@@ -8196,6 +8337,7 @@ impl App {
                         Self::sheet_title("Settings"),
                         self.you_section(),
                         self.appearance_section(),
+                        self.time_section(),
                         self.devices_sheet(),
                         self.recovery_sheet(),
                         self.people_section(),
@@ -8296,6 +8438,118 @@ impl App {
                 self.appearance_row(),
             ]
             .spacing(12)
+            .into(),
+        )
+    }
+
+    /// How times are shown, which day the week starts on, and where this computer says it is.
+    fn time_section(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let mut body = column![
+            text("How times are shown, and which day a week begins on.")
+                .size(14)
+                .color(ink.muted),
+            row![
+                text("Clock").size(14).width(110),
+                choice_button("12 hour (3:42 PM)", self.hour12, Message::PickHour12(true),),
+                choice_button("24 hour (15:42)", !self.hour12, Message::PickHour12(false),),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            row![
+                text("Week begins").size(14).width(110),
+                choice_button("Sunday", !self.week_monday, Message::PickWeekMonday(false),),
+                choice_button("Monday", self.week_monday, Message::PickWeekMonday(true)),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(12);
+        body = body.push(hairline());
+        body = body.push(self.zone_lines());
+        settings_card("Time", body.into())
+    }
+
+    /// Where this computer says it is, where home is, and whether those differ.
+    fn zone_lines(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let here = if self.zone_name.is_none() && self.clock.offset == 0 && self.zone.is_utc() {
+            "This computer did not say what time zone it is in, so times are shown in UTC."
+                .to_owned()
+        } else {
+            format!(
+                "This computer is in {} ({}).",
+                self.zone_name.as_deref().unwrap_or(&self.clock.zone),
+                self.clock.offset_label()
+            )
+        };
+        let mut lines = column![text(here).size(14)].spacing(8);
+        if !self.home_zone.is_empty() {
+            lines = lines.push(
+                text(format!("Home is {}.", self.home_zone))
+                    .size(14)
+                    .color(ink.muted),
+            );
+        }
+        if let Some(trip) = &self.trip {
+            lines = lines.push(text(self.trip_words(trip)).size(14).color(ink.muted));
+            lines = lines.push(row![action_label("Make this home", Message::SetHomeHere),]);
+        }
+        lines = lines.push(
+            text("A time on a task is the clock on the wall where you are. It does not move to follow a trip.")
+                .size(12)
+                .color(ink.muted),
+        );
+        lines.into()
+    }
+
+    /// What it is at home, and how far that is, in a sentence.
+    fn trip_words(&self, trip: &clock::Trip) -> String {
+        match &trip.home {
+            Some(home) => format!(
+                "Home is {}, where it is {} now, {} here.",
+                trip.home_name,
+                clock::clock_text(home.minutes / 60, home.minutes % 60),
+                clock::gap_words(home.offset, self.clock.offset)
+            ),
+            None => format!("Home is {}.", trip.home_name),
+        }
+    }
+
+    /// The notice on the Tasks tab that this computer is away from home. It says what the clocks
+    /// are and that nothing on a task has changed, and asks nothing before it goes.
+    fn trip_banner(&self) -> Option<Element<'_, Message>> {
+        let trip = self.trip.as_ref()?;
+        if self.trip_dismissed.as_deref() == Some(self.zone_key().as_str()) {
+            return None;
+        }
+        let ink = self.ink();
+        let here = self.zone_name.as_deref().unwrap_or(&self.clock.zone);
+        Some(
+            container(
+                column![
+                    text(format!(
+                        "You are in {here} ({}), away from home.",
+                        self.clock.offset_label()
+                    ))
+                    .size(14),
+                    text(format!(
+                        "{} Task times are the clock where you are now, so a task due at 9:00 AM is due at 9:00 AM here. Nothing on a task was changed.",
+                        self.trip_words(trip)
+                    ))
+                    .size(13)
+                    .color(ink.muted),
+                    row![
+                        ghost_label("Hide this", Message::DismissTrip),
+                        ghost_label("Make this home", Message::SetHomeHere),
+                    ]
+                    .spacing(4),
+                ]
+                .spacing(6),
+            )
+            .padding(14)
+            .width(Fill)
+            .style(card_style)
             .into(),
         )
     }
@@ -13048,6 +13302,166 @@ mod app_tests {
                 .any(|task| task.text == "buy milk 2026-12-01 08:30")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn times_read_on_a_twelve_hour_clock_until_the_person_says_otherwise_and_it_is_kept() {
+        use super::{CalFor, due};
+        let _turn = one_at_a_time();
+        let dir = folder("time-settings");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        pinned(&mut app, 15 * 60 + 42);
+        assert!(app.hour12, "twelve hour is the default");
+        assert_eq!(app.clock.time_label(), "3:42 PM");
+        let moment = due::Due {
+            date: super::dates::Date::new(2026, 11, 21).expect("a day"),
+            time: due::Time::new(14, 30),
+            repeat: None,
+        };
+        assert_eq!(app.due_words(&moment, true), "Tomorrow 2:30 PM");
+        // The settings page draws with the new section, and a choice takes effect and is kept.
+        let _ = app.update(Message::ShowSettings);
+        drop(app.view());
+        let _ = app.update(Message::PickHour12(false));
+        assert_eq!(app.clock.time_label(), "15:42");
+        assert_eq!(app.due_words(&moment, true), "Tomorrow 14:30");
+        assert!(
+            !super::profile::load_profile(&dir).hour12,
+            "kept for next time"
+        );
+        drop(app.view());
+        let _ = app.update(Message::PickWeekMonday(true));
+        assert!(super::profile::load_profile(&dir).week_monday);
+        // What is written on a task does not depend on how it is read.
+        assert_eq!(due::Due::write("a", Some(&moment)), "a 2026-11-21 14:30");
+        let _ = app.update(Message::PickHour12(true));
+        assert_eq!(due::Due::write("a", Some(&moment)), "a 2026-11-21 14:30");
+        // Back on the twelve hour clock, the calendar steps the hour 1 to 12 and flips AM and PM.
+        let _ = app.update(Message::ShowTasks);
+        let _ = app.update(Message::OpenCalendar(CalFor::New));
+        let _ = app.update(Message::SetTime("12:00".to_owned()));
+        drop(app.view());
+        let _ = app.update(Message::StepTime {
+            hours: 12,
+            minutes: 0,
+        });
+        assert_eq!(
+            app.new_due.time, "00:00",
+            "PM to AM keeps the minute and the hour on the clock face"
+        );
+        let _ = app.update(Message::StepTime {
+            hours: 12,
+            minutes: 0,
+        });
+        assert_eq!(app.new_due.time, "12:00");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_calendar_draws_in_every_setting_and_at_every_width() {
+        use super::CalFor;
+        let _turn = one_at_a_time();
+        let dir = folder("calendar-draw");
+        let mut app = open_app(&dir);
+        pinned(&mut app, 9 * 60);
+        let _ = app.update(Message::ShowTasks);
+        for monday in [false, true] {
+            for twelve in [false, true] {
+                for width in [1100.0, 700.0, 420.0] {
+                    let _ = app.update(Message::Resized(iced::Size::new(width, 760.0)));
+                    let _ = app.update(Message::PickWeekMonday(monday));
+                    let _ = app.update(Message::PickHour12(twelve));
+                    for whose in [CalFor::New, CalFor::Edit] {
+                        let _ = app.update(Message::OpenCalendar(whose));
+                        drop(app.view());
+                        let _ = app.update(Message::SetTime("08:05".to_owned()));
+                        let _ = app.update(Message::SetRepeat(Some(super::due::Repeat {
+                            every: 2,
+                            unit: super::due::Unit::Week,
+                        })));
+                        drop(app.view());
+                        let _ = app.update(Message::ClearDue);
+                    }
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_trip_is_noticed_said_once_and_leaves_the_tasks_alone() {
+        let _turn = one_at_a_time();
+        let dir = folder("trip");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        pinned(&mut app, 10 * 60);
+        let _ = app.update(Message::ShowTasks);
+        app.tasks = vec![task_row("n", 0, false, "call 2026-11-20 09:00")];
+        // At home: no notice.
+        app.home_zone = "America/Los_Angeles".to_owned();
+        app.zone_name = Some("America/Los_Angeles".to_owned());
+        assert!(app.trip_banner().is_none());
+        // Somewhere else: a notice, and it names both places and what the clock at home says.
+        app.zone_name = Some("America/New_York".to_owned());
+        app.clock.offset = -5 * 3_600;
+        app.trip = Some(super::clock::Trip {
+            home_name: "America/Los_Angeles".to_owned(),
+            home: Some(super::clock::Clock {
+                today: app.clock.today,
+                minutes: 7 * 60,
+                offset: -8 * 3_600,
+                zone: "America/Los_Angeles".to_owned(),
+            }),
+        });
+        let words = app.trip_words(app.trip.as_ref().expect("trip"));
+        assert_eq!(
+            words,
+            "Home is America/Los_Angeles, where it is 7:00 AM now, 3 hours behind here."
+        );
+        assert!(app.trip_banner().is_some());
+        drop(app.view());
+        // The task is as it was written, whatever zone this is.
+        assert_eq!(app.tasks[0].text, "call 2026-11-20 09:00");
+        // Put away, it stays away for this zone, and comes back for another one.
+        let _ = app.update(Message::DismissTrip);
+        assert!(app.trip_banner().is_none());
+        drop(app.view());
+        app.zone_name = Some("Asia/Tokyo".to_owned());
+        assert!(
+            app.trip_banner().is_some(),
+            "a different place is a different notice"
+        );
+        // Making it home ends the trip and is kept.
+        let _ = app.update(Message::SetHomeHere);
+        assert_eq!(app.home_zone, "Asia/Tokyo");
+        assert!(app.trip.is_none() && app.trip_banner().is_none());
+        assert_eq!(super::profile::load_profile(&dir).home_zone, "Asia/Tokyo");
+        drop(app.view());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_first_named_zone_is_home_without_asking() {
+        let _turn = one_at_a_time();
+        let dir = folder("home-zone");
+        let mut app = open_app(&dir);
+        assert!(app.home_zone.is_empty());
+        app.zone_name = Some("Europe/London".to_owned());
+        app.check_trip();
+        assert_eq!(app.home_zone, "Europe/London");
+        assert!(app.trip.is_none());
+        assert_eq!(
+            super::profile::load_profile(&dir).home_zone,
+            "Europe/London"
+        );
+        // A computer that names no zone is not home anywhere, and nothing is made up.
+        let mut blank = open_app(&folder("home-zone-blank"));
+        blank.zone_name = None;
+        blank.check_trip();
+        assert!(blank.home_zone.is_empty() && blank.trip.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(folder("home-zone-blank"));
     }
 
     #[test]

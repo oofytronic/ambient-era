@@ -379,6 +379,21 @@ impl Zone {
         })
     }
 
+    /// Whether this zone sets the clock the same as `other` for the year after `from`, sampled
+    /// once a month. Two names for one place, such as `US/Pacific` and `America/Los_Angeles`,
+    /// are the same by this, and two places an hour apart for part of the year are not.
+    pub(crate) fn same_as(&self, other: &Self, from: i64) -> bool {
+        (0..=13).all(|month| {
+            let at = from.saturating_add(month * 30 * 86_400);
+            self.offset_at(at) == other.offset_at(at)
+        })
+    }
+
+    /// Whether this is the zone used when none was given.
+    pub(crate) fn is_utc(&self) -> bool {
+        self.raw.is_empty() && self.rule.is_none() && self.times.is_empty()
+    }
+
     /// Whether `data` is the file this zone was read from.
     pub(crate) fn is_from(&self, data: &[u8]) -> bool {
         !self.raw.is_empty() && self.raw == data
@@ -553,6 +568,23 @@ mod tests {
             }
         }
         data
+    }
+
+    #[test]
+    fn two_zones_are_the_same_when_they_set_the_clock_the_same_all_year() {
+        let la = Zone::parse(&file_with_footer("PST8PDT,M3.2.0,M11.1.0")).expect("zone");
+        let alias = Zone::parse(&file_with_footer("PST8PDT,M3.2.0,M11.1.0")).expect("zone");
+        let same_offset_no_dst = Zone::parse(&file_with_footer("PST8")).expect("zone");
+        let other = Zone::parse(&file_with_footer("EST5EDT,M3.2.0,M11.1.0")).expect("zone");
+        let from = 1_795_146_120;
+        assert!(la.same_as(&alias, from));
+        assert!(la.same_as(&la, from));
+        assert!(!la.same_as(&other, from), "three hours apart");
+        assert!(
+            !la.same_as(&same_offset_no_dst, from),
+            "the same in winter, an hour apart in summer"
+        );
+        assert!(!Zone::utc().same_as(&la, from));
     }
 
     #[test]

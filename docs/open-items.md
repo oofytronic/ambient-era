@@ -51,7 +51,9 @@ See [platforms.md](platforms.md).
 ## Tasks and dates, not built
 
 - **Typing a date by hand** is not possible in the window now. The calendar is the only way. A date or time written in a note by hand still counts if it is a real one in the one form.
-- **The calendar starts its week on Sunday** and its months are in English. There is no setting.
+- **The calendar's months and weekdays are in English.** The week can begin on Sunday or Monday, and times on a 12 or 24 hour clock, in settings.
+- **A trip is only noticed and said.** Times stay the clock where the person is. There is no way to keep a task on home time, or to give a task its own zone, so a meeting at a fixed place can be an hour or more off after a flight. The hours at home come from the home zone's file, so a computer that cannot read it says only that home is somewhere else.
+- **Home is the first named zone and is changed by hand.** A person who moves house has to say so, and one who first opened the folder while travelling has the wrong home until they do.
 - **A time of day has no zone.** It is the wall clock where the person is, so a task due at 09:00 is due at 09:00 after flying across the world. A task shared in a note would be due at that wall time for whoever reads it. That is simple and it can be wrong for a meeting at a fixed place.
 - **The window looks at the clock every 20 seconds, and only on the Tasks tab,** and when it is brought back. A task can read as not yet late for up to 20 seconds after its minute. Elsewhere nothing shows a due time.
 - **The time zone comes from `/etc/localtime` only.** A `TZ` environment variable is not read, and a system that has no such file is treated as UTC and says so in the panel.

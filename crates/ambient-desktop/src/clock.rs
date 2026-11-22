@@ -14,6 +14,34 @@ pub(crate) struct When {
     pub time: String,
 }
 
+/// Whether times read `3:42 PM`, not `15:42`. One answer for the whole window, set from the
+/// person's choice, so the thread that makes the chat list says times the same way as the page.
+static HOUR12: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub(crate) fn set_hour12(on: bool) {
+    HOUR12.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn hour12() -> bool {
+    HOUR12.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A time of day for a person: `3:42 PM`, or `15:42` on a 24 hour clock.
+pub(crate) fn time_text(hour: u32, minute: u32, twelve: bool) -> String {
+    if twelve {
+        let shown = (hour + 11) % 12 + 1;
+        let half = if hour < 12 { "AM" } else { "PM" };
+        format!("{shown}:{minute:02} {half}")
+    } else {
+        format!("{hour:02}:{minute:02}")
+    }
+}
+
+/// `time_text`, the way the person asked to read time.
+pub(crate) fn clock_text(hour: u32, minute: u32) -> String {
+    time_text(hour, minute, hour12())
+}
+
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -62,6 +90,11 @@ impl Clock {
         }
     }
 
+    /// This reading's time of day, as the person reads time.
+    pub(crate) fn time_label(&self) -> String {
+        clock_text(self.minutes / 60, self.minutes % 60)
+    }
+
     /// `UTC-8`, `UTC+5:30`, or `UTC`.
     pub(crate) fn offset_label(&self) -> String {
         if self.offset == 0 {
@@ -90,7 +123,7 @@ pub(crate) fn when(unix_ms: Option<u64>, zone: &Zone, now: u64) -> When {
     let local = local_secs(unix_ms, offset);
     let today = local_secs(now, now_offset);
     let (year, month, day, hour, minute) = ymd_hm(local);
-    let time = format!("{hour:02}:{minute:02}");
+    let time = clock_text(hour, minute);
     let day_label = day_label(local, today, year, month, day);
     When {
         day: day_label,
@@ -172,6 +205,60 @@ fn ymd_hm(secs: i64) -> (i32, u32, u32, u32, u32) {
     )
 }
 
+/// How far two clocks are apart, in words: `3 hours ahead`, `5½ hours behind`, `the same`.
+/// `east` and `home` are seconds east of UTC.
+pub(crate) fn gap_words(east: i32, home: i32) -> String {
+    let apart = i64::from(east) - i64::from(home);
+    if apart == 0 {
+        return "the same time".to_owned();
+    }
+    let minutes = apart.unsigned_abs() / 60;
+    let (hours, rest) = (minutes / 60, minutes % 60);
+    let amount = match (hours, rest) {
+        (1, 0) => "1 hour".to_owned(),
+        (h, 0) => format!("{h} hours"),
+        (h, 30) => format!("{h}½ hours"),
+        (h, m) => format!("{h} hours {m} minutes"),
+    };
+    format!("{amount} {}", if apart > 0 { "ahead" } else { "behind" })
+}
+
+/// A person who is not where they live: the zone they call home, and what its clock says now.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Trip {
+    pub home_name: String,
+    /// The home zone's clock now, when its zone file could be read.
+    pub home: Option<Clock>,
+}
+
+/// Whether this computer is somewhere other than home. It is when the zone has a different name
+/// and sets the clock differently at some point in the next year, so a second name for the same
+/// place is not a trip. When the home zone cannot be read, a different name is taken as a trip,
+/// since it cannot be shown to be the same.
+pub(crate) fn away_from_home(
+    here_name: Option<&str>,
+    here: &Zone,
+    home_name: &str,
+    home: Option<&Zone>,
+    now_ms: u64,
+) -> Option<Trip> {
+    if home_name.is_empty() || here_name == Some(home_name) {
+        return None;
+    }
+    let now = i64::try_from(now_ms / 1000).unwrap_or(0);
+    match home {
+        Some(zone) if here.same_as(zone, now) => None,
+        Some(zone) => Some(Trip {
+            home_name: home_name.to_owned(),
+            home: Some(Clock::read(zone, Some(home_name), now_ms)),
+        }),
+        None => here_name.map(|_| Trip {
+            home_name: home_name.to_owned(),
+            home: None,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Clock, stamp, when, ymd_hm};
@@ -200,7 +287,7 @@ mod tests {
         let now = 1_700_000_000_000_u64;
         let labeled = when(Some(now), &zone, now);
         assert_eq!(labeled.day, "Today");
-        assert_eq!(labeled.time, "22:13");
+        assert_eq!(labeled.time, super::clock_text(22, 13));
     }
 
     #[test]
@@ -227,6 +314,64 @@ mod tests {
             ("2026-11-20".to_owned(), 9 * 60 + 12)
         );
         assert_eq!(Clock::read(&Zone::utc(), None, at).offset_label(), "UTC");
+    }
+
+    #[test]
+    fn a_time_reads_on_a_twelve_or_a_twenty_four_hour_clock() {
+        use super::time_text;
+        for (hour, minute, twelve, twenty_four) in [
+            (0, 5, "12:05 AM", "00:05"),
+            (9, 0, "9:00 AM", "09:00"),
+            (11, 59, "11:59 AM", "11:59"),
+            (12, 0, "12:00 PM", "12:00"),
+            (13, 30, "1:30 PM", "13:30"),
+            (15, 42, "3:42 PM", "15:42"),
+            (23, 59, "11:59 PM", "23:59"),
+        ] {
+            assert_eq!(time_text(hour, minute, true), twelve);
+            assert_eq!(time_text(hour, minute, false), twenty_four);
+        }
+    }
+
+    #[test]
+    fn a_gap_between_clocks_is_said_in_hours_and_which_way() {
+        use super::gap_words;
+        assert_eq!(gap_words(-5 * 3_600, -8 * 3_600), "3 hours ahead");
+        assert_eq!(gap_words(-8 * 3_600, -5 * 3_600), "3 hours behind");
+        assert_eq!(gap_words(3_600, 0), "1 hour ahead");
+        assert_eq!(gap_words(19_800, 0), "5½ hours ahead");
+        assert_eq!(gap_words(20_700, 0), "5 hours 45 minutes ahead");
+        assert_eq!(gap_words(0, 0), "the same time");
+    }
+
+    #[test]
+    fn a_trip_is_somewhere_that_sets_the_clock_differently_from_home() {
+        use super::away_from_home;
+        let la = zone_with_footer("PST8PDT,M3.2.0,M11.1.0");
+        let alias = zone_with_footer("PST8PDT,M3.2.0,M11.1.0");
+        let ny = zone_with_footer("EST5EDT,M3.2.0,M11.1.0");
+        let now = 1_795_146_120_000_u64;
+        let trip = |here_name: Option<&str>, here: &super::Zone, home: Option<&super::Zone>| {
+            away_from_home(here_name, here, "America/Los_Angeles", home, now)
+        };
+        // At home: the same name, and nothing is read.
+        assert!(trip(Some("America/Los_Angeles"), &la, None).is_none());
+        // Another name for the same clock is not a trip.
+        assert!(trip(Some("US/Pacific"), &alias, Some(&la)).is_none());
+        // Somewhere else is, and says what the clock at home reads.
+        let away = trip(Some("America/New_York"), &ny, Some(&la)).expect("a trip");
+        let home = away.home.expect("home clock");
+        assert_eq!(home.offset, -8 * 3_600);
+        assert_eq!(home.zone, "America/Los_Angeles");
+        // A zone that is not named cannot be compared by name, only by its clock.
+        assert!(trip(None, &ny, Some(&la)).is_some());
+        assert!(trip(None, &alias, Some(&la)).is_none());
+        // With no home file, a different name is a trip with no home clock, and no name is none.
+        let blind = trip(Some("America/New_York"), &ny, None).expect("a trip");
+        assert!(blind.home.is_none());
+        assert!(trip(None, &ny, None).is_none());
+        // No home yet is no trip.
+        assert!(away_from_home(Some("America/New_York"), &ny, "", None, now).is_none());
     }
 
     #[test]

@@ -47,6 +47,11 @@ pub trait Host: Send + Sync {
     /// when this host cannot tell, and the caller uses UTC and says so.
     fn time_zone(&self) -> Option<TimeZone>;
 
+    /// The bytes of the zone file for a name such as `America/Los_Angeles`, whether or not the
+    /// computer is in it. `None` when the name is not a plain zone name or the system has no such
+    /// file. Used to say what time it is somewhere else.
+    fn zone_named(&self, name: &str) -> Option<Vec<u8>>;
+
     /// Open a file with the program the system uses for it.
     ///
     /// # Errors
@@ -178,7 +183,43 @@ fn zone_name_from_link(target: &Path) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
+/// Where Unix systems and Macs keep their zone files.
+const ZONE_DIRS: [&str; 3] = [
+    "/usr/share/zoneinfo",
+    "/var/db/timezone/zoneinfo",
+    "/usr/lib/zoneinfo",
+];
+
+/// Whether this is a name such as `America/Los_Angeles` or `Etc/GMT+5`: letters, digits, and
+/// `_ + - /`, in parts, with nothing that could climb out of the zone folder.
+fn is_zone_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('/')
+        && name.split('/').all(|part| {
+            !part.is_empty()
+                && part != ".."
+                && part != "."
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_+-".contains(&byte))
+        })
+}
+
+fn unix_zone_named(name: &str) -> Option<Vec<u8>> {
+    if !is_zone_name(name) {
+        return None;
+    }
+    ZONE_DIRS
+        .iter()
+        .find_map(|dir| std::fs::read(Path::new(dir).join(name)).ok())
+}
+
 impl Host for UnixHost {
+    fn zone_named(&self, name: &str) -> Option<Vec<u8>> {
+        unix_zone_named(name)
+    }
+
     fn time_zone(&self) -> Option<TimeZone> {
         unix_time_zone()
     }
@@ -252,6 +293,10 @@ fn mac_style_is_dark(succeeded: bool, answer: &str) -> bool {
 }
 
 impl Host for MacHost {
+    fn zone_named(&self, name: &str) -> Option<Vec<u8>> {
+        unix_zone_named(name)
+    }
+
     fn time_zone(&self) -> Option<TimeZone> {
         unix_time_zone()
     }
@@ -305,6 +350,10 @@ impl Host for MacHost {
 pub struct BareHost;
 
 impl Host for BareHost {
+    fn zone_named(&self, _name: &str) -> Option<Vec<u8>> {
+        None
+    }
+
     fn time_zone(&self) -> Option<TimeZone> {
         None
     }
@@ -409,6 +458,9 @@ mod tests {
             fn time_zone(&self) -> Option<TimeZone> {
                 None
             }
+            fn zone_named(&self, _: &str) -> Option<Vec<u8>> {
+                None
+            }
             fn open_path(&self, _: &Path) -> Result<(), String> {
                 Err(String::new())
             }
@@ -449,6 +501,36 @@ mod tests {
         );
         assert_eq!(name("/etc/some-other-file"), None);
         assert_eq!(name("/usr/share/zoneinfo/"), None);
+    }
+
+    #[test]
+    fn only_a_plain_zone_name_is_looked_up() {
+        for good in [
+            "America/Los_Angeles",
+            "Etc/GMT+5",
+            "UTC",
+            "America/Argentina/Buenos_Aires",
+            "Asia/Ho_Chi_Minh",
+        ] {
+            assert!(is_zone_name(good), "{good}");
+        }
+        for bad in [
+            "",
+            "/etc/passwd",
+            "../../etc/passwd",
+            "America/../../x",
+            "a//b",
+            "America/",
+            "a b",
+            "a\\b",
+            "a\nb",
+            ".",
+            "..",
+            &"x".repeat(65),
+        ] {
+            assert!(!is_zone_name(bad), "{bad:?}");
+        }
+        assert!(BareHost.zone_named("America/Los_Angeles").is_none());
     }
 
     #[test]

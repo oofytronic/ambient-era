@@ -448,3 +448,11 @@ The owner asked that nobody be mistaken about when something is due. Three thing
 - **The zone is asked through `Host`** (`time_zone`), so a Mac or a phone answers it its own way. This removed the last `/etc/localtime` read outside the host.
 
 Then the rest of the task features the owner asked for, except reminders, which wait for notifications. A task can have a time of day, and a repeat, set in the calendar and written as the end of its line: `2026-11-20 14:30 repeat:weekly`. A task is late the minute its time passes. Checking a repeating task moves it to its next day and leaves it open. A time has no zone. Nothing was seen in a window.
+
+## 2026-11-22 — Time settings, a calendar that fills its card, and trips
+
+- Settings has a Time section: a 12 hour clock by default (`3:42 PM`) or 24 hour, and weeks that begin on Sunday or Monday. Times are shown that way everywhere, including chat. What is written on a task stays `HH:MM`, so changing the setting changes nothing in a note.
+- The calendar's days were a fixed width in a card that the other rows made wider, so the grid sat to the left with empty space. Every row now spreads across the card, which is as wide as the pane allows up to a limit, centered, and a click outside closes it.
+- A person on a trip is noticed. The first named zone the folder is opened in is home. A later zone with a different name that sets the clock differently over the next year gets one notice on the Tasks tab, naming both and saying what the clock at home reads, and nothing on any task is changed. Two names for one place are not a trip. `Host` gained `zone_named` to read the home zone's file.
+
+Nothing was seen in a window.

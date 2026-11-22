@@ -172,13 +172,13 @@ impl Date {
     }
 }
 
-/// A month, as the rows of a calendar: seven cells to a row, Sunday first, `None` for the cells
-/// before the first and after the last.
-pub(crate) fn month_grid(year: i32, month: u32) -> Vec<[Option<Date>; 7]> {
+/// A month, as the rows of a calendar: seven cells to a row, Sunday or Monday first, `None` for
+/// the cells before the first and after the last.
+pub(crate) fn month_grid(year: i32, month: u32, monday_first: bool) -> Vec<[Option<Date>; 7]> {
     let Some(first) = Date::new(year, month, 1) else {
         return Vec::new();
     };
-    let lead = usize::try_from(first.weekday()).unwrap_or(0);
+    let lead = usize::try_from((first.weekday() + 7 - u32::from(monday_first)) % 7).unwrap_or(0);
     let length = usize::try_from(days_in_month(year, month)).unwrap_or(0);
     let mut rows = Vec::new();
     let mut cell = 0_usize;
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn a_month_is_laid_out_in_weeks() {
-        let grid = month_grid(2026, 11);
+        let grid = month_grid(2026, 11, false);
         // November 2026 starts on a Sunday and has 30 days: five rows, the last of two days.
         assert_eq!(grid.len(), 5);
         assert_eq!(grid[0][0], Some(day(2026, 11, 1)));
@@ -293,20 +293,52 @@ mod tests {
         let days: Vec<Date> = grid.iter().flatten().flatten().copied().collect();
         assert_eq!(days.len(), 30);
         // A month that starts midweek has empty cells first, and is never empty or ragged.
-        let grid = month_grid(2026, 2);
+        let grid = month_grid(2026, 2, false);
         assert_eq!(
             grid[0].iter().filter(|cell| cell.is_none()).count(),
             0,
             "starts on a Sunday"
         );
-        let grid = month_grid(2027, 5);
+        let grid = month_grid(2027, 5, false);
         assert_eq!(grid[0][6], Some(day(2027, 5, 1)), "a Saturday");
         assert!(grid[0][..6].iter().all(Option::is_none));
         for month in 1..=12 {
-            let count = month_grid(2028, month).iter().flatten().flatten().count();
+            let count = month_grid(2028, month, false)
+                .iter()
+                .flatten()
+                .flatten()
+                .count();
             assert_eq!(count, usize::try_from(days_in_month(2028, month)).unwrap());
         }
-        assert!(month_grid(2026, 13).is_empty());
+        assert!(month_grid(2026, 13, false).is_empty());
+    }
+
+    #[test]
+    fn a_week_can_begin_on_monday() {
+        // November 2026 starts on a Sunday: a Monday-first week puts it last in its row.
+        let grid = month_grid(2026, 11, true);
+        assert_eq!(grid[0][6], Some(day(2026, 11, 1)));
+        assert!(grid[0][..6].iter().all(Option::is_none));
+        assert_eq!(grid[1][0], Some(day(2026, 11, 2)));
+        // The same days either way, and every row has a Monday in its first cell.
+        for month in 1..=12 {
+            let sunday: Vec<_> = month_grid(2027, month, false)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect();
+            let monday: Vec<_> = month_grid(2027, month, true)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .collect();
+            assert_eq!(sunday, monday);
+            for row in month_grid(2027, month, true) {
+                if let Some(first) = row[0] {
+                    assert_eq!(first.weekday(), 1);
+                }
+            }
+        }
     }
 
     #[test]

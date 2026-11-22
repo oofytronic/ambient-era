@@ -14,7 +14,7 @@ A folder made on one platform opens on another. The format, the specs, and the v
 
 ## The host
 
-`Host` answers seven things: the home folder, the program's data folder, the time zone, whether the system is dark, open a file, open a link, and choose a file. `host()` returns the one in use. It starts as the host for the system this was built for, and a platform shell replaces it with `set_host` before anything else runs.
+`Host` answers eight things: the home folder, the program's data folder, the time zone this computer is in, the zone file for any named zone, whether the system is dark, open a file, open a link, and choose a file. `host()` returns the one in use. It starts as the host for the system this was built for, and a platform shell replaces it with `set_host` before anything else runs.
 
 | Host | For | State |
 |:--|:--|:--|

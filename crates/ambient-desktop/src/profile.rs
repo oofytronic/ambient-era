@@ -40,6 +40,13 @@ pub(super) struct Profile {
     pub backup_to: String,
     /// When the last backup finished, in unix milliseconds. Zero when there has not been one.
     pub backup_at: u64,
+    /// Times read `3:42 PM` when true and `15:42` when false.
+    pub hour12: bool,
+    /// Weeks begin on Monday when true and Sunday when false.
+    pub week_monday: bool,
+    /// The time zone the person lives in, by name, or empty until one is known. Where a trip is
+    /// noticed from.
+    pub home_zone: String,
 }
 
 impl Default for Profile {
@@ -51,6 +58,9 @@ impl Default for Profile {
             seen: true,
             backup_to: String::new(),
             backup_at: 0,
+            hour12: true,
+            week_monday: false,
+            home_zone: String::new(),
         }
     }
 }
@@ -65,13 +75,16 @@ pub(super) fn load_profile(dir: &Path) -> Profile {
 pub(super) fn store_profile(dir: &Path, profile: &Profile) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|_| "could not write settings".to_owned())?;
     let text = format!(
-        "v1\ndevice={}\nname={}\ntheme={}\nseen={}\nbackup={}\nbackup_at={}\n",
+        "v1\ndevice={}\nname={}\ntheme={}\nseen={}\nbackup={}\nbackup_at={}\nclock={}\nweek={}\nhome_zone={}\n",
         one_line(&profile.device),
         one_line(&profile.name),
         profile.appearance.as_str(),
         if profile.seen { "yes" } else { "no" },
         one_line(&profile.backup_to),
-        profile.backup_at
+        profile.backup_at,
+        if profile.hour12 { "12" } else { "24" },
+        if profile.week_monday { "mon" } else { "sun" },
+        one_line(&profile.home_zone),
     );
     fs::write(dir.join("profile"), text).map_err(|_| "could not write settings".to_owned())
 }
@@ -455,6 +468,12 @@ fn parse_profile(text: &str) -> Profile {
             value.trim().clone_into(&mut profile.backup_to);
         } else if let Some(value) = line.strip_prefix("backup_at=") {
             profile.backup_at = value.trim().parse().unwrap_or(0);
+        } else if let Some(value) = line.strip_prefix("clock=") {
+            profile.hour12 = value.trim() != "24";
+        } else if let Some(value) = line.strip_prefix("week=") {
+            profile.week_monday = value.trim() == "mon";
+        } else if let Some(value) = line.strip_prefix("home_zone=") {
+            value.trim().clone_into(&mut profile.home_zone);
         }
     }
     profile
@@ -517,6 +536,26 @@ fn file_name(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Appearance, backup_folder, left_out, parse_names, parse_profile, parse_seen};
+
+    #[test]
+    fn time_settings_default_to_a_twelve_hour_clock_and_are_kept() {
+        let older = parse_profile("v1\ndevice=laptop\n");
+        assert!(
+            older.hour12,
+            "twelve hour unless the person chose otherwise"
+        );
+        assert!(!older.week_monday);
+        assert!(older.home_zone.is_empty());
+        let chosen = parse_profile("v1\nclock=24\nweek=mon\nhome_zone=America/Los_Angeles\n");
+        assert!(!chosen.hour12 && chosen.week_monday);
+        assert_eq!(chosen.home_zone, "America/Los_Angeles");
+        assert!(parse_profile("v1\nclock=12\n").hour12);
+        assert!(
+            parse_profile("v1\nclock=garbage\n").hour12,
+            "unreadable means the default"
+        );
+        assert!(!parse_profile("v1\nweek=garbage\n").week_monday);
+    }
 
     #[test]
     fn profile_round_trip() {
