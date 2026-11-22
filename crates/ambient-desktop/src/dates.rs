@@ -117,6 +117,48 @@ impl Date {
         u32::try_from((self.serial() + 4).rem_euclid(7)).unwrap_or(0)
     }
 
+    /// The day `months` months on, or back. When that month is shorter the last day of it is
+    /// taken: a month after January 31 is February 28.
+    pub(crate) fn plus_months(self, months: i32) -> Option<Self> {
+        let (year, month) = shift_month(self.year, self.month, months);
+        Self::new(year, month, self.day.min(days_in_month(year, month)))
+    }
+
+    /// `Sun`, `Mon`, and so on.
+    pub(crate) fn weekday_name(self) -> &'static str {
+        ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+            .get(usize::try_from(self.weekday()).unwrap_or(0))
+            .copied()
+            .unwrap_or("")
+    }
+
+    /// `Friday`.
+    pub(crate) fn weekday_full(self) -> &'static str {
+        [
+            "Sunday",
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+        ]
+        .get(usize::try_from(self.weekday()).unwrap_or(0))
+        .copied()
+        .unwrap_or("")
+    }
+
+    /// `Today`, `Tomorrow`, `Yesterday`, the weekday for the next five days, or `Fri, Nov 27`.
+    pub(crate) fn relative(self, today: Self) -> String {
+        match self.serial() - today.serial() {
+            0 => "Today".to_owned(),
+            1 => "Tomorrow".to_owned(),
+            -1 => "Yesterday".to_owned(),
+            2..=5 => self.weekday_name().to_owned(),
+            _ => format!("{}, {}", self.weekday_name(), self.short(today)),
+        }
+    }
+
     /// `Nov 20`, or `Nov 20, 2027` when it is not this year.
     pub(crate) fn short(self, today: Self) -> String {
         let name = MONTHS

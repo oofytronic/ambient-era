@@ -332,7 +332,7 @@ pub(super) fn inbox_of(dir: &Path) -> Vec<ChatRow> {
     let Ok(chats) = ambient_cli::list_conversations(dir) else {
         return Vec::new();
     };
-    let tz = super::clock::load_tz();
+    let tz = super::clock::load_zone().0;
     let now = super::clock::now_ms();
     chats
         .into_iter()

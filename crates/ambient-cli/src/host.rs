@@ -18,6 +18,16 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+/// The computer's time zone: the `TZif` file the system keeps for it, and its name when the
+/// system says what it is.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimeZone {
+    /// `America/Los_Angeles`, or `None` when the system does not say.
+    pub name: Option<String>,
+    /// The bytes of the zone file, in the format of RFC 8536.
+    pub tzif: Vec<u8>,
+}
+
 /// The machine, as far as the notebook needs to know.
 pub trait Host: Send + Sync {
     /// The person's home folder, when there is one. Used to expand a typed `~/`, and to offer a
@@ -32,6 +42,10 @@ pub trait Host: Send + Sync {
     /// Whether the system is set to dark. `None` when this host cannot tell, and the caller
     /// picks.
     fn prefers_dark(&self) -> Option<bool>;
+
+    /// The zone this computer is set to now. Asked again each time it might have changed. `None`
+    /// when this host cannot tell, and the caller uses UTC and says so.
+    fn time_zone(&self) -> Option<TimeZone>;
 
     /// Open a file with the program the system uses for it.
     ///
@@ -145,7 +159,30 @@ fn gnome_scheme_is_dark(answer: &str) -> Option<bool> {
     }
 }
 
+/// The zone file Unix systems, macOS included, point `/etc/localtime` at, and its name, which is
+/// the part of the link's target after `zoneinfo/`.
+fn unix_time_zone() -> Option<TimeZone> {
+    let path = Path::new("/etc/localtime");
+    let tzif = std::fs::read(path).ok()?;
+    let name = std::fs::read_link(path)
+        .ok()
+        .and_then(|target| zone_name_from_link(&target));
+    Some(TimeZone { name, tzif })
+}
+
+/// `America/Los_Angeles` from `/usr/share/zoneinfo/America/Los_Angeles`, or from the same under
+/// any other prefix, as a Mac has.
+fn zone_name_from_link(target: &Path) -> Option<String> {
+    let text = target.to_str()?;
+    let name = text.split_once("zoneinfo/")?.1;
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 impl Host for UnixHost {
+    fn time_zone(&self) -> Option<TimeZone> {
+        unix_time_zone()
+    }
+
     fn home_dir(&self) -> Option<PathBuf> {
         env_path("HOME")
     }
@@ -215,6 +252,10 @@ fn mac_style_is_dark(succeeded: bool, answer: &str) -> bool {
 }
 
 impl Host for MacHost {
+    fn time_zone(&self) -> Option<TimeZone> {
+        unix_time_zone()
+    }
+
     fn home_dir(&self) -> Option<PathBuf> {
         env_path("HOME")
     }
@@ -264,6 +305,10 @@ impl Host for MacHost {
 pub struct BareHost;
 
 impl Host for BareHost {
+    fn time_zone(&self) -> Option<TimeZone> {
+        None
+    }
+
     fn home_dir(&self) -> Option<PathBuf> {
         env_path("HOME").or_else(|| env_path("USERPROFILE"))
     }
@@ -361,6 +406,9 @@ mod tests {
             fn prefers_dark(&self) -> Option<bool> {
                 None
             }
+            fn time_zone(&self) -> Option<TimeZone> {
+                None
+            }
             fn open_path(&self, _: &Path) -> Result<(), String> {
                 Err(String::new())
             }
@@ -384,9 +432,30 @@ mod tests {
     }
 
     #[test]
+    fn the_zone_name_is_what_follows_zoneinfo_in_the_link() {
+        let name = |text: &str| zone_name_from_link(Path::new(text));
+        assert_eq!(
+            name("/usr/share/zoneinfo/America/Los_Angeles").as_deref(),
+            Some("America/Los_Angeles")
+        );
+        assert_eq!(
+            name("/var/db/timezone/zoneinfo/America/New_York").as_deref(),
+            Some("America/New_York"),
+            "a Mac keeps them elsewhere"
+        );
+        assert_eq!(
+            name("../usr/share/zoneinfo/Etc/UTC").as_deref(),
+            Some("Etc/UTC")
+        );
+        assert_eq!(name("/etc/some-other-file"), None);
+        assert_eq!(name("/usr/share/zoneinfo/"), None);
+    }
+
+    #[test]
     fn a_system_with_no_answers_refuses_and_does_not_panic() {
         let bare = BareHost;
         assert!(bare.data_dir().is_none() && bare.prefers_dark().is_none());
+        assert!(bare.time_zone().is_none());
         assert!(bare.open_path(Path::new("/x")).is_err());
         assert!(bare.open_url("https://example.com").is_err());
         assert!(bare.choose_file().is_err());

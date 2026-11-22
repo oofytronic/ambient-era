@@ -26,10 +26,12 @@ use qrcode::QrCode;
 
 mod clock;
 mod dates;
+mod due;
 mod files;
 mod lane;
 mod markdown;
 mod profile;
+mod zone;
 
 use markdown::FormatKind;
 
@@ -191,19 +193,25 @@ struct App {
     confirm_clear: bool,
     /// The Tasks note is shown over the Tasks tab.
     tasks_note_open: bool,
-    task_due_text: String,
-    /// The due date picked for the task being added, as `YYYY-MM-DD`, or empty.
-    new_due: String,
+    /// The due moment of the task being edited.
+    edit_due: DueDraft,
+    /// The due moment picked for the task being added.
+    new_due: DueDraft,
     /// Whose due date the calendar is choosing, when it is open.
     cal: Option<CalFor>,
     /// The month the calendar is showing.
     cal_month: (i32, u32),
     /// What the Tasks tab is showing.
     task_view: TaskView,
-    /// This computer's time zone data, read once.
-    tz: Vec<u8>,
-    /// A day to treat as today. Only tests set it.
-    pinned_today: Option<dates::Date>,
+    /// What the clock said when it was last read: the day, the minute, and the zone. Everything
+    /// on a screen is worked out from this one reading, so it all agrees about now.
+    clock: clock::Clock,
+    /// The zone file that reading used, kept to tell when the system's zone changes.
+    zone: zone::Zone,
+    /// The zone's name, when the system gave one.
+    zone_name: Option<String>,
+    /// A reading to keep. Only tests set it, so they do not depend on the day they run.
+    pinned_clock: Option<clock::Clock>,
     find_open: bool,
     find_query: String,
     /// Index of the current find hit. `usize::MAX` means the next jump starts at the first.
@@ -493,6 +501,20 @@ enum Message {
     PickDay(String),
     /// No due date.
     ClearDue,
+    /// A day counted from today: 0 is today, 1 tomorrow.
+    PickQuick(i64),
+    /// Move the time on by this many hours and minutes.
+    StepTime {
+        hours: i32,
+        minutes: i32,
+    },
+    /// A time of day as `HH:MM`, or empty for none.
+    SetTime(String),
+    SetRepeat(Option<due::Repeat>),
+    /// Make the repeat come round every this many more or fewer units.
+    RepeatEvery(i32),
+    /// Time has passed, or the window was brought back. Read the clock again.
+    ClockTick,
     /// Look at the tasks this way.
     ShowTaskView(TaskView),
     /// Show or close the Tasks note over the Tasks tab.
@@ -571,12 +593,48 @@ struct TaskRow {
     line: usize,
     done: bool,
     text: String,
+    /// When it is due, read once from the end of the line.
+    due: Option<due::Due>,
 }
 
 struct OlderNote {
     id: String,
     title: String,
     body: String,
+}
+
+/// A due moment being put together: what the calendar has written so far. The date and the time
+/// are only ever set from it, so they are always in the one form.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct DueDraft {
+    /// `YYYY-MM-DD`, or empty for no due date.
+    date: String,
+    /// `HH:MM`, or empty for no time. Only means something with a date.
+    time: String,
+    repeat: Option<due::Repeat>,
+}
+
+impl DueDraft {
+    fn from_due(found: Option<due::Due>) -> Self {
+        found.map_or_else(Self::default, |found| Self {
+            date: found.date.to_string(),
+            time: found.time.map_or_else(String::new, |time| time.to_string()),
+            repeat: found.repeat,
+        })
+    }
+
+    /// The moment this makes, if it has a day.
+    fn due(&self) -> Option<due::Due> {
+        Some(due::Due {
+            date: dates::Date::parse(&self.date)?,
+            time: due::Time::parse(&self.time),
+            repeat: self.repeat,
+        })
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 /// Whose due date the calendar is choosing: the task being added, or one being edited.
@@ -919,13 +977,15 @@ impl App {
             hide_done: false,
             confirm_clear: false,
             tasks_note_open: false,
-            task_due_text: String::new(),
-            new_due: String::new(),
+            edit_due: DueDraft::default(),
+            new_due: DueDraft::default(),
             cal: None,
             cal_month: (1970, 1),
             task_view: TaskView::Open,
-            tz: clock::load_tz(),
-            pinned_today: None,
+            clock: clock::Clock::read(&zone::Zone::utc(), None, clock::now_ms()),
+            zone: zone::Zone::utc(),
+            zone_name: None,
+            pinned_clock: None,
             find_open: false,
             find_query: String::new(),
             find_at: usize::MAX,
@@ -1008,6 +1068,7 @@ impl App {
             Task::none()
         };
         app.boot_at = Instant::now();
+        app.refresh_clock();
         (app, task)
     }
 
@@ -1025,6 +1086,7 @@ impl App {
                     shift: mods.shift(),
                 })
             }
+            iced::Event::Window(iced::window::Event::Focused) => Some(Message::ClockTick),
             iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. }) => scroll_seen(),
             iced::Event::Mouse(
                 iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)
@@ -1096,6 +1158,7 @@ impl App {
                 iced::time::every(std::time::Duration::from_millis(16)).map(|_| Message::SlideTick),
             );
         }
+        parts.extend(Self::clock_ticks(app));
         if app.scroll_armed {
             parts.push(iced::Subscription::run_with(
                 Wake::Scroll(app.scroll_token),
@@ -1110,6 +1173,14 @@ impl App {
         }
         parts.push(iced::Subscription::run(lane_messages));
         iced::Subscription::batch(parts)
+    }
+
+    /// While the Tasks tab is up, look at the clock every twenty seconds, so a task that has just
+    /// become late, or a day that has just turned, shows without a click. Nothing runs otherwise.
+    fn clock_ticks(app: &App) -> Option<iced::Subscription<Message>> {
+        (app.screen == Screen::Tasks && app.pinned_clock.is_none()).then(|| {
+            iced::time::every(std::time::Duration::from_secs(20)).map(|_| Message::ClockTick)
+        })
     }
 
     #[allow(clippy::unused_self)]
@@ -1264,7 +1335,7 @@ impl App {
                     return Task::batch([follow, back]);
                 }
                 let text = self.body.text();
-                if let Some(next) = markdown::set_task_line(&text, line, done) {
+                if let Some((next, _)) = self.checked_or_advanced(&text, line, done) {
                     self.revise(Burst::Break, |app| {
                         let cursor = app.body.cursor();
                         app.body.load(&next);
@@ -1311,6 +1382,7 @@ impl App {
                 Task::none()
             }
             Message::ShowTasks => {
+                self.refresh_clock();
                 self.tasks_note_open = false;
                 self.rebuild_tasks();
                 self.screen = Screen::Tasks;
@@ -1809,11 +1881,10 @@ impl App {
                 if self.cal == Some(whose) {
                     self.cal = None;
                 } else {
-                    let chosen = match whose {
-                        CalFor::New => &self.new_due,
-                        CalFor::Edit => &self.task_due_text,
-                    };
-                    let shown = dates::Date::parse(chosen).unwrap_or_else(|| self.today());
+                    // Read the clock first, so the calendar opens on the day it really is.
+                    self.refresh_clock();
+                    let shown =
+                        dates::Date::parse(&self.draft(whose).date).unwrap_or(self.clock.today);
                     self.cal_month = (shown.year, shown.month);
                     self.cal = Some(whose);
                 }
@@ -1830,23 +1901,93 @@ impl App {
             }
             Message::PickDay(text) => {
                 // Only a day that exists is taken, so what is written is always a real date.
-                if dates::Date::parse(&text).is_some() {
-                    match self.cal {
-                        Some(CalFor::New) => self.new_due = text,
-                        Some(CalFor::Edit) => self.task_due_text = text,
-                        None => {}
-                    }
+                if dates::Date::parse(&text).is_some()
+                    && let Some(whose) = self.cal
+                {
+                    self.draft_mut(whose).date = text;
+                }
+                self.cal = None;
+                Task::none()
+            }
+            Message::PickQuick(days) => {
+                // Worked out here, after reading the clock, and not when the button was drawn.
+                self.refresh_clock();
+                if let Some(whose) = self.cal
+                    && let Some(day) = self.clock.today.plus_days(days)
+                {
+                    self.draft_mut(whose).date = day.to_string();
                 }
                 self.cal = None;
                 Task::none()
             }
             Message::ClearDue => {
-                match self.cal {
-                    Some(CalFor::New) => self.new_due.clear(),
-                    Some(CalFor::Edit) => self.task_due_text.clear(),
-                    None => {}
+                if let Some(whose) = self.cal {
+                    self.draft_mut(whose).clear();
                 }
                 self.cal = None;
+                Task::none()
+            }
+            Message::StepTime { hours, minutes } => {
+                if let Some(whose) = self.cal {
+                    self.refresh_clock();
+                    let today = self.clock.today;
+                    let draft = self.draft_mut(whose);
+                    if draft.date.is_empty() {
+                        draft.date = today.to_string();
+                    }
+                    // From the time there is, or from nine in the morning when there is none.
+                    let from = due::Time::parse(&draft.time).map_or(9 * 60, due::Time::minutes);
+                    let to = (i64::from(from) + i64::from(hours) * 60 + i64::from(minutes))
+                        .rem_euclid(24 * 60);
+                    draft.time = due::Time::new(
+                        u32::try_from(to / 60).unwrap_or(9),
+                        u32::try_from(to % 60).unwrap_or(0),
+                    )
+                    .map_or_else(String::new, |time| time.to_string());
+                }
+                Task::none()
+            }
+            Message::SetTime(text) => {
+                if let Some(whose) = self.cal {
+                    self.refresh_clock();
+                    let today = self.clock.today;
+                    let draft = self.draft_mut(whose);
+                    if text.is_empty() || due::Time::parse(&text).is_some() {
+                        if !text.is_empty() && draft.date.is_empty() {
+                            draft.date = today.to_string();
+                        }
+                        draft.time = text;
+                    }
+                }
+                Task::none()
+            }
+            Message::SetRepeat(repeat) => {
+                if let Some(whose) = self.cal {
+                    self.refresh_clock();
+                    let today = self.clock.today;
+                    let draft = self.draft_mut(whose);
+                    // A repeat needs a day to start from. Without one it starts today.
+                    if repeat.is_some() && draft.date.is_empty() {
+                        draft.date = today.to_string();
+                    }
+                    draft.repeat = repeat;
+                }
+                Task::none()
+            }
+            Message::RepeatEvery(delta) => {
+                if let Some(whose) = self.cal {
+                    let draft = self.draft_mut(whose);
+                    if let Some(repeat) = &mut draft.repeat
+                        && repeat.unit != due::Unit::Weekday
+                    {
+                        let every = i64::from(repeat.every) + i64::from(delta);
+                        repeat.every = u32::try_from(every.clamp(1, 99)).unwrap_or(1);
+                    }
+                }
+                Task::none()
+            }
+            Message::ClockTick => {
+                self.refresh_clock();
                 Task::none()
             }
             Message::ShowTaskView(view) => {
@@ -1920,9 +2061,7 @@ impl App {
                     .find(|task| task.note_id == id && task.line == line)
                     .map(|task| task.text.clone())
                     .unwrap_or_default();
-                markdown::due_day(&markdown::without_cites(&label))
-                    .unwrap_or("")
-                    .clone_into(&mut self.task_due_text);
+                self.edit_due = DueDraft::from_due(due::Due::of(&markdown::without_cites(&label)));
                 self.task_rename_text = markdown::task_words(&label);
                 self.task_rename = Some((id, line));
                 Task::none()
@@ -1935,7 +2074,7 @@ impl App {
             Message::CancelTaskEdit => {
                 self.task_rename = None;
                 self.task_rename_text.clear();
-                self.task_due_text.clear();
+                self.edit_due.clear();
                 Task::none()
             }
             Message::RemoveTask { id, line } => self.remove_listed_task(&id, line),
@@ -2292,12 +2431,11 @@ impl App {
     /// the notes with tasks are in, and the notes.
     fn task_sidebar(&self) -> iced::widget::Column<'_, Message> {
         let ink = self.ink();
-        let today = self.today();
         let count = |view: &TaskView| {
             self.tasks
                 .iter()
                 .filter(|task| {
-                    self.in_view(task, view, today)
+                    self.in_view(task, view)
                         && if *view == TaskView::Open
                             || matches!(view, TaskView::Group(_) | TaskView::Note(_))
                         {
@@ -2314,7 +2452,9 @@ impl App {
                 .color(ink.muted)
                 .width(Fill)
         };
-        let mut panel = column![label("Views")].spacing(2).width(Fill);
+        let mut panel = column![self.clock_block(), space().height(8), label("Views")]
+            .spacing(2)
+            .width(Fill);
         for (name, view) in [
             ("All open", TaskView::Open),
             ("Due today", TaskView::Today),
@@ -2383,6 +2523,39 @@ impl App {
             }
         }
         panel
+    }
+
+    /// What day and time it is, and in which zone, so that no date on the page is read against a
+    /// guess. It is the reading every date and every late task on this screen is worked out from.
+    fn clock_block(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let today = self.clock.today;
+        let month = dates::MONTHS
+            .get(usize::try_from(today.month.saturating_sub(1)).unwrap_or(0))
+            .copied()
+            .unwrap_or("");
+        let zone = if self.clock.zone.is_empty() {
+            self.clock.offset_label()
+        } else {
+            format!("{} ({})", self.clock.zone, self.clock.offset_label())
+        };
+        container(
+            column![
+                text(format!("{}, {month} {}", today.weekday_full(), today.day))
+                    .font(serif())
+                    .size(17),
+                text(format!(
+                    "{:02}:{:02} · {zone}",
+                    self.clock.minutes / 60,
+                    self.clock.minutes % 60
+                ))
+                .size(12)
+                .color(ink.muted),
+            ]
+            .spacing(2),
+        )
+        .padding([6, 8])
+        .into()
     }
 
     fn task_view_row(
@@ -2857,12 +3030,11 @@ impl App {
 
     fn task_groups(&self, ink: &Ink) -> Element<'_, Message> {
         let mut list = column![].spacing(14).width(Fill);
-        let today = self.today();
         let view = &self.task_view;
         let open: Vec<&TaskRow> = self
             .tasks
             .iter()
-            .filter(|task| !task.done && self.task_hit(task) && self.in_view(task, view, today))
+            .filter(|task| !task.done && self.task_hit(task) && self.in_view(task, view))
             .collect();
         // Done tasks sit under the open ones in the plain list, a group, or a note. In a view
         // about dates there are none, and in the Done view they are the list.
@@ -2877,7 +3049,7 @@ impl App {
                 task.done
                     && shows_done
                     && self.task_hit(task)
-                    && self.in_view(task, view, today)
+                    && self.in_view(task, view)
                     && (!self.hide_done || *view == TaskView::Done)
             })
             .collect();
@@ -2917,27 +3089,57 @@ impl App {
         list.into()
     }
 
-    fn today(&self) -> dates::Date {
-        self.pinned_today
-            .unwrap_or_else(|| clock::today(&self.tz, clock::now_ms()))
+    /// Read the clock and the zone again, and keep what it says. Called when the Tasks tab
+    /// opens, when the window comes back, every so often while the tab is up, and before
+    /// anything that writes a day. Returns whether the day, the minute, or the zone changed.
+    fn refresh_clock(&mut self) -> bool {
+        if self.pinned_clock.is_some() {
+            return false;
+        }
+        // The zone file is read each time, which is cheap, and parsed only when it is not the
+        // one already held, so a zone changed by moving or by the system is seen at once.
+        if let Some(found) = ambient_cli::host().time_zone() {
+            if !self.zone.is_from(&found.tzif) {
+                self.zone = zone::Zone::parse(&found.tzif).unwrap_or_else(zone::Zone::utc);
+            }
+            self.zone_name = found.name;
+        } else {
+            self.zone = zone::Zone::utc();
+            self.zone_name = None;
+        }
+        let now = clock::Clock::read(&self.zone, self.zone_name.as_deref(), clock::now_ms());
+        let changed = now != self.clock;
+        self.clock = now;
+        changed
     }
 
-    /// A task's due day, if it ends in one that exists.
-    fn due_of(task: &TaskRow) -> Option<dates::Date> {
-        markdown::due_day(&markdown::without_cites(&task.text)).and_then(dates::Date::parse)
+    fn draft(&self, whose: CalFor) -> &DueDraft {
+        match whose {
+            CalFor::New => &self.new_due,
+            CalFor::Edit => &self.edit_due,
+        }
+    }
+
+    fn draft_mut(&mut self, whose: CalFor) -> &mut DueDraft {
+        match whose {
+            CalFor::New => &mut self.new_due,
+            CalFor::Edit => &mut self.edit_due,
+        }
     }
 
     /// Whether a task belongs in the view. A done task is only in `Done`, `Group`, and `Note`
     /// and the plain list, so a date view is about what is still to do.
-    fn in_view(&self, task: &TaskRow, view: &TaskView, today: dates::Date) -> bool {
-        let due = Self::due_of(task);
+    fn in_view(&self, task: &TaskRow, view: &TaskView) -> bool {
+        let state = task
+            .due
+            .map(|due| due.state(self.clock.today, self.clock.minutes));
         match view {
             TaskView::Open => true,
             TaskView::Done => task.done,
-            TaskView::Today => !task.done && due == Some(today),
-            TaskView::Overdue => !task.done && due.is_some_and(|day| day < today),
-            TaskView::Upcoming => !task.done && due.is_some_and(|day| day > today),
-            TaskView::NoDate => !task.done && due.is_none(),
+            TaskView::Today => !task.done && state == Some(due::State::Today),
+            TaskView::Overdue => !task.done && state == Some(due::State::Late),
+            TaskView::Upcoming => !task.done && state == Some(due::State::Later),
+            TaskView::NoDate => !task.done && state.is_none(),
             TaskView::Group(key) => self
                 .catalog
                 .iter()
@@ -2975,15 +3177,11 @@ impl App {
         tools.into()
     }
 
-    /// The button that opens the calendar. It says which day is picked, or asks for one.
+    /// The button that opens the calendar. It says which moment is picked, or asks for one.
     fn due_button(&self, whose: CalFor, pad: f32) -> Element<'_, Message> {
-        let chosen = match whose {
-            CalFor::New => &self.new_due,
-            CalFor::Edit => &self.task_due_text,
-        };
-        let label = dates::Date::parse(chosen).map_or_else(
+        let label = self.draft(whose).due().map_or_else(
             || "Due date".to_owned(),
-            |day| format!("Due {}", day.short(self.today())),
+            |found| format!("Due {}", self.due_words(&found, true)),
         );
         button(text(label).size(14))
             .padding([pad, 12.0])
@@ -2992,15 +3190,36 @@ impl App {
             .into()
     }
 
-    /// A month to pick a day from, with the quick ones above it. The only way a due date gets
-    /// written, so it is always `YYYY-MM-DD` and always a day that exists.
+    /// A due moment for a person: `Today 14:30`, `Fri, Nov 27 · Every week`. With `short`, the day
+    /// is `Nov 27` and not `Fri, Nov 27`, and a day within the week is its name.
+    fn due_words(&self, found: &due::Due, short: bool) -> String {
+        let today = self.clock.today;
+        let mut words = if short {
+            found.date.short(today)
+        } else {
+            found.date.relative(today)
+        };
+        if short && (0..=5).contains(&(found.date.serial() - today.serial())) {
+            words = found.date.relative(today);
+        }
+        if let Some(time) = found.time {
+            words.push(' ');
+            words.push_str(&time.to_string());
+        }
+        if let Some(repeat) = found.repeat {
+            words.push_str(" · ");
+            words.push_str(&repeat.label());
+        }
+        words
+    }
+
+    /// A month to pick a day from, with a time and a repeat under it. The only way a due moment
+    /// gets written, so it is always in the one form and always a day that exists.
     fn calendar_card(&self, whose: CalFor) -> Element<'_, Message> {
         let ink = self.ink();
-        let today = self.today();
-        let chosen = dates::Date::parse(match whose {
-            CalFor::New => &self.new_due,
-            CalFor::Edit => &self.task_due_text,
-        });
+        let today = self.clock.today;
+        let draft = self.draft(whose);
+        let chosen = dates::Date::parse(&draft.date);
         let (year, month) = self.cal_month;
         let name = dates::MONTHS
             .get(usize::try_from(month.saturating_sub(1)).unwrap_or(0))
@@ -3018,12 +3237,9 @@ impl App {
             .style(ghost_style)
         };
         let quick = |label: &'static str, days: i64| {
-            let target = today
-                .plus_days(days)
-                .map_or_else(String::new, |day| day.to_string());
             button(text(label).size(12))
                 .padding([4, 8])
-                .on_press(Message::PickDay(target))
+                .on_press(Message::PickQuick(days))
                 .style(ghost_style)
         };
         let mut card = column![
@@ -3059,18 +3275,168 @@ impl App {
         for week in dates::month_grid(year, month) {
             card = card.push(Self::calendar_week(&week, chosen, today));
         }
-        card = card.push(row![
-            space().width(Fill),
-            button(text("Close").size(12))
-                .padding([4, 8])
-                .on_press(Message::CloseCalendar)
-                .style(ghost_style),
-        ]);
+        card = card
+            .push(hairline())
+            .push(self.calendar_time_row(draft))
+            .push(self.calendar_repeat_rows(draft))
+            .push(
+                row![
+                    text(format!(
+                        "{} {} · {}",
+                        today.relative(today),
+                        format_args!(
+                            "{:02}:{:02}",
+                            self.clock.minutes / 60,
+                            self.clock.minutes % 60
+                        ),
+                        self.clock.offset_label()
+                    ))
+                    .size(11)
+                    .color(ink.muted),
+                    space().width(Fill),
+                    button(text("Done").size(12))
+                        .padding([4, 8])
+                        .on_press(Message::CloseCalendar)
+                        .style(ghost_style),
+                ]
+                .align_y(iced::Alignment::Center),
+            );
         container(card)
             .width(iced::Length::Shrink)
             .padding(12)
             .style(card_style)
             .into()
+    }
+
+    /// Hours and minutes to step, or a few usual times when there is none.
+    fn calendar_time_row(&self, draft: &DueDraft) -> Element<'_, Message> {
+        let ink = self.ink();
+        let small = |label: String, message: Message| {
+            button(text(label).size(12))
+                .padding([4, 8])
+                .on_press(message)
+                .style(ghost_style)
+        };
+        let head = text("TIME").size(11).color(ink.muted).width(44);
+        let Some(time) = due::Time::parse(&draft.time) else {
+            return row![
+                head,
+                small("09:00".to_owned(), Message::SetTime("09:00".to_owned())),
+                small("12:00".to_owned(), Message::SetTime("12:00".to_owned())),
+                small("17:00".to_owned(), Message::SetTime("17:00".to_owned())),
+                text("none").size(12).color(ink.muted),
+            ]
+            .spacing(2)
+            .align_y(iced::Alignment::Center)
+            .into();
+        };
+        row![
+            head,
+            small(
+                "‹".to_owned(),
+                Message::StepTime {
+                    hours: -1,
+                    minutes: 0
+                }
+            ),
+            text(format!("{:02}", time.hour)).size(14),
+            small(
+                "›".to_owned(),
+                Message::StepTime {
+                    hours: 1,
+                    minutes: 0
+                }
+            ),
+            text(":").size(14),
+            small(
+                "‹".to_owned(),
+                Message::StepTime {
+                    hours: 0,
+                    minutes: -5
+                }
+            ),
+            text(format!("{:02}", time.minute)).size(14),
+            small(
+                "›".to_owned(),
+                Message::StepTime {
+                    hours: 0,
+                    minutes: 5
+                }
+            ),
+            space().width(Fill),
+            small("No time".to_owned(), Message::SetTime(String::new())),
+        ]
+        .spacing(2)
+        .align_y(iced::Alignment::Center)
+        .into()
+    }
+
+    /// How often it comes round: never, or a unit, and how many of the unit.
+    fn calendar_repeat_rows(&self, draft: &DueDraft) -> Element<'_, Message> {
+        let ink = self.ink();
+        let mut choices = row![text("REPEAT").size(11).color(ink.muted).width(44)]
+            .spacing(2)
+            .align_y(iced::Alignment::Center);
+        let units = [
+            ("Never", None),
+            ("Daily", Some(due::Unit::Day)),
+            ("Weekdays", Some(due::Unit::Weekday)),
+            ("Weekly", Some(due::Unit::Week)),
+            ("Monthly", Some(due::Unit::Month)),
+            ("Yearly", Some(due::Unit::Year)),
+        ];
+        for (label, unit) in units {
+            let chosen = draft.repeat.map(|repeat| repeat.unit) == unit;
+            // Changing the unit keeps how many, except weekdays, which is only ever every one.
+            let every = draft.repeat.map_or(1, |repeat| repeat.every);
+            let make = unit.map(|unit| due::Repeat {
+                every: if unit == due::Unit::Weekday { 1 } else { every },
+                unit,
+            });
+            choices = choices.push(
+                button(text(label).size(12))
+                    .padding([4, 6])
+                    .on_press(Message::SetRepeat(make))
+                    .style(list_row(chosen)),
+            );
+        }
+        let mut rows = column![choices].spacing(4);
+        if let Some(repeat) = draft
+            .repeat
+            .filter(|repeat| repeat.unit != due::Unit::Weekday)
+        {
+            let plural = match repeat.unit {
+                due::Unit::Week => "weeks",
+                due::Unit::Month => "months",
+                due::Unit::Year => "years",
+                _ => "days",
+            };
+            let small = |label: &'static str, delta: i32| {
+                button(text(label).size(12))
+                    .padding([4, 8])
+                    .on_press(Message::RepeatEvery(delta))
+                    .style(ghost_style)
+            };
+            rows = rows.push(
+                row![
+                    space().width(44),
+                    text("every").size(12).color(ink.muted),
+                    small("‹", -1),
+                    text(repeat.every.to_string()).size(14),
+                    small("›", 1),
+                    text(if repeat.every == 1 {
+                        plural.trim_end_matches('s')
+                    } else {
+                        plural
+                    })
+                    .size(12)
+                    .color(ink.muted),
+                ]
+                .spacing(4)
+                .align_y(iced::Alignment::Center),
+            );
+        }
+        rows.into()
     }
 
     /// One row of the calendar: seven days, the picked one filled and today outlined.
@@ -3149,6 +3515,25 @@ impl App {
         task.text.to_lowercase().contains(&query) || task.note_title.to_lowercase().contains(&query)
     }
 
+    /// The line under a task that says when it is due, and whether that has passed. A late one is
+    /// in the one color the window has for that, and says so in words too.
+    fn due_line(&self, found: &due::Due, done: bool) -> Element<'_, Message> {
+        let ink = self.ink();
+        let late = !done && found.state(self.clock.today, self.clock.minutes) == due::State::Late;
+        let words = self.due_words(found, false);
+        if late {
+            text(format!("Overdue · {words}"))
+                .size(12)
+                .color(OVERDUE)
+                .into()
+        } else {
+            text(format!("Due {words}"))
+                .size(12)
+                .color(ink.muted)
+                .into()
+        }
+    }
+
     fn task_row(&self, task: &TaskRow) -> Element<'_, Message> {
         let ink = self.ink();
         let id = task.note_id.clone();
@@ -3178,7 +3563,6 @@ impl App {
             .align_y(iced::Alignment::Center)
             .into()
         } else {
-            let plain = markdown::without_cites(&task.text);
             let words_text = markdown::task_words(&task.text);
             let label = if words_text.is_empty() {
                 "Empty task".to_owned()
@@ -3188,8 +3572,8 @@ impl App {
             let mut lines = column![text(label).size(16).color(words)]
                 .spacing(2)
                 .width(Fill);
-            if let Some(day) = markdown::due_day(&plain) {
-                lines = lines.push(text(format!("Due {day}")).size(12).color(ink.muted));
+            if let Some(found) = task.due {
+                lines = lines.push(self.due_line(&found, task.done));
             }
             lines = lines.push(text(title).size(12).color(ink.muted));
             button(lines)
@@ -3302,16 +3686,11 @@ impl App {
         rows.sort_by(|left, right| {
             left.done
                 .cmp(&right.done)
-                .then_with(|| {
-                    match (
-                        markdown::due_day(&left.text),
-                        markdown::due_day(&right.text),
-                    ) {
-                        (Some(earlier), Some(later)) => earlier.cmp(later),
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (None, None) => std::cmp::Ordering::Equal,
-                    }
+                .then_with(|| match (left.due, right.due) {
+                    (Some(earlier), Some(later)) => earlier.key().cmp(&later.key()),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
                 })
                 .then_with(|| left.note_title.cmp(&right.note_title))
                 .then_with(|| left.line.cmp(&right.line))
@@ -3339,6 +3718,41 @@ impl App {
         Some((head.body.clone(), shown.conflict, head.title.clone()))
     }
 
+    /// The note's text with this task checked or unchecked. A task that repeats is not checked
+    /// off: it is set for its next day and left open, so it comes back when it is due. The second
+    /// part is that next moment, when it was moved.
+    fn checked_or_advanced(
+        &mut self,
+        body: &str,
+        line: usize,
+        done: bool,
+    ) -> Option<(String, Option<due::Due>)> {
+        if done {
+            let found = markdown::task_lines(body)
+                .into_iter()
+                .find(|task| task.line == line && !task.done);
+            let current = found
+                .as_ref()
+                .and_then(|task| due::Due::of(&markdown::without_cites(&task.text)))
+                .filter(|current| current.repeat.is_some());
+            if let (Some(task), Some(current)) = (found, current) {
+                // Read the clock first: "the next one after today" has to mean the real today.
+                self.refresh_clock();
+                if let Some(moved) = current.advanced(self.clock.today) {
+                    let mut label =
+                        due::Due::write(&markdown::task_words(&task.text), Some(&moved));
+                    for mark in markdown::cite_marks(&task.text) {
+                        label.push(' ');
+                        label.push_str(&mark);
+                    }
+                    return markdown::rename_task_line(body, line, &label)
+                        .map(|next| (next, Some(moved)));
+                }
+            }
+        }
+        markdown::set_task_line(body, line, done).map(|next| (next, None))
+    }
+
     fn set_task(&mut self, id: &str, line: usize, done: bool) -> Task<Message> {
         let Some((body, conflict, title)) = self.task_source(id) else {
             self.say("That note is not here.");
@@ -3349,9 +3763,13 @@ impl App {
             self.say("Two versions. Write the one you want to keep, then save.");
             return Task::none();
         }
-        let Some(next) = markdown::set_task_line(&body, line, done) else {
+        let Some((next, moved)) = self.checked_or_advanced(&body, line, done) else {
             return Task::none();
         };
+        if let Some(moved) = moved {
+            let words = self.due_words(&moved, false);
+            self.say(&format!("Done. It repeats: next {words}."));
+        }
         self.put_note_text(id, &title, &next)
     }
 
@@ -3366,16 +3784,12 @@ impl App {
             .find(|task| task.note_id == id && task.line == line)
             .map(|task| markdown::cite_marks(&task.text))
             .unwrap_or_default();
-        if label.trim().is_empty() && self.task_due_text.trim().is_empty() {
+        let due = self.edit_due.due();
+        if label.trim().is_empty() && due.is_none() {
             self.say("Write the task first.");
             return Task::none();
         }
-        let due = self.task_due_text.trim();
-        if !due.is_empty() && !markdown::is_due_day(due) {
-            self.say("Use a date like 2026-11-20.");
-            return Task::none();
-        }
-        let mut label = markdown::join_due(&label, due);
+        let mut label = due::Due::write(&label, due.as_ref());
         for mark in marks {
             label.push(' ');
             label.push_str(&mark);
@@ -3391,7 +3805,7 @@ impl App {
         }
         self.task_rename = None;
         self.task_rename_text.clear();
-        self.task_due_text.clear();
+        self.edit_due.clear();
         let Some(next) = markdown::rename_task_line(&body, line, &label) else {
             return Task::none();
         };
@@ -6519,7 +6933,7 @@ impl App {
         let dir = self.dir.clone();
         let name = format!(
             "aerodash-{}",
-            clock::stamp(clock::now_ms(), &clock::load_tz())
+            clock::stamp(clock::now_ms(), &clock::load_zone().0)
         );
         Task::perform(
             async move {
@@ -7010,7 +7424,7 @@ impl App {
             return Task::none();
         }
         // The date goes last among the words, ahead of a cite, which is where a due day is read.
-        label = markdown::join_due(&label, &self.new_due);
+        label = due::Due::write(&label, self.new_due.due().as_ref());
         if let Some((id, title)) = self.task_cite.clone() {
             let title = title.replace(['|', '[', ']'], "");
             label = format!("{label} [[{id}|{title}]]");
@@ -7588,7 +8002,7 @@ impl App {
         self.chat_query.clear();
         self.hide_done = false;
         self.confirm_clear = false;
-        self.task_due_text.clear();
+        self.edit_due.clear();
         self.find_open = false;
         self.find_query.clear();
         self.find_at = usize::MAX;
@@ -7959,7 +8373,7 @@ impl App {
         let last = if self.backup_at == 0 {
             text("No backup yet.").size(14).color(warn)
         } else {
-            let when = clock::when(Some(self.backup_at), &clock::load_tz(), clock::now_ms());
+            let when = clock::when(Some(self.backup_at), &clock::load_zone().0, clock::now_ms());
             text(format!("Last backup: {}, {}.", when.day, when.time))
                 .size(14)
                 .color(ink.muted)
@@ -8150,7 +8564,7 @@ fn chat_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn bubbles(lines: Vec<ambient_cli::ChatMessage>) -> Vec<ChatBubble> {
-    let tz = clock::load_tz();
+    let tz = clock::load_zone().0;
     let now = clock::now_ms();
     lines
         .into_iter()
@@ -9137,6 +9551,14 @@ impl GraphView {
     }
 }
 
+/// The color of a task that is late. The only status color the window has so far.
+const OVERDUE: Color = Color {
+    r: 0.86,
+    g: 0.36,
+    b: 0.31,
+    a: 1.0,
+};
+
 const GRAPH_SHADES: [Color; 6] = [
     Color {
         r: 0.38,
@@ -9584,6 +10006,7 @@ fn push_tasks(rows: &mut Vec<TaskRow>, id: &str, title: &str, body: &str) {
             note_title: title.to_owned(),
             line: task.line,
             done: task.done,
+            due: due::Due::of(&markdown::without_cites(&task.text)),
             text: task.text,
         });
     }
@@ -12229,9 +12652,17 @@ mod app_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn pinned(app: &mut App) -> super::dates::Date {
+    /// Fix the clock at 2026-11-20 in Los Angeles, at this minute of the day.
+    fn pinned(app: &mut App, minutes: u32) -> super::dates::Date {
         let today = super::dates::Date::new(2026, 11, 20).expect("a day");
-        app.pinned_today = Some(today);
+        let clock = super::clock::Clock {
+            today,
+            minutes,
+            offset: -8 * 3_600,
+            zone: "America/Los_Angeles".to_owned(),
+        };
+        app.clock = clock.clone();
+        app.pinned_clock = Some(clock);
         today
     }
 
@@ -12241,6 +12672,7 @@ mod app_tests {
             note_title: id.to_owned(),
             line,
             done,
+            due: super::due::Due::of(&super::markdown::without_cites(text)),
             text: text.to_owned(),
         }
     }
@@ -12251,7 +12683,7 @@ mod app_tests {
         let _turn = one_at_a_time();
         let dir = folder("task-views");
         let mut app = open_app(&dir);
-        let today = pinned(&mut app);
+        pinned(&mut app, 10 * 60);
         app.catalog = vec![summary("plan", &["Novel/Part 1"]), summary("home", &[])];
         app.tasks = vec![
             task_row("plan", 0, false, "late 2026-11-01"),
@@ -12262,39 +12694,41 @@ mod app_tests {
             task_row("home", 3, false, "impossible 2026-02-30"),
             task_row("plan", 2, false, "cited 2026-11-20 [[abc|Plan]]"),
         ];
-        let ids = |view: &TaskView| -> Vec<String> {
+        let ids = |app: &App, view: &TaskView| -> Vec<String> {
             app.tasks
                 .iter()
-                .filter(|task| app.in_view(task, view, today))
+                .filter(|task| app.in_view(task, view))
                 .map(|task| format!("{}{}", task.note_id, task.line))
                 .collect()
         };
         assert_eq!(
-            ids(&TaskView::Today),
+            ids(&app, &TaskView::Today),
             ["plan1", "plan2"],
             "a cite after the date still counts"
         );
         assert_eq!(
-            ids(&TaskView::Overdue),
+            ids(&app, &TaskView::Overdue),
             ["plan0"],
             "done ones are not overdue"
         );
-        assert_eq!(ids(&TaskView::Upcoming), ["home0"]);
+        assert_eq!(ids(&app, &TaskView::Upcoming), ["home0"]);
         assert_eq!(
-            ids(&TaskView::NoDate),
+            ids(&app, &TaskView::NoDate),
             ["home1", "home3"],
             "a date that does not exist is no date"
         );
-        assert_eq!(ids(&TaskView::Done), ["home2"]);
-        assert_eq!(ids(&TaskView::Note("home".to_owned())).len(), 4);
+        assert_eq!(ids(&app, &TaskView::Done), ["home2"]);
+        assert_eq!(ids(&app, &TaskView::Note("home".to_owned())).len(), 4);
         assert_eq!(
-            ids(&TaskView::Group("novel".to_owned())),
+            ids(&app, &TaskView::Group("novel".to_owned())),
             ["plan0", "plan1", "plan2"],
             "a group has the tasks of its notes, and so does the group above it"
         );
-        assert_eq!(ids(&TaskView::Group("novel/part 1".to_owned())).len(), 3);
-        assert!(ids(&TaskView::Group("other".to_owned())).is_empty());
-        // Every view draws, and the panel lists the three kinds of way to look.
+        assert_eq!(
+            ids(&app, &TaskView::Group("novel/part 1".to_owned())).len(),
+            3
+        );
+        assert!(ids(&app, &TaskView::Group("other".to_owned())).is_empty());
         for view in [
             TaskView::Open,
             TaskView::Today,
@@ -12320,16 +12754,53 @@ mod app_tests {
     }
 
     #[test]
+    fn a_task_with_a_time_turns_late_in_its_minute_and_moves_views_with_the_clock() {
+        use super::TaskView;
+        let _turn = one_at_a_time();
+        let dir = folder("task-late");
+        let mut app = open_app(&dir);
+        pinned(&mut app, 10 * 60);
+        app.tasks = vec![
+            task_row("n", 0, false, "early 2026-11-20 09:00"),
+            task_row("n", 1, false, "later 2026-11-20 11:00"),
+            task_row("n", 2, false, "all day 2026-11-20"),
+        ];
+        let now = |app: &App, view: &TaskView| -> Vec<usize> {
+            app.tasks
+                .iter()
+                .filter(|task| app.in_view(task, view))
+                .map(|task| task.line)
+                .collect()
+        };
+        assert_eq!(now(&app, &TaskView::Overdue), [0], "nine is past at ten");
+        assert_eq!(now(&app, &TaskView::Today), [1, 2]);
+        // Two hours on: the eleven has passed, the day with no time has not.
+        pinned(&mut app, 12 * 60);
+        assert_eq!(now(&app, &TaskView::Overdue), [0, 1]);
+        assert_eq!(now(&app, &TaskView::Today), [2]);
+        // At the end of the day it is still today, and a minute into the next it is late.
+        pinned(&mut app, 23 * 60 + 59);
+        assert_eq!(now(&app, &TaskView::Today), [2]);
+        app.clock.today = super::dates::Date::new(2026, 11, 21).expect("a day");
+        app.clock.minutes = 1;
+        assert_eq!(now(&app, &TaskView::Overdue), [0, 1, 2]);
+        assert!(now(&app, &TaskView::Today).is_empty());
+        // The panel says what day and time it is, and where, and the lines say what is late.
+        let _ = app.update(Message::ShowTasks);
+        drop(app.view());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_calendar_writes_a_real_date_in_the_one_form() {
         use super::CalFor;
         let _turn = one_at_a_time();
         let dir = folder("calendar");
         let mut app = open_app(&dir);
         wide(&mut app);
-        pinned(&mut app);
+        pinned(&mut app, 10 * 60);
         let _ = app.update(Message::ShowTasks);
         drop(app.view());
-        // Opens on this month, steps by month across the year, and draws each time.
         let _ = app.update(Message::OpenCalendar(CalFor::New));
         assert_eq!(app.cal, Some(CalFor::New));
         assert_eq!(app.cal_month, (2026, 11));
@@ -12338,39 +12809,145 @@ mod app_tests {
         assert_eq!(app.cal_month, (2027, 1));
         drop(app.view());
         let _ = app.update(Message::PickDay("2027-01-09".to_owned()));
-        assert_eq!(app.new_due, "2027-01-09");
+        assert_eq!(app.new_due.date, "2027-01-09");
         assert!(app.cal.is_none(), "choosing a day shuts it");
         // Something that is not a day is not taken.
         let _ = app.update(Message::OpenCalendar(CalFor::New));
         let _ = app.update(Message::PickDay("2027-02-30".to_owned()));
-        assert_eq!(app.new_due, "2027-01-09");
+        assert_eq!(app.new_due.date, "2027-01-09");
+        let _ = app.update(Message::OpenCalendar(CalFor::New));
         let _ = app.update(Message::PickDay("tomorrow".to_owned()));
-        assert_eq!(app.new_due, "2027-01-09");
-        // Opening it again shows the month of the day already picked, and the button asks again.
+        assert_eq!(app.new_due.date, "2027-01-09");
+        // Opening it again shows the month of the day already picked, and the button shuts it.
         let _ = app.update(Message::OpenCalendar(CalFor::New));
         assert_eq!(app.cal_month, (2027, 1));
         let _ = app.update(Message::OpenCalendar(CalFor::New));
-        assert!(app.cal.is_none(), "the button shuts it too");
-        // Clearing.
+        assert!(app.cal.is_none());
+        // The quick ones count from the real today, worked out when they are pressed.
         let _ = app.update(Message::OpenCalendar(CalFor::New));
-        let _ = app.update(Message::ClearDue);
-        assert!(app.new_due.is_empty());
+        let _ = app.update(Message::PickQuick(1));
+        assert_eq!(app.new_due.date, "2026-11-21");
+        let _ = app.update(Message::OpenCalendar(CalFor::New));
+        let _ = app.update(Message::PickQuick(7));
+        assert_eq!(app.new_due.date, "2026-11-27");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn a_task_added_with_a_date_ends_in_the_date_and_the_date_is_cleared_after() {
+    fn the_calendar_sets_a_time_and_a_repeat_and_keeps_them_in_step_with_the_day() {
         use super::CalFor;
+        use super::due::{Repeat, Time, Unit};
+        let _turn = one_at_a_time();
+        let dir = folder("calendar-time");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        pinned(&mut app, 10 * 60);
+        let _ = app.update(Message::ShowTasks);
+        let _ = app.update(Message::OpenCalendar(CalFor::New));
+        // Stepping a time with no day starts at nine and sets today.
+        let _ = app.update(Message::StepTime {
+            hours: 0,
+            minutes: 0,
+        });
+        assert_eq!(
+            (app.new_due.date.as_str(), app.new_due.time.as_str()),
+            ("2026-11-20", "09:00")
+        );
+        let _ = app.update(Message::StepTime {
+            hours: 1,
+            minutes: 5,
+        });
+        assert_eq!(app.new_due.time, "10:05");
+        // Past midnight wraps, both ways, and never makes a time that does not exist.
+        let _ = app.update(Message::StepTime {
+            hours: 14,
+            minutes: 0,
+        });
+        assert_eq!(app.new_due.time, "00:05");
+        let _ = app.update(Message::StepTime {
+            hours: 0,
+            minutes: -10,
+        });
+        assert_eq!(app.new_due.time, "23:55");
+        let _ = app.update(Message::SetTime("17:00".to_owned()));
+        assert_eq!(app.new_due.time, "17:00");
+        let _ = app.update(Message::SetTime("25:99".to_owned()));
+        assert_eq!(
+            app.new_due.time, "17:00",
+            "a time that is not one is not taken"
+        );
+        drop(app.view());
+        // A repeat keeps the day, picks one when there is none, and keeps how many.
+        let _ = app.update(Message::SetRepeat(Some(Repeat {
+            every: 1,
+            unit: Unit::Week,
+        })));
+        let _ = app.update(Message::RepeatEvery(1));
+        let _ = app.update(Message::RepeatEvery(1));
+        assert_eq!(app.new_due.repeat.map(|repeat| repeat.every), Some(3));
+        let _ = app.update(Message::RepeatEvery(500));
+        assert_eq!(
+            app.new_due.repeat.map(|repeat| repeat.every),
+            Some(99),
+            "at most 99"
+        );
+        let _ = app.update(Message::RepeatEvery(-500));
+        assert_eq!(
+            app.new_due.repeat.map(|repeat| repeat.every),
+            Some(1),
+            "at least one"
+        );
+        let _ = app.update(Message::RepeatEvery(2));
+        drop(app.view());
+        assert_eq!(
+            app.new_due.due().map(|due| due.time),
+            Some(Time::new(17, 0))
+        );
+        // Weekdays is only ever every one.
+        let _ = app.update(Message::SetRepeat(Some(Repeat {
+            every: 1,
+            unit: Unit::Weekday,
+        })));
+        let _ = app.update(Message::RepeatEvery(4));
+        assert_eq!(app.new_due.repeat.map(|repeat| repeat.every), Some(1));
+        drop(app.view());
+        // No date takes the time and the repeat with it.
+        let _ = app.update(Message::ClearDue);
+        assert_eq!(app.new_due, super::DueDraft::default());
+        // A repeat with no day starts today.
+        let _ = app.update(Message::OpenCalendar(CalFor::New));
+        let _ = app.update(Message::SetRepeat(Some(Repeat {
+            every: 1,
+            unit: Unit::Day,
+        })));
+        assert_eq!(app.new_due.date, "2026-11-20");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_task_added_with_a_moment_ends_in_it_and_a_repeating_one_is_moved_not_checked() {
+        use super::CalFor;
+        use super::due::{Repeat, Unit};
         let _turn = one_at_a_time();
         let dir = folder("task-date");
         let mut app = open_app(&dir);
-        pinned(&mut app);
+        pinned(&mut app, 10 * 60);
         let _ = app.update(Message::ShowTasks);
         let _ = app.update(Message::TaskDraft("buy milk".to_owned()));
         let _ = app.update(Message::OpenCalendar(CalFor::New));
         let _ = app.update(Message::PickDay("2026-11-21".to_owned()));
+        let _ = app.update(Message::OpenCalendar(CalFor::New));
+        let _ = app.update(Message::SetTime("08:30".to_owned()));
+        let _ = app.update(Message::SetRepeat(Some(Repeat {
+            every: 1,
+            unit: Unit::Week,
+        })));
         let _ = app.update(Message::AddTask);
-        assert!(app.new_due.is_empty(), "the next task starts with no date");
+        assert_eq!(
+            app.new_due,
+            super::DueDraft::default(),
+            "the next task starts with nothing"
+        );
         assert!(app.task_draft.is_empty());
         settle(&mut app);
         let task = app
@@ -12379,23 +12956,76 @@ mod app_tests {
             .find(|task| task.text.starts_with("buy milk"));
         assert_eq!(
             task.map(|task| task.text.as_str()),
-            Some("buy milk 2026-11-21")
+            Some("buy milk 2026-11-21 08:30 repeat:weekly")
         );
         assert!(
-            task.is_some_and(|task| super::App::due_of(task).is_some()),
-            "and it reads back as a due day"
+            task.is_some_and(|task| task.due.is_some()),
+            "and it reads back"
         );
-        // A second task, with no date, has none.
+        // A plain one has none.
         let _ = app.update(Message::TaskDraft("call".to_owned()));
         let _ = app.update(Message::AddTask);
         settle(&mut app);
-        let plain = app.tasks.iter().find(|task| task.text == "call");
         assert!(
-            plain.is_some(),
-            "{:?}",
-            app.tasks.iter().map(|t| &t.text).collect::<Vec<_>>()
+            app.tasks
+                .iter()
+                .any(|task| task.text == "call" && task.due.is_none())
         );
-        // Changing the date of one already there goes through the same calendar.
+        // Checking the repeating one moves it a week on, and leaves it open.
+        let (id, line) = app
+            .tasks
+            .iter()
+            .find(|task| task.text.starts_with("buy milk"))
+            .map(|task| (task.note_id.clone(), task.line))
+            .expect("task");
+        let _ = app.update(Message::SetTask {
+            id: id.clone(),
+            line,
+            done: true,
+        });
+        settle(&mut app);
+        let milk = app
+            .tasks
+            .iter()
+            .find(|task| task.text.starts_with("buy milk"))
+            .expect("still here");
+        assert!(!milk.done, "it is not checked off");
+        assert_eq!(milk.text, "buy milk 2026-11-28 08:30 repeat:weekly");
+        assert!(app.message.contains("next"), "{}", app.message);
+        // One that does not repeat is checked as before.
+        let (id, line) = app
+            .tasks
+            .iter()
+            .find(|task| task.text == "call")
+            .map(|task| (task.note_id.clone(), task.line))
+            .expect("task");
+        let _ = app.update(Message::SetTask {
+            id,
+            line,
+            done: true,
+        });
+        settle(&mut app);
+        assert!(
+            app.tasks
+                .iter()
+                .any(|task| task.text == "call" && task.done)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_moment_of_a_task_already_there_is_changed_through_the_same_calendar() {
+        use super::CalFor;
+        let _turn = one_at_a_time();
+        let dir = folder("task-edit-date");
+        let mut app = open_app(&dir);
+        pinned(&mut app, 10 * 60);
+        let _ = app.update(Message::ShowTasks);
+        let _ = app.update(Message::TaskDraft(
+            "buy milk 2026-11-28 08:30 repeat:weekly".to_owned(),
+        ));
+        let _ = app.update(Message::AddTask);
+        settle(&mut app);
         let (id, line) = app
             .tasks
             .iter()
@@ -12403,17 +13033,19 @@ mod app_tests {
             .map(|task| (task.note_id.clone(), task.line))
             .expect("task");
         let _ = app.update(Message::BeginTaskEdit { id, line });
-        assert_eq!(app.task_due_text, "2026-11-21");
+        assert_eq!(app.edit_due.date, "2026-11-28");
+        assert_eq!(app.edit_due.time, "08:30");
         let _ = app.update(Message::OpenCalendar(CalFor::Edit));
         let _ = app.update(Message::PickDay("2026-12-01".to_owned()));
-        assert_eq!(app.task_due_text, "2026-12-01");
+        let _ = app.update(Message::OpenCalendar(CalFor::Edit));
+        let _ = app.update(Message::SetRepeat(None));
         drop(app.view());
         let _ = app.update(Message::CommitTaskRename);
         settle(&mut app);
         assert!(
             app.tasks
                 .iter()
-                .any(|task| task.text == "buy milk 2026-12-01")
+                .any(|task| task.text == "buy milk 2026-12-01 08:30")
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

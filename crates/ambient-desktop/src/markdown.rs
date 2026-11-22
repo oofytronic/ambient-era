@@ -2106,26 +2106,9 @@ pub(super) fn move_task_line(body: &str, line_index: usize, up: bool) -> Option<
     (out != body).then_some(out)
 }
 
-/// A trailing `YYYY-MM-DD` on a task label. It is still the words of the line.
-pub(super) fn due_day(label: &str) -> Option<&str> {
-    let token = label.split_whitespace().last()?;
-    is_due_day(token).then_some(token)
-}
-
-pub(super) fn is_due_day(token: &str) -> bool {
-    // A day that exists, in the one form the calendar writes. `2026-02-30` is not a due day.
-    crate::dates::Date::parse(token).is_some()
-}
-
-/// The label without a trailing due day or a note citation.
+/// The label without its due day, time, and repeat, or a note citation.
 pub(super) fn task_words(label: &str) -> String {
-    let label = without_cites(label);
-    match due_day(&label) {
-        Some(day) => label[..label.len().saturating_sub(day.len())]
-            .trim()
-            .to_owned(),
-        None => label.trim().to_owned(),
-    }
+    crate::due::Due::split(&without_cites(label)).0.to_owned()
 }
 
 /// The task label with `[[...]]` citations removed and the gaps collapsed.
@@ -2195,18 +2178,6 @@ fn cite_spans(label: &str) -> Vec<(usize, usize)> {
         from = end;
     }
     spans
-}
-
-pub(super) fn join_due(words: &str, due: &str) -> String {
-    let words = words.trim().replace(['\n', '\r'], " ");
-    let due = due.trim();
-    if due.is_empty() {
-        words
-    } else if words.is_empty() {
-        due.to_owned()
-    } else {
-        format!("{words} {due}")
-    }
 }
 
 /// Byte starts of `query` in `text`. ASCII case is ignored. Empty when there is no query.
@@ -6570,12 +6541,14 @@ mod tests {
     }
 
     #[test]
-    fn a_trailing_date_is_the_due_day() {
-        assert_eq!(super::due_day("call 2026-11-20"), Some("2026-11-20"));
-        assert!(super::due_day("call tomorrow").is_none());
+    fn the_words_of_a_task_leave_out_when_it_is_due_and_what_it_cites() {
         assert_eq!(super::task_words("call 2026-11-20"), "call");
-        assert_eq!(super::join_due("call", "2026-11-20"), "call 2026-11-20");
-        assert_eq!(super::join_due("call", ""), "call");
+        assert_eq!(super::task_words("call tomorrow"), "call tomorrow");
+        assert_eq!(super::task_words("call 2026-11-20 14:30"), "call");
+        assert_eq!(
+            super::task_words("water 2026-11-20 08:00 repeat:weekly"),
+            "water"
+        );
         assert_eq!(super::task_words("call [[abcd|Clinic]] 2026-11-20"), "call");
         assert_eq!(
             super::task_cites("call [[abcd|Clinic]]"),

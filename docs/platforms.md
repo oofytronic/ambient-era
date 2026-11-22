@@ -14,7 +14,7 @@ A folder made on one platform opens on another. The format, the specs, and the v
 
 ## The host
 
-`Host` answers six things: the home folder, the program's data folder, whether the system is dark, open a file, open a link, and choose a file. `host()` returns the one in use. It starts as the host for the system this was built for, and a platform shell replaces it with `set_host` before anything else runs.
+`Host` answers seven things: the home folder, the program's data folder, the time zone, whether the system is dark, open a file, open a link, and choose a file. `host()` returns the one in use. It starts as the host for the system this was built for, and a platform shell replaces it with `set_host` before anything else runs.
 
 | Host | For | State |
 |:--|:--|:--|
@@ -36,7 +36,7 @@ The host holds no notes, keys, or text. It is given a path or a link and answers
 
 ## What still ties the notebook to Linux, and what is left
 
-- **`/etc/localtime`** is read by `clock::load_tz` for the time zone, and `clock.rs` parses the file itself. It works on macOS. It would not on Windows, and a native shell would hand the zone over instead. It belongs behind `Host`.
+- **The time zone** is asked of `Host::time_zone`, which gives the bytes of a `TZif` file and a name. The Unix and Mac hosts read `/etc/localtime`. A host with no such file gives none, and the window uses UTC. A native shell can build the same bytes, or the window could take an offset table, if its system gives no file. The parser is `zone.rs` in the window and does not know where the bytes came from.
 - **`/dev/urandom`** names a file in `files.rs` (`fresh_id`). It works on macOS. It would not on Windows, and an iPhone app may not be allowed to open it. It should use `getrandom`, which `ambient-cli` already depends on.
 - **`ambient-cli` is a client library, not the core.** [ARCHITECTURE.md](../ARCHITECTURE.md) plans an `ambient-core` facade with `ambient-ffi` (UniFFI) over it for Swift and Kotlin. That crate is an empty scaffold. When it is built, the `Host` trait should move there, and a native shell should implement it as a UniFFI callback interface. Nothing is built for that yet.
 - **The window is Linux-only and untouched.** Its fonts are bundled, so those carry over, but nothing in it has been tried on another system.

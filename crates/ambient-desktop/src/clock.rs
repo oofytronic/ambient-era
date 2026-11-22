@@ -5,6 +5,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::zone::Zone;
+
 pub(crate) struct When {
     /// Chip above the first message of a local day. Empty when there is no time.
     pub day: String,
@@ -18,31 +20,73 @@ pub(crate) fn now_ms() -> u64 {
         .map_or(0, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(0))
 }
 
-pub(crate) fn load_tz() -> Vec<u8> {
-    std::fs::read("/etc/localtime").unwrap_or_default()
+/// This computer's time zone, from the host, or UTC when the host has none. Reading it again is
+/// cheap, so it is read each time it might have changed, not once.
+pub(crate) fn load_zone() -> (Zone, Option<String>) {
+    match ambient_cli::host().time_zone() {
+        Some(found) => (
+            Zone::parse(&found.tzif).unwrap_or_else(Zone::utc),
+            found.name,
+        ),
+        None => (Zone::utc(), None),
+    }
 }
 
-/// Today's date on this computer's clock.
-pub(crate) fn today(tz: &[u8], now_ms: u64) -> crate::dates::Date {
-    let secs = i64::try_from(now_ms / 1000).unwrap_or(0);
-    let offset = offset_at(tz, secs).unwrap_or(0);
-    let (year, month, day, _, _) = ymd_hm(secs.saturating_add(i64::from(offset)));
-    crate::dates::Date::new(year, month, day).unwrap_or(crate::dates::Date {
-        year: 1970,
-        month: 1,
-        day: 1,
-    })
+/// What the clock says on this computer right now: the day, the minute of it, and which zone.
+/// The window keeps one and refreshes it, so everything on a screen agrees about now.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Clock {
+    pub today: crate::dates::Date,
+    /// Minutes since local midnight.
+    pub minutes: u32,
+    /// Seconds east of UTC.
+    pub offset: i32,
+    /// The zone's name such as `America/Los_Angeles`, or its short name such as `PST`.
+    pub zone: String,
 }
 
-pub(crate) fn when(unix_ms: Option<u64>, tz: &[u8], now: u64) -> When {
+impl Clock {
+    pub(crate) fn read(zone: &Zone, name: Option<&str>, now_ms: u64) -> Self {
+        let secs = i64::try_from(now_ms / 1000).unwrap_or(0);
+        let offset = zone.offset_at(secs);
+        let (year, month, day, hour, minute) = ymd_hm(secs.saturating_add(i64::from(offset)));
+        Self {
+            today: crate::dates::Date::new(year, month, day).unwrap_or(crate::dates::Date {
+                year: 1970,
+                month: 1,
+                day: 1,
+            }),
+            minutes: hour * 60 + minute,
+            offset,
+            zone: name.map_or_else(|| zone.abbr_at(secs), str::to_owned),
+        }
+    }
+
+    /// `UTC-8`, `UTC+5:30`, or `UTC`.
+    pub(crate) fn offset_label(&self) -> String {
+        if self.offset == 0 {
+            return "UTC".to_owned();
+        }
+        let sign = if self.offset < 0 { '-' } else { '+' };
+        let total = self.offset.unsigned_abs() / 60;
+        let (hours, minutes) = (total / 60, total % 60);
+        if minutes == 0 {
+            format!("UTC{sign}{hours}")
+        } else {
+            format!("UTC{sign}{hours}:{minutes:02}")
+        }
+    }
+}
+
+pub(crate) fn when(unix_ms: Option<u64>, zone: &Zone, now: u64) -> When {
     let Some(unix_ms) = unix_ms else {
         return When {
             day: String::new(),
             time: String::new(),
         };
     };
-    let offset = offset_at(tz, i64::try_from(unix_ms / 1000).unwrap_or(0)).unwrap_or(0);
-    let now_offset = offset_at(tz, i64::try_from(now / 1000).unwrap_or(0)).unwrap_or(offset);
+    let offset = zone.offset_at(i64::try_from(unix_ms / 1000).unwrap_or(0));
+    let now_offset = zone.offset_at(i64::try_from(now / 1000).unwrap_or(0));
     let local = local_secs(unix_ms, offset);
     let today = local_secs(now, now_offset);
     let (year, month, day, hour, minute) = ymd_hm(local);
@@ -55,9 +99,9 @@ pub(crate) fn when(unix_ms: Option<u64>, tz: &[u8], now: u64) -> When {
 }
 
 /// `YYYY-MM-DD-HHMM` in local time. For naming things so they sort by when they were made.
-pub(crate) fn stamp(unix_ms: u64, tz: &[u8]) -> String {
+pub(crate) fn stamp(unix_ms: u64, zone: &Zone) -> String {
     let secs = i64::try_from(unix_ms / 1000).unwrap_or(0);
-    let offset = offset_at(tz, secs).unwrap_or(0);
+    let offset = zone.offset_at(secs);
     let (year, month, day, hour, minute) = ymd_hm(secs.saturating_add(i64::from(offset)));
     format!("{year:04}-{month:02}-{day:02}-{hour:02}{minute:02}")
 }
@@ -128,106 +172,20 @@ fn ymd_hm(secs: i64) -> (i32, u32, u32, u32, u32) {
     )
 }
 
-/// Seconds east of UTC from a `TZif` file. `None` when the file is not `TZif`.
-fn offset_at(data: &[u8], unix: i64) -> Option<i32> {
-    let (version, counts) = tz_header(data, 0)?;
-    if version >= b'2' {
-        let first = tz_data_len(counts, 4)?;
-        let at = 44usize.checked_add(first)?;
-        let (next, counts) = tz_header(data, at)?;
-        if next < b'2' {
-            return None;
-        }
-        let body = at.checked_add(44)?;
-        return tz_offset(data, body, counts, 8, unix);
-    }
-    tz_offset(data, 44, counts, 4, unix)
-}
-
-fn tz_header(data: &[u8], at: usize) -> Option<(u8, [i32; 6])> {
-    if data.get(at..at.checked_add(4)?)? != b"TZif" {
-        return None;
-    }
-    let version = *data.get(at.checked_add(4)?)?;
-    let mut counts = [0_i32; 6];
-    for (index, slot) in counts.iter_mut().enumerate() {
-        let off = at.checked_add(20)?.checked_add(index.checked_mul(4)?)?;
-        let bytes = data.get(off..off.checked_add(4)?)?;
-        let raw: [u8; 4] = bytes.try_into().ok()?;
-        *slot = i32::from_be_bytes(raw);
-    }
-    Some((version, counts))
-}
-
-fn tz_data_len(counts: [i32; 6], time_size: usize) -> Option<usize> {
-    let ut = usize::try_from(*counts.first()?).ok()?;
-    let std = usize::try_from(*counts.get(1)?).ok()?;
-    let leap = usize::try_from(*counts.get(2)?).ok()?;
-    let times = usize::try_from(*counts.get(3)?).ok()?;
-    let types = usize::try_from(*counts.get(4)?).ok()?;
-    let chars = usize::try_from(*counts.get(5)?).ok()?;
-    times
-        .checked_mul(time_size)?
-        .checked_add(times)?
-        .checked_add(types.checked_mul(6)?)?
-        .checked_add(chars)?
-        .checked_add(leap.checked_mul(time_size.checked_add(4)?)?)?
-        .checked_add(std)?
-        .checked_add(ut)
-}
-
-fn tz_offset(data: &[u8], at: usize, counts: [i32; 6], time_size: usize, unix: i64) -> Option<i32> {
-    let times = usize::try_from(*counts.get(3)?).ok()?;
-    let types = usize::try_from(*counts.get(4)?).ok()?;
-    if types == 0 {
-        return None;
-    }
-    let mut index = 0_usize;
-    let mut cursor = at;
-    for nth in 0..times {
-        let raw = data.get(cursor..cursor.checked_add(time_size)?)?;
-        let transition = if time_size == 8 {
-            let bytes: [u8; 8] = raw.try_into().ok()?;
-            i64::from_be_bytes(bytes)
-        } else {
-            let bytes: [u8; 4] = raw.try_into().ok()?;
-            i64::from(i32::from_be_bytes(bytes))
-        };
-        if transition <= unix {
-            index = nth.saturating_add(1);
-        }
-        cursor = cursor.checked_add(time_size)?;
-    }
-    let types_at = cursor;
-    let chosen = if index == 0 {
-        0
-    } else {
-        let at = types_at.checked_add(index - 1)?;
-        usize::from(*data.get(at)?)
-    };
-    if chosen >= types {
-        return None;
-    }
-    let rec = types_at
-        .checked_add(times)?
-        .checked_add(chosen.checked_mul(6)?)?;
-    let bytes = data.get(rec..rec.checked_add(4)?)?;
-    let raw: [u8; 4] = bytes.try_into().ok()?;
-    Some(i32::from_be_bytes(raw))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{offset_at, stamp, when, ymd_hm};
+    use super::{Clock, stamp, when, ymd_hm};
+    use crate::zone::Zone;
 
     #[test]
     fn a_stamp_names_a_moment_so_names_sort_by_time() {
-        assert_eq!(stamp(0, &[]), "1970-01-01-0000");
-        assert_eq!(stamp(1_700_000_000_000, &[]), "2023-11-14-2213");
+        let utc = Zone::utc();
+        assert_eq!(stamp(0, &utc), "1970-01-01-0000");
+        assert_eq!(stamp(1_700_000_000_000, &utc), "2023-11-14-2213");
         // In a zone seven hours behind, the same moment is earlier on the same day.
-        let seven_behind = tz_v1(-7 * 3_600);
+        let seven_behind = zone_at(-7 * 3_600);
         assert_eq!(stamp(1_700_000_000_000, &seven_behind), "2023-11-14-1513");
-        assert!(stamp(1_700_000_000_000, &[]) < stamp(1_700_000_060_000, &[]));
+        assert!(stamp(1_700_000_000_000, &utc) < stamp(1_700_000_060_000, &utc));
     }
 
     #[test]
@@ -237,25 +195,58 @@ mod tests {
     }
 
     #[test]
-    fn version_one_zone_offset() -> Result<(), String> {
-        let data = tz_v1(-7 * 3_600);
-        let offset = offset_at(&data, 1_700_000_000).ok_or("offset")?;
-        if offset != -7 * 3_600 {
-            return Err(offset.to_string());
-        }
-        Ok(())
-    }
-
-    #[test]
     fn same_day_is_today() {
-        let tz = tz_v1(0);
+        let zone = Zone::utc();
         let now = 1_700_000_000_000_u64;
-        let labeled = when(Some(now), &tz, now);
+        let labeled = when(Some(now), &zone, now);
         assert_eq!(labeled.day, "Today");
         assert_eq!(labeled.time, "22:13");
     }
 
-    fn tz_v1(utoff: i32) -> Vec<u8> {
+    #[test]
+    fn the_clock_names_the_day_and_minute_in_the_zone_it_is_in() {
+        let zone = zone_with_footer("PST8PDT,M3.2.0,M11.1.0");
+        // 2026-11-20 03:42 UTC is the evening before in Los Angeles, in standard time.
+        let at = 1_795_146_120_000_u64;
+        let clock = Clock::read(&zone, Some("America/Los_Angeles"), at);
+        assert_eq!(clock.today.to_string(), "2026-11-19");
+        assert_eq!(clock.minutes, 19 * 60 + 42);
+        assert_eq!(clock.offset_label(), "UTC-8");
+        assert_eq!(clock.zone, "America/Los_Angeles");
+        // The same moment in summer is an hour different: 2026-07-20 03:42 UTC is 20:42 the day before.
+        let summer = Clock::read(&zone, None, 1_784_518_920_000);
+        assert_eq!(summer.today.to_string(), "2026-07-19");
+        assert_eq!(summer.minutes, 20 * 60 + 42);
+        assert_eq!(summer.zone, "PDT", "with no name, the short one");
+        assert_eq!(summer.offset_label(), "UTC-7");
+        // A zone half an hour off, and none.
+        let india = Clock::read(&zone_with_footer("IST-5:30"), None, at);
+        assert_eq!(india.offset_label(), "UTC+5:30");
+        assert_eq!(
+            (india.today.to_string(), india.minutes),
+            ("2026-11-20".to_owned(), 9 * 60 + 12)
+        );
+        assert_eq!(Clock::read(&Zone::utc(), None, at).offset_label(), "UTC");
+    }
+
+    #[test]
+    fn midnight_is_the_moment_the_day_changes() {
+        let zone = zone_with_footer("PST8PDT,M3.2.0,M11.1.0");
+        // 2026-11-20 00:00 in Los Angeles is 08:00 UTC.
+        let midnight = 1_795_161_600_000_u64;
+        let before = Clock::read(&zone, None, midnight - 1_000);
+        let after = Clock::read(&zone, None, midnight);
+        assert_eq!(before.today.to_string(), "2026-11-19");
+        assert_eq!((before.minutes, after.minutes), (23 * 60 + 59, 0));
+        assert_eq!(after.today.to_string(), "2026-11-20");
+        // The night the clocks go forward has no 02:30: 01:59:59 is followed by 03:00.
+        let forward = 1_772_964_000_000_u64;
+        let one = Clock::read(&zone, None, forward - 1_000);
+        let three = Clock::read(&zone, None, forward);
+        assert_eq!((one.minutes, three.minutes), (60 + 59, 3 * 60));
+    }
+
+    fn zone_at(utoff: i32) -> Zone {
         let mut data = Vec::new();
         data.extend(b"TZif");
         data.push(0);
@@ -267,6 +258,27 @@ mod tests {
         data.push(0);
         data.push(0);
         data.extend(b"UTC");
-        data
+        Zone::parse(&data).expect("zone")
+    }
+
+    /// A version 2 file that lists no changes, so the footer decides.
+    fn zone_with_footer(footer: &str) -> Zone {
+        let mut data = Vec::new();
+        for block in 0..2 {
+            data.extend(b"TZif2");
+            data.extend([0; 15]);
+            for count in [0_i32, 0, 0, 0, 1, 4] {
+                data.extend(count.to_be_bytes());
+            }
+            data.extend(0_i32.to_be_bytes());
+            data.extend([0, 0]);
+            data.extend(b"UTC\0");
+            if block == 1 {
+                data.push(b'\n');
+                data.extend(footer.as_bytes());
+                data.push(b'\n');
+            }
+        }
+        Zone::parse(&data).expect("zone")
     }
 }

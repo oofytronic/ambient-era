@@ -50,10 +50,14 @@ See [platforms.md](platforms.md).
 
 ## Tasks and dates, not built
 
-- **Typing a date by hand** is not possible in the window now. The calendar is the only way. A date written in a note by hand still counts if it is a real day.
+- **Typing a date by hand** is not possible in the window now. The calendar is the only way. A date or time written in a note by hand still counts if it is a real one in the one form.
 - **The calendar starts its week on Sunday** and its months are in English. There is no setting.
-- **Today is read from the time zone file once at start.** A window left open across midnight, or across a change of zone, shows yesterday until restarted. The file is `/etc/localtime`, which is a Unix path (see [platforms.md](platforms.md)).
-- **No time of day, no repeat, and no reminders.** A due date is a day.
+- **A time of day has no zone.** It is the wall clock where the person is, so a task due at 09:00 is due at 09:00 after flying across the world. A task shared in a note would be due at that wall time for whoever reads it. That is simple and it can be wrong for a meeting at a fixed place.
+- **The window looks at the clock every 20 seconds, and only on the Tasks tab,** and when it is brought back. A task can read as not yet late for up to 20 seconds after its minute. Elsewhere nothing shows a due time.
+- **The time zone comes from `/etc/localtime` only.** A `TZ` environment variable is not read, and a system that has no such file is treated as UTC and says so in the panel.
+- **A repeat that is checked is moved, not recorded.** There is no history of when it was done, and no way to undo but to edit the date. Done early or late, the next one is the first after both the due day and today.
+- **A monthly repeat on the 29th to 31st is clamped and then stays clamped:** January 31 goes to February 28, then March 28.
+- **No reminders.** Waiting on notifications, which do not exist yet.
 - **The task panel's counts and the groups** are rebuilt on every draw. That is fine at a few hundred tasks and has not been measured past that.
 
 ## Offered, not built

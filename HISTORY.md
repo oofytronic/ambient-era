@@ -438,3 +438,13 @@ The owner chose the long-term path for a Mac: one Rust core and a native UI for 
 ## 2026-11-21 — The Tasks panel, and due dates from a calendar
 
 The left panel of the Tasks tab had no use. It now chooses how to look at the tasks: by date (All open, Due today, Overdue, Upcoming, No date, Done), by group (the groups the notes with tasks are in), and by note, each with a count. A due date was a typed `YYYY-MM-DD` at the end of a task line, which a person can get wrong. It is now picked from a calendar that opens from a Due date button beside the add field and on a task being edited, and it writes the date in that one form and only for a day that exists. The typed field is gone. A date in a note that is not a real day, such as `2026-02-30`, now counts as no date. The format of a task line did not change, so older tasks and other notes read as before. Nothing was seen in a window.
+
+## 2026-11-22 — "Today" is a reading of the clock, and tasks get a time and a repeat
+
+The owner asked that nobody be mistaken about when something is due. Three things were wrong or loose.
+
+- **The zone reader ignored the rule at the end of a zone file.** A file lists the changes it knows, then gives a rule for every year after them. Files written in recent years list changes only up to the last time a government changed the rule, and the offset after that comes from the rule. Reading only the list gives the wrong hour all summer, and every year after 2037 in a long file. `zone.rs` now reads both, and was checked against Python's `zoneinfo` on 12,000 instants in eight zones from 2000 to 2065, on the system's own files, with none wrong. The same reader serves the chat times and backup names, which had the same fault.
+- **Nothing redrew at midnight,** and the zone was read once. The window now holds one reading of the clock, `App::clock`, taken when the Tasks tab opens, when the window comes back, before anything that writes a day, and every 20 seconds while that tab is up. Every date and late task on a screen is worked out from it, and the top of the Tasks panel says the day, the time, and the zone. A reading costs about 2 microseconds.
+- **The zone is asked through `Host`** (`time_zone`), so a Mac or a phone answers it its own way. This removed the last `/etc/localtime` read outside the host.
+
+Then the rest of the task features the owner asked for, except reminders, which wait for notifications. A task can have a time of day, and a repeat, set in the calendar and written as the end of its line: `2026-11-20 14:30 repeat:weekly`. A task is late the minute its time passes. Checking a repeating task moves it to its next day and leaves it open. A time has no zone. Nothing was seen in a window.

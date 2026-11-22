@@ -20,7 +20,7 @@ mod sync;
 
 pub use draft::{Draft, Shortcut, shortcut};
 pub use host::{
-    BareHost, Host, MacHost, UnixHost, host, loopback_store_dir, set_host, system_host,
+    BareHost, Host, MacHost, TimeZone, UnixHost, host, loopback_store_dir, set_host, system_host,
 };
 pub use notes::{CliError, run};
 pub use session::{
