@@ -1508,6 +1508,8 @@ pub(crate) struct ListedChat {
     pub members: usize,
     /// This folder's card for the conversation is the one that started it.
     pub started: bool,
+    /// Signing keys of the other members, hex, sorted.
+    pub others: Vec<String>,
 }
 
 fn chat_cache() -> &'static Mutex<HashMap<PathBuf, ChatSnap>> {
@@ -1536,11 +1538,18 @@ fn chat_snap(dir: &Path) -> Result<ChatSnap, CliError> {
             continue;
         };
         let id = hex_id(&view.space_id.0);
-        let other_key = view
+        let others: Vec<String> = view
             .members
             .keys()
-            .find(|key| **key != slot.card.signing_key);
-        let other = other_key.map(|key| short_id(key)).unwrap_or_default();
+            .filter(|key| **key != slot.card.signing_key)
+            .map(|key| hex_id(key))
+            .collect();
+        let other = view
+            .members
+            .keys()
+            .find(|key| **key != slot.card.signing_key)
+            .map(|key| short_id(key))
+            .unwrap_or_default();
         let members = view.members.len();
         let started = view
             .members
@@ -1561,6 +1570,7 @@ fn chat_snap(dir: &Path) -> Result<ChatSnap, CliError> {
                 text: line.text.clone(),
                 unix_ms: line.unix_ms,
                 mine: line.sender == slot.card.signing_key,
+                sender: hex_id(&line.sender),
                 cite: line.cite.map(|id| hex_id(&id)),
             });
         }
@@ -1570,6 +1580,7 @@ fn chat_snap(dir: &Path) -> Result<ChatSnap, CliError> {
             other,
             members,
             started,
+            others,
         });
         text.insert(id.clone(), body);
         messages.insert(id, lines);

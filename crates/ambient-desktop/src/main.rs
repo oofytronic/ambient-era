@@ -112,6 +112,8 @@ struct App {
     add_draft: String,
     /// The add field is open.
     adding: bool,
+    /// A name for the person being added. This computer only.
+    add_call: String,
     relay_ready: bool,
     relay_ours: bool,
     sync_open: bool,
@@ -144,6 +146,8 @@ struct App {
     call_draft: String,
     wipe_draft: String,
     aliases: BTreeMap<String, String>,
+    /// A name for a person's signing key. This computer only. Not the conversation's name.
+    people: BTreeMap<String, String>,
     /// Words this person added to the spellchecker. Kept on this computer, in `dictionary`.
     my_words: BTreeSet<String>,
     /// Where backups go, as typed. Empty until the person chooses, and then the default is used.
@@ -402,8 +406,10 @@ enum Message {
     OpenPerson,
     OpenOneMore,
     AddDraft(String),
+    AddCall(String),
     ToggleAdd,
     AddToChat,
+    PersonDraft(String, String),
     #[allow(dead_code)]
     CopyCard,
     #[allow(dead_code)]
@@ -939,6 +945,7 @@ impl App {
             their_card: String::new(),
             add_draft: String::new(),
             adding: false,
+            add_call: String::new(),
             relay_ready: false,
             relay_ours: false,
             sync_open: false,
@@ -971,6 +978,7 @@ impl App {
             call_draft: String::new(),
             wipe_draft: String::new(),
             aliases: BTreeMap::new(),
+            people: BTreeMap::new(),
             my_words: BTreeSet::new(),
             backup_to: String::new(),
             backup_at: 0,
@@ -1091,7 +1099,11 @@ impl App {
         app.home_zone.clone_from(&saved.home_zone);
         app.system_dark = profile::system_is_dark();
         for (id, name) in profile::load_names(&app.dir) {
-            app.aliases.insert(id, name);
+            if let Some(key) = id.strip_prefix("key:") {
+                app.people.insert(key.to_owned(), name);
+            } else {
+                app.aliases.insert(id, name);
+            }
         }
         app.orders = profile::load_order(&app.dir);
         app.my_words = profile::load_words(&app.dir).into_iter().collect();
@@ -1571,6 +1583,10 @@ impl App {
                 self.add_draft = text;
                 Task::none()
             }
+            Message::AddCall(text) => {
+                self.add_call = text;
+                Task::none()
+            }
             Message::ToggleAdd => {
                 self.adding = !self.adding;
                 Task::none()
@@ -1863,12 +1879,11 @@ impl App {
                 Task::none()
             }
             Message::AliasDraft(id, text) => {
-                if text.trim().is_empty() {
-                    self.aliases.remove(&id);
-                } else {
-                    self.aliases.insert(id, text);
-                }
-                self.persist_names();
+                self.remember_alias(&id, text);
+                Task::none()
+            }
+            Message::PersonDraft(key, text) => {
+                self.remember_person(&key, text);
                 Task::none()
             }
             Message::EditAlias => match self.chat_id.clone() {
@@ -2618,6 +2633,7 @@ impl App {
                 let (preview, time) = self.chat_last.get(&chat.id).cloned().unwrap_or_default();
                 side = side.push(chat_row(
                     &self.chat_name(chat),
+                    &self.who_line(chat),
                     &preview,
                     &time,
                     &chat.id,
@@ -4489,8 +4505,14 @@ impl App {
         }
         let query = self.chat_query.trim().to_lowercase();
         let width = self.bubble_width();
+        let group = self
+            .chats
+            .iter()
+            .find(|chat| self.chat_id.as_deref() == Some(chat.id.as_str()))
+            .is_some_and(|chat| chat.members > 2);
         let mut day = String::new();
         let mut shown = 0_usize;
+        let mut previous = String::new();
         for line in &self.chat {
             if !query.is_empty() && !line.text.to_lowercase().contains(&query) {
                 continue;
@@ -4505,7 +4527,9 @@ impl App {
                         .padding([6, 0]),
                 );
             }
-            lines = lines.push(self.chat_bubble(line, width));
+            let show_who = group && !line.mine && line.sender != previous;
+            previous.clone_from(&line.sender);
+            lines = lines.push(self.chat_bubble(line, width, show_who));
         }
         if shown == 0 && !query.is_empty() {
             lines = lines.push(text("No messages match.").color(ink.muted));
@@ -4619,42 +4643,49 @@ impl App {
         // The name is plain text. The pencil turns it into a field, so the header does not
         // look like a form every time the chat is open.
         let mut head = column![].spacing(4);
+        let open = self.chats.iter().find(|chat| &chat.id == id).cloned();
         if editing {
-            let draft = self.aliases.get(id).cloned().unwrap_or_default();
-            let id = id.clone();
-            head = head
-                .push(
-                    row![
-                        text_input("What do you call them?", &draft)
-                            .id(iced::widget::Id::new("chat-alias"))
-                            .on_input(move |text| Message::AliasDraft(id.clone(), text))
-                            .on_submit(Message::FinishAlias)
-                            .padding(10)
-                            .width(Fill)
-                            .style(field_style),
-                        ghost_label("Done", Message::FinishAlias),
-                        search,
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Alignment::Center),
-                )
-                .push(
-                    text("Only this computer remembers it.")
-                        .size(12)
-                        .color(ink.muted),
-                );
+            if let Some(chat) = open.clone().filter(|chat| chat.members > 2) {
+                head = head.push(self.group_fields(&chat, search));
+            } else {
+                let draft = self.aliases.get(id).cloned().unwrap_or_default();
+                let id = id.clone();
+                head = head
+                    .push(
+                        row![
+                            text_input("What do you call them?", &draft)
+                                .id(iced::widget::Id::new("chat-alias"))
+                                .on_input(move |text| Message::AliasDraft(id.clone(), text))
+                                .on_submit(Message::FinishAlias)
+                                .padding(10)
+                                .width(Fill)
+                                .style(field_style),
+                            ghost_label("Done", Message::FinishAlias),
+                            search,
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Alignment::Center),
+                    )
+                    .push(
+                        text("Only this computer remembers it.")
+                            .size(12)
+                            .color(ink.muted),
+                    );
+            }
         } else {
-            let name = self
-                .chats
-                .iter()
-                .find(|chat| &chat.id == id)
+            let name = open
+                .as_ref()
                 .map_or_else(|| "Conversation".to_owned(), |chat| self.chat_name(chat));
             head = head.push(
                 row![
                     text(name).font(serif()).size(22).width(Fill),
                     mini_button(
                         mini_handle(Mini::Pencil, self.is_dark()),
-                        "Rename",
+                        if open.as_ref().is_some_and(|chat| chat.members > 2) {
+                            "Names"
+                        } else {
+                            "Rename"
+                        },
                         Message::EditAlias,
                     ),
                     search,
@@ -4663,10 +4694,16 @@ impl App {
                 .align_y(iced::Alignment::Center),
             );
         }
-        if let Some(chat) = self.chats.iter().find(|chat| &chat.id == id).cloned()
-            && let Some(row) = self.add_row(&chat)
-        {
-            head = head.push(row);
+        if let Some(chat) = open {
+            if chat.members > 2 && !editing {
+                let who = self.who_line(&chat);
+                if !who.is_empty() {
+                    head = head.push(text(who).size(12).color(ink.muted));
+                }
+            }
+            if let Some(row) = self.add_row(&chat) {
+                head = head.push(row);
+            }
         }
         if searching {
             head = head.push(
@@ -4680,27 +4717,14 @@ impl App {
         head.into()
     }
 
-    /// The count, and Add someone, under the conversation name. Nothing when this is a 1:1
-    /// that this window did not start.
+    /// Add someone, under the conversation name. Nothing when this window did not start it.
     fn add_row(&self, chat: &ambient_cli::ConversationSummary) -> Option<Element<'_, Message>> {
-        let ink = self.ink();
-        let named = self
-            .aliases
-            .get(&chat.id)
-            .is_some_and(|name| !name.trim().is_empty());
-        let show_count = chat.members > 2 && named;
-        if !show_count && !chat.started {
+        if !chat.started {
             return None;
         }
+        let ink = self.ink();
         let mut rows = column![].spacing(4);
-        if show_count {
-            rows = rows.push(
-                text(format!("{} people", chat.members))
-                    .size(12)
-                    .color(ink.muted),
-            );
-        }
-        if chat.started && self.adding {
+        if self.adding {
             rows = rows
                 .push(
                     text("Paste their Invite link. They wait. They do not start a conversation.")
@@ -4714,16 +4738,93 @@ impl App {
                         .style(field_style),
                 )
                 .push(
+                    text("What do you call them? Only this computer remembers it.")
+                        .size(13)
+                        .color(ink.muted),
+                )
+                .push(
+                    text_input("A name on this computer", &self.add_call)
+                        .on_input(Message::AddCall)
+                        .padding(10)
+                        .style(field_style),
+                )
+                .push(
                     row![
                         action_label("Add", Message::AddToChat),
                         ghost_label("Cancel", Message::ToggleAdd),
                     ]
                     .spacing(8),
                 );
-        } else if chat.started {
+        } else {
             rows = rows.push(ghost_label("Add someone", Message::ToggleAdd));
         }
         Some(rows.into())
+    }
+
+    /// The conversation's name, then one field for each other person.
+    fn group_fields<'a>(
+        &self,
+        chat: &ambient_cli::ConversationSummary,
+        search: Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        let ink = self.ink();
+        let id = chat.id.clone();
+        let draft = self.aliases.get(&chat.id).cloned().unwrap_or_default();
+        let mut body = column![
+            text_input("This conversation", &draft)
+                .id(iced::widget::Id::new("chat-alias"))
+                .on_input(move |text| Message::AliasDraft(id.clone(), text))
+                .on_submit(Message::FinishAlias)
+                .padding(10)
+                .width(Fill)
+                .style(field_style),
+            text("Only this computer remembers these names.")
+                .size(12)
+                .color(ink.muted),
+        ]
+        .spacing(8);
+        for key in &chat.others {
+            let draft = self.people.get(key).cloned().unwrap_or_default();
+            let short: String = key.chars().take(8).collect();
+            let shown = key.clone();
+            body = body.push(text(short).size(12).color(ink.muted));
+            body = body.push(
+                text_input("A name on this computer", &draft)
+                    .on_input(move |text| Message::PersonDraft(shown.clone(), text))
+                    .padding(10)
+                    .style(field_style),
+            );
+        }
+        body = body.push(
+            row![ghost_label("Done", Message::FinishAlias), search]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+        );
+        body.into()
+    }
+
+    fn person_name(&self, key: &str) -> String {
+        self.people
+            .get(key)
+            .filter(|name| !name.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| key.chars().take(8).collect())
+    }
+
+    /// "3 people · Sam, Rin" for a group. Empty for a 1:1.
+    fn who_line(&self, chat: &ambient_cli::ConversationSummary) -> String {
+        if chat.members <= 2 {
+            return String::new();
+        }
+        let names: Vec<String> = chat
+            .others
+            .iter()
+            .map(|key| self.person_name(key))
+            .collect();
+        if names.is_empty() {
+            return format!("{} people", chat.members);
+        }
+        format!("{} people · {}", chat.members, names.join(", "))
     }
 
     fn invite_sheet(&self) -> Element<'_, Message> {
@@ -5410,6 +5511,7 @@ impl App {
                 other: row.other.clone(),
                 members: row.members,
                 started: row.started,
+                others: row.others.clone(),
             })
             .collect();
         let known = self
@@ -6191,6 +6293,7 @@ impl App {
             let (preview, time) = self.chat_last.get(&chat.id).cloned().unwrap_or_default();
             side = side.push(chat_row(
                 &self.chat_name(chat),
+                &self.who_line(chat),
                 &preview,
                 &time,
                 &chat.id,
@@ -6231,7 +6334,12 @@ impl App {
         hscroll(row).height(156).into()
     }
 
-    fn chat_bubble(&self, line: &ChatBubble, width: f32) -> Element<'static, Message> {
+    fn chat_bubble(
+        &self,
+        line: &ChatBubble,
+        width: f32,
+        show_who: bool,
+    ) -> Element<'static, Message> {
         let ink = self.ink();
         let copy_text = line.text.clone();
         let words = line.text.clone();
@@ -6311,7 +6419,12 @@ impl App {
             .max_width(width)
             .clip(true)
             .style(if mine { mine_style } else { theirs_style });
-        container(bubble)
+        let mut stack = column![].spacing(4);
+        if show_who && !line.sender.is_empty() {
+            stack = stack.push(speaker(&self.person_name(&line.sender), &line.sender));
+        }
+        stack = stack.push(bubble);
+        container(stack)
             .width(Fill)
             .align_x(if mine {
                 iced::alignment::Horizontal::Right
@@ -7508,9 +7621,20 @@ impl App {
             self.say("Paste their link first. In their window open Invite and copy the link.");
             return;
         }
+        let before = self
+            .chats
+            .iter()
+            .find(|chat| chat.id == id)
+            .map(|chat| chat.others.clone())
+            .unwrap_or_default();
+        let call = self.add_call.trim().to_owned();
         match ambient_cli::add_member_in(&self.dir, &id, card) {
             Ok(()) => {
+                if !call.is_empty() {
+                    self.name_new_people(&id, &call, &before);
+                }
                 self.add_draft.clear();
+                self.add_call.clear();
                 self.adding = false;
                 self.say(
                     "Added. They show up once both windows sync. They do not press Start conversation.",
@@ -7547,7 +7671,8 @@ impl App {
             Ok(id) => {
                 let call = self.call_draft.trim().to_owned();
                 if !call.is_empty() {
-                    self.aliases.insert(id.clone(), call);
+                    self.aliases.insert(id.clone(), call.clone());
+                    self.name_new_people(&id, &call, &[]);
                     self.persist_names();
                 }
                 self.call_draft.clear();
@@ -8210,13 +8335,69 @@ impl App {
     }
 
     fn persist_names(&mut self) {
-        let names: Vec<(String, String)> = self
+        let mut names: Vec<(String, String)> = self
             .aliases
             .iter()
             .map(|(id, name)| (id.clone(), name.clone()))
             .collect();
+        for (key, name) in &self.people {
+            names.push((format!("key:{key}"), name.clone()));
+        }
         if let Err(err) = profile::store_names(&self.dir, &names) {
             self.message = err;
+        }
+    }
+
+    fn remember_alias(&mut self, id: &str, text: String) {
+        let one = self
+            .chats
+            .iter()
+            .find(|chat| chat.id == id && chat.members <= 2)
+            .and_then(|chat| chat.others.first().cloned());
+        if text.trim().is_empty() {
+            self.aliases.remove(id);
+            if let Some(key) = one {
+                self.people.remove(&key);
+            }
+        } else {
+            if let Some(key) = one {
+                self.people.insert(key, text.clone());
+            }
+            self.aliases.insert(id.to_owned(), text);
+        }
+        self.persist_names();
+    }
+
+    fn remember_person(&mut self, key: &str, text: String) {
+        if text.trim().is_empty() {
+            self.people.remove(key);
+        } else {
+            self.people.insert(key.to_owned(), text);
+        }
+        self.persist_names();
+    }
+
+    /// Name each member of `id` who was not already in `before`. This computer only.
+    fn name_new_people(&mut self, id: &str, name: &str, before: &[String]) {
+        if name.trim().is_empty() {
+            return;
+        }
+        let Ok(chats) = ambient_cli::list_conversations(&self.dir) else {
+            return;
+        };
+        let Some(chat) = chats.into_iter().find(|chat| chat.id == id) else {
+            return;
+        };
+        let mut wrote = false;
+        for key in chat.others {
+            if before.iter().any(|old| old == &key) {
+                continue;
+            }
+            self.people.insert(key, name.to_owned());
+            wrote = true;
+        }
+        if wrote {
+            self.persist_names();
         }
     }
 
@@ -8377,6 +8558,7 @@ impl App {
         self.call_draft.clear();
         self.wipe_draft.clear();
         self.aliases.clear();
+        self.people.clear();
         self.your_name.clear();
         self.name_draft.clear();
         self.device_draft.clear();
@@ -9047,6 +9229,7 @@ fn bubbles(lines: Vec<ambient_cli::ChatMessage>) -> Vec<ChatBubble> {
                 time: when.time,
                 day: when.day,
                 mine: line.mine,
+                sender: line.sender,
                 cite: line.cite,
             }
         })
@@ -10381,6 +10564,7 @@ struct ChatBubble {
     time: String,
     day: String,
     mine: bool,
+    sender: String,
     cite: Option<String>,
 }
 
@@ -10922,6 +11106,7 @@ fn segment(label: &str, active: bool, message: Message) -> Element<'static, Mess
 
 fn chat_row(
     label: &str,
+    who: &str,
     preview: &str,
     time: &str,
     id: &str,
@@ -10929,6 +11114,7 @@ fn chat_row(
     fresh: bool,
 ) -> Element<'static, Message> {
     let label = label.to_owned();
+    let who = who.to_owned();
     let preview = preview.to_owned();
     let time = time.to_owned();
     let id = id.to_owned();
@@ -10940,6 +11126,9 @@ fn chat_row(
         head = head.push(text(time).size(12).style(muted_style));
     }
     let mut lines = column![head].spacing(2).width(Fill);
+    if !who.is_empty() {
+        lines = lines.push(text(who).size(12).style(muted_style));
+    }
     if !preview.is_empty() {
         lines = lines.push(text(preview).size(12).style(muted_style));
     }
@@ -10949,6 +11138,55 @@ fn chat_row(
         .on_press(Message::SelectChat(id))
         .style(list_row(selected))
         .into()
+}
+
+/// An initial and a name for someone else in a group. The color comes from their key.
+fn speaker(name: &str, key: &str) -> Element<'static, Message> {
+    let letter = name
+        .chars()
+        .find(|glyph| glyph.is_alphanumeric())
+        .map_or_else(|| "?".to_owned(), |glyph| glyph.to_uppercase().to_string());
+    let color = face_color(key);
+    let mark = container(text(letter).size(11).color(Color::WHITE))
+        .width(22)
+        .height(22)
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(color)),
+            text_color: Some(Color::WHITE),
+            border: iced::Border {
+                radius: 11.0.into(),
+                width: 0.0,
+                color: Color::TRANSPARENT,
+            },
+            ..Default::default()
+        });
+    row![mark, text(name.to_owned()).size(12).style(muted_style)]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+        .into()
+}
+
+fn face_color(key: &str) -> Color {
+    const PALETTE: [[u8; 3]; 8] = [
+        [184, 84, 72],
+        [196, 132, 58],
+        [58, 138, 96],
+        [58, 116, 168],
+        [124, 90, 176],
+        [168, 72, 116],
+        [62, 132, 146],
+        [138, 106, 64],
+    ];
+    let n = key
+        .bytes()
+        .fold(0_usize, |acc, byte| acc.wrapping_add(usize::from(byte)));
+    let [r, g, b] = PALETTE
+        .get(n % PALETTE.len())
+        .copied()
+        .unwrap_or([184, 84, 72]);
+    Color::from_rgb8(r, g, b)
 }
 
 fn guide_line(title: &'static str, body: &'static str) -> Element<'static, Message> {
@@ -12503,6 +12741,7 @@ mod app_tests {
             other: String::new(),
             members: 2,
             started: false,
+            others: Vec::new(),
         }];
         app.chat_id = Some("abc".to_owned());
         assert!(app.alias_editing.is_none(), "the name starts as plain text");

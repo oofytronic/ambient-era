@@ -235,6 +235,8 @@ pub struct ConversationSummary {
     pub members: usize,
     /// True when this folder's card for the conversation started it.
     pub started: bool,
+    /// Signing keys of the other members, hex, sorted. Not names.
+    pub others: Vec<String>,
 }
 
 /// Conversations in this folder, in storage order.
@@ -251,6 +253,7 @@ pub fn list_conversations(dir: &Path) -> Result<Vec<ConversationSummary>, CliErr
             other: chat.other,
             members: chat.members,
             started: chat.started,
+            others: chat.others,
         })
         .collect())
 }
@@ -279,6 +282,8 @@ pub struct ChatMessage {
     pub unix_ms: Option<u64>,
     /// True when this folder's contact card for that conversation signed it.
     pub mine: bool,
+    /// Signing key that sent it, hex. A local name is not stored here.
+    pub sender: String,
     /// Note id this message cites, hex. Empty when the message cites nothing.
     pub cite: Option<String>,
 }

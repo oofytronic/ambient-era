@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-23 — a group shows its people, and each name stays here
+
+A conversation of more than two people keeps the name it already had, and under that name, and in the list, it says how many people and what this computer calls them. The pencil in a group edits those names, and the conversation's own name, separately. Adding someone can name them at the same time. A message that is not yours shows that name and an initial. The color comes from their key. None of this is sent. A name this computer has not typed yet is the start of the key.
+
 ## 2026-11-23 — a third person, from the window that is already open
 
 The extra window in Settings was one other person, and a group could only be changed from the command line. The same path now opens one more person, a new folder beside the notebook, and the conversation that this window started has Add someone. Paste that person's invite link. They wait. They do not press Start conversation. The next sync seals the conversation to them. The list names a conversation of more than two people by the count. Remove and block stay commands.

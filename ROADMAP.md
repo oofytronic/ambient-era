@@ -39,7 +39,7 @@ The owner cannot sit at a second computer yet. That check is the last step of th
 | 9 | Small private groups | The same HPKE sealing. A private Space holds at most 16 member keys ([spec 03](docs/spec/03-spaces.md)). The person who started a conversation can add a member and remove one. A signing key in the local file `blocked` cannot be invited. The relay refuses a mailbox written more than 10000 times a minute ([spec 04](docs/spec/04-relay-api.md)). The count is in memory and is not logged. |
 | 10 | Encrypted attachments | A file cited in a chat line is sealed to the other members and written on their side. A file that does not fit in one relay blob is sent in pieces. A file over 256 MB is still refused. The bytes are not a new record. |
 
-The window can add someone to the conversation it started. Settings, Open one more person, opens their folder on this computer. They copy the link from Invite. This window pastes it and presses Add someone. They do not press Start conversation. Remove and block stay commands: `ambient remove-member` and `ambient block`. A file the window already cites is sealed on the next sync.
+The window can add someone to the conversation it started. Settings, Open one more person, opens their folder on this computer. They copy the link from Invite. This window pastes it and presses Add someone, and can name them then. They do not press Start conversation. A group keeps its name, and under it shows the count and each person. Those names stay on this computer. A message from someone else shows that name and an initial. Remove and block stay commands: `ambient remove-member` and `ambient block`. A file the window already cites is sealed on the next sync.
 
 Then, and only then, the second computer:
 
