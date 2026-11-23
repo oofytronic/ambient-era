@@ -114,6 +114,8 @@ struct App {
     adding: bool,
     /// A name for the person being added. This computer only.
     add_call: String,
+    /// A person the header is asking about, and which question is open.
+    member_ask: Option<(String, MemberAsk)>,
     relay_ready: bool,
     relay_ours: bool,
     sync_open: bool,
@@ -339,6 +341,12 @@ enum InvitePick {
     Mine,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MemberAsk {
+    Remove,
+    Block,
+}
+
 /// One wait. A new token drops the previous wait.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Wake {
@@ -416,6 +424,10 @@ enum Message {
     AddCall(String),
     ToggleAdd,
     AddToChat,
+    AskRemove(String),
+    AskBlock(String),
+    ConfirmMember,
+    CancelMember,
     PersonDraft(String, String),
     #[allow(dead_code)]
     CopyCard,
@@ -954,6 +966,7 @@ impl App {
             add_draft: String::new(),
             adding: false,
             add_call: String::new(),
+            member_ask: None,
             relay_ready: false,
             relay_ours: false,
             sync_open: false,
@@ -1611,6 +1624,22 @@ impl App {
                 self.add_to_chat();
                 self.begin_sync()
             }
+            Message::AskRemove(key) => {
+                self.member_ask = Some((key, MemberAsk::Remove));
+                Task::none()
+            }
+            Message::AskBlock(key) => {
+                self.member_ask = Some((key, MemberAsk::Block));
+                Task::none()
+            }
+            Message::ConfirmMember => {
+                self.confirm_member();
+                Task::none()
+            }
+            Message::CancelMember => {
+                self.member_ask = None;
+                Task::none()
+            }
             Message::CopyCard => self.copy_card(),
             Message::MyCardChanged(card) => {
                 self.my_card = card;
@@ -1659,6 +1688,7 @@ impl App {
                     self.chat.clear();
                     self.adding = false;
                     self.add_draft.clear();
+                    self.member_ask = None;
                 }
                 self.chat_id = Some(id);
                 self.screen = Screen::Chat;
@@ -2171,6 +2201,7 @@ impl App {
             }
             Message::FinishAlias => {
                 self.alias_editing = None;
+                self.member_ask = None;
                 Task::none()
             }
             Message::WipeDraft(text) => {
@@ -4690,6 +4721,11 @@ impl App {
                             .size(12)
                             .color(ink.muted),
                     );
+                if let Some(chat) = open.as_ref()
+                    && let Some(key) = chat.others.first()
+                {
+                    head = head.push(self.member_actions(key, chat.started));
+                }
             }
         } else {
             let name = open
@@ -4816,6 +4852,7 @@ impl App {
             if let Some(line) = self.card_lines.get(key) {
                 body = body.push(text(line.clone()).size(12).color(ink.muted));
             }
+            body = body.push(self.member_actions(key, chat.started));
         }
         body = body.push(
             row![ghost_label("Done", Message::FinishAlias), search]
@@ -4847,6 +4884,79 @@ impl App {
             return format!("{} people", chat.members);
         }
         format!("{} people · {}", chat.members, names.join(", "))
+    }
+
+    /// Remove or block one person. Remove is only for the window that started the conversation.
+    fn member_actions(&self, key: &str, can_remove: bool) -> Element<'static, Message> {
+        let ink = self.ink();
+        let name = self.person_name(key);
+        if let Some((asked, kind)) = &self.member_ask
+            && asked == key
+        {
+            let (question, yes) = match kind {
+                MemberAsk::Remove => (
+                    format!(
+                        "Remove {name} from this conversation? They keep what was already sealed to them."
+                    ),
+                    "Remove",
+                ),
+                MemberAsk::Block => (
+                    format!(
+                        "This computer will not invite {name} again. They stay in conversations they are already in."
+                    ),
+                    "Block",
+                ),
+            };
+            return column![
+                text(question).size(13).color(ink.muted),
+                row![
+                    action_label(yes, Message::ConfirmMember),
+                    ghost_label("Cancel", Message::CancelMember),
+                ]
+                .spacing(8),
+            ]
+            .spacing(4)
+            .into();
+        }
+        let mut row = row![].spacing(8);
+        if can_remove {
+            row = row.push(ghost_label("Remove", Message::AskRemove(key.to_owned())));
+        }
+        row = row.push(ghost_label("Block", Message::AskBlock(key.to_owned())));
+        row.into()
+    }
+
+    fn confirm_member(&mut self) {
+        let Some((key, kind)) = self.member_ask.clone() else {
+            return;
+        };
+        match kind {
+            MemberAsk::Remove => {
+                let Some(id) = self.chat_id.clone() else {
+                    self.say("Open a conversation first.");
+                    return;
+                };
+                match ambient_cli::remove_member_in(&self.dir, &id, &key) {
+                    Ok(()) => {
+                        self.member_ask = None;
+                        self.say("Removed. They keep what was already sealed to them.");
+                        self.sync_watch();
+                        self.post(lane::Job::Inbox);
+                        self.mark_pending();
+                    }
+                    Err(err) => self.message = err.to_string(),
+                }
+            }
+            MemberAsk::Block => match ambient_cli::block_key(&self.dir, &key) {
+                Ok(()) => {
+                    self.member_ask = None;
+                    self.say(
+                        "Blocked on this computer. An invite from here will not include them.",
+                    );
+                }
+                Err(err) => self.message = err.to_string(),
+            },
+        }
     }
 
     fn invite_sheet(&self) -> Element<'_, Message> {

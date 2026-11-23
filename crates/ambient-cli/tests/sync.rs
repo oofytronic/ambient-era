@@ -523,6 +523,41 @@ fn an_invite_link_carries_a_signed_name() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn the_starter_can_remove_and_then_block() -> Result<(), String> {
+    let root = std::env::temp_dir().join(format!("ambient-remove-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let alice = root.join("alice");
+    let bob = root.join("bob");
+    let carol = root.join("carol");
+    ambient_cli::Notebook::create(&alice).map_err(|err| err.to_string())?;
+    ambient_cli::Notebook::create(&bob).map_err(|err| err.to_string())?;
+    ambient_cli::Notebook::create(&carol).map_err(|err| err.to_string())?;
+    let bob_link = ambient_cli::contact_link(&bob).map_err(|err| err.to_string())?;
+    let carol_link = ambient_cli::contact_link(&carol).map_err(|err| err.to_string())?;
+    let carol_key = ambient_cli::contact_key(&carol).map_err(|err| err.to_string())?;
+    let id = ambient_cli::start_conversation(&alice, &bob_link).map_err(|err| err.to_string())?;
+    ambient_cli::add_member_in(&alice, &id, &carol_link).map_err(|err| err.to_string())?;
+    ambient_cli::remove_member_in(&alice, &id, &carol_key).map_err(|err| err.to_string())?;
+    let chats = ambient_cli::list_conversations(&alice).map_err(|err| err.to_string())?;
+    let chat = chats.first().ok_or("alice has no conversation")?;
+    if chat.members != 2 || chat.others.iter().any(|key| key == &carol_key) {
+        return Err(format!(
+            "carol is still in it: {} {:?}",
+            chat.members, chat.others
+        ));
+    }
+    ambient_cli::block_key(&alice, &carol_key).map_err(|err| err.to_string())?;
+    let again = ambient_cli::add_member_in(&alice, &id, &carol_link)
+        .err()
+        .map(|err| err.to_string());
+    if again.as_deref() != Some("that person is blocked") {
+        return Err(format!("block did not hold: {again:?}"));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
 fn spawn_relay() -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|err| err.to_string())?;
     let port = listener.local_addr().map_err(|err| err.to_string())?.port();

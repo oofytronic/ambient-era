@@ -676,8 +676,13 @@ pub(crate) fn add_member_in(dir: &Path, id: &str, card_text: &str) -> Result<(),
 /// Remove a person from the only conversation.
 pub(crate) fn remove_member(dir: &Path, card_or_key: &str) -> Result<(), CliError> {
     let id = sole_conversation(dir)?;
+    remove_member_in(dir, &id, card_or_key)
+}
+
+/// Remove a person from one conversation. The starter of that conversation signs it.
+pub(crate) fn remove_member_in(dir: &Path, id: &str, card_or_key: &str) -> Result<(), CliError> {
     let key = key_of(card_or_key)?;
-    change_member(dir, &id, &MemberChange::Remove(key.signing_key))
+    change_member(dir, id, &MemberChange::Remove(key.signing_key))
 }
 
 struct OfferKey {

@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-23 — remove and block from the window
+
+The pencil on a conversation can remove a person or block them. Only the window that started it can remove, and they keep what was already sealed to them. Block is this computer only: an invite from here will not include them, and conversations they are already in stay. The commands are still there.
+
 ## 2026-11-23 — the card is a pass
 
 The card in Settings, and on the guide before the notes, is a pass: a dark face, the name large, the initial as a seal, and the key along the bottom. It does not follow the light or dark theme. The fields that change it sit underneath.

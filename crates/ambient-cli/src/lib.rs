@@ -312,6 +312,29 @@ pub fn add_member_in(dir: &Path, id: &str, card: &str) -> Result<(), CliError> {
     sync::add_member_in(dir, id, card)
 }
 
+/// Remove a person from one conversation. The starter's folder signs it.
+///
+/// `key` is their signing key in hex, or a contact link. They keep what was already sealed to them.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when this folder did not start the conversation, the person is not in it,
+/// or the log cannot be written.
+pub fn remove_member_in(dir: &Path, id: &str, key: &str) -> Result<(), CliError> {
+    sync::remove_member_in(dir, id, key)
+}
+
+/// Remember a signing key this computer will not invite. The file stays here and is not sent.
+///
+/// `key` is their signing key in hex, or a contact link. Conversations they are already in stay.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when the key is rejected or the file cannot be written.
+pub fn block_key(dir: &Path, key: &str) -> Result<(), CliError> {
+    sync::block_key(dir, key)
+}
+
 /// One chat message for the window, oldest first.
 ///
 /// `unix_ms` is the envelope's advisory clock. It is not the order of the log.
