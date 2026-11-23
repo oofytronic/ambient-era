@@ -39,7 +39,7 @@ pub fn run(
 ) -> Result<(), CliError> {
     let command = args.next().ok_or_else(|| {
         CliError::message(
-            "usage: ambient <init|add|edit|list|search|show|device|pair|sync|card|talk|say|hear|phrase|restore> ...",
+            "usage: ambient <init|add|edit|list|search|show|device|pair|sync|card|talk|say|hear|block|add-member|remove-member|phrase|restore> ...",
         )
     })?;
     match command.as_str() {
@@ -56,6 +56,9 @@ pub fn run(
         "talk" => talk_cmd(args, stdout),
         "say" => say_cmd(args, stdout),
         "hear" => hear_cmd(args, stdout),
+        "block" => block_cmd(args, stdout),
+        "add-member" => add_member_cmd(args, stdout),
+        "remove-member" => remove_member_cmd(args, stdout),
         "phrase" => phrase_cmd(args, stdout),
         "restore" => restore_cmd(args, stdout),
         _ => Err(CliError::message("unknown command")),
@@ -175,6 +178,51 @@ fn talk_cmd(
         .ok_or_else(|| CliError::message("usage: ambient talk <dir> <card>"))?;
     crate::sync::talk(Path::new(&dir), &card)?;
     writeln!(stdout, "conversation").map_err(|_| CliError::message("stdout"))?;
+    Ok(())
+}
+
+fn block_cmd(
+    args: &mut impl Iterator<Item = String>,
+    stdout: &mut impl Write,
+) -> Result<(), CliError> {
+    let dir = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient block <dir> <card>"))?;
+    let card = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient block <dir> <card>"))?;
+    crate::sync::block_key(Path::new(&dir), &card)?;
+    writeln!(stdout, "blocked").map_err(|_| CliError::message("stdout"))?;
+    Ok(())
+}
+
+fn add_member_cmd(
+    args: &mut impl Iterator<Item = String>,
+    stdout: &mut impl Write,
+) -> Result<(), CliError> {
+    let dir = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient add-member <dir> <card>"))?;
+    let card = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient add-member <dir> <card>"))?;
+    crate::sync::add_member(Path::new(&dir), &card)?;
+    writeln!(stdout, "added").map_err(|_| CliError::message("stdout"))?;
+    Ok(())
+}
+
+fn remove_member_cmd(
+    args: &mut impl Iterator<Item = String>,
+    stdout: &mut impl Write,
+) -> Result<(), CliError> {
+    let dir = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient remove-member <dir> <card>"))?;
+    let card = args
+        .next()
+        .ok_or_else(|| CliError::message("usage: ambient remove-member <dir> <card>"))?;
+    crate::sync::remove_member(Path::new(&dir), &card)?;
+    writeln!(stdout, "removed").map_err(|_| CliError::message("stdout"))?;
     Ok(())
 }
 

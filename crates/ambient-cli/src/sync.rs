@@ -12,8 +12,8 @@ use ambient_identity::{
     decode_pair_offer_text, device_from_seeds, encode_pair_offer, pair_offer_text,
 };
 use ambient_spaces::{
-    ChatLine, GenesisMember, conversation_genesis_payload, msg_put_citing, open_blob,
-    project_conversation, seal_blob,
+    ChatLine, GenesisMember, MAX_MEMBERS, conversation_genesis_payload, member_add_payload,
+    member_remove_payload, msg_put_citing, open_blob, project_conversation, seal_blob,
 };
 use ambient_store::{StoreError, log_stamp, read_log, write_log, write_log_if};
 use ambient_transport::{Request, Response, decode_response, encode_request};
@@ -380,6 +380,7 @@ fn transport_failure(err: &CliError) -> bool {
             | "unavailable"
             | "too_large"
             | "bad_request"
+            | "rate_limited"
     )
 }
 
@@ -408,6 +409,16 @@ fn write_pushed_for(dir: &Path, url: &str, pushed: &PushSet) -> Result<(), CliEr
     let state = state_dir(dir, url);
     fs::create_dir_all(&state).map_err(|_| CliError::message("could not write push list"))?;
     write_pushed(&state.join("pushed"), pushed)
+}
+
+fn read_files_pushed(dir: &Path, url: &str) -> Result<PushSet, CliError> {
+    read_pushed(&state_dir(dir, url).join("file-pushed"))
+}
+
+fn write_files_pushed(dir: &Path, url: &str, pushed: &PushSet) -> Result<(), CliError> {
+    let state = state_dir(dir, url);
+    fs::create_dir_all(&state).map_err(|_| CliError::message("could not write push list"))?;
+    write_pushed(&state.join("file-pushed"), pushed)
 }
 
 fn read_cursor_for(dir: &Path, url: &str, name: &str, legacy: &Path) -> Result<u64, CliError> {
@@ -509,6 +520,9 @@ pub(crate) fn talk(dir: &Path, card_text: &str) -> Result<String, CliError> {
     if slot.card.signing_key == theirs.signing_key {
         return Err(CliError::message("that card is this device"));
     }
+    if is_blocked(dir, &theirs.signing_key)? {
+        return Err(CliError::message("that person is blocked"));
+    }
     let payload = conversation_genesis_payload(&[
         GenesisMember {
             signing_key: slot.card.signing_key,
@@ -548,6 +562,166 @@ pub(crate) fn talk(dir: &Path, card_text: &str) -> Result<String, CliError> {
             .map_err(|_| CliError::message("could not write chats"))?;
     }
     Ok(id)
+}
+
+/// Remember a signing key this computer will not invite.
+pub(crate) fn block_key(dir: &Path, card_or_key: &str) -> Result<(), CliError> {
+    let key = key_of(card_or_key)?;
+    let mut keys = read_blocked(dir)?;
+    if !keys.contains(&key.signing_key) {
+        keys.push(key.signing_key);
+    }
+    write_blocked(dir, &keys)
+}
+
+/// Add a person to the only conversation. The starter of that conversation signs it.
+pub(crate) fn add_member(dir: &Path, card_text: &str) -> Result<(), CliError> {
+    let id = sole_conversation(dir)?;
+    let key = key_of(card_text)?;
+    if is_blocked(dir, &key.signing_key)? {
+        return Err(CliError::message("that person is blocked"));
+    }
+    change_member(dir, &id, &MemberChange::Add(key))
+}
+
+/// Remove a person from the only conversation.
+pub(crate) fn remove_member(dir: &Path, card_or_key: &str) -> Result<(), CliError> {
+    let id = sole_conversation(dir)?;
+    let key = key_of(card_or_key)?;
+    change_member(dir, &id, &MemberChange::Remove(key.signing_key))
+}
+
+struct OfferKey {
+    signing_key: [u8; 32],
+    encryption_key: [u8; 32],
+    mailbox: [u8; 32],
+}
+
+enum MemberChange {
+    Add(OfferKey),
+    Remove([u8; 32]),
+}
+
+fn key_of(card_or_key: &str) -> Result<OfferKey, CliError> {
+    let trimmed = card_or_key.trim();
+    let offer_text = trimmed
+        .strip_prefix("ambient://contact/")
+        .unwrap_or(trimmed);
+    if let Ok(theirs) = decode_pair_offer_text(offer_text) {
+        return Ok(OfferKey {
+            signing_key: theirs.signing_key,
+            encryption_key: theirs.encryption_key,
+            mailbox: theirs.mailbox,
+        });
+    }
+    let signing_key = parse_note_id(trimmed)?;
+    Ok(OfferKey {
+        signing_key,
+        encryption_key: [0; 32],
+        mailbox: [0; 32],
+    })
+}
+
+fn change_member(dir: &Path, id: &str, change: &MemberChange) -> Result<(), CliError> {
+    let local = keys::open(dir)?;
+    for attempt in 0..WRITE_TRIES {
+        let mut slots = load_slots(dir, &local.store_key)?;
+        let slot = slots
+            .iter_mut()
+            .find(|slot| slot.space_id().as_deref() == Some(id))
+            .ok_or_else(|| CliError::message("no such conversation"))?;
+        let view = conversation(&slot.wires)?;
+        let actor = view
+            .members
+            .get(&slot.card.signing_key)
+            .ok_or_else(|| CliError::message("this device is not in that conversation"))?;
+        if actor.role != 1 {
+            return Err(CliError::message(
+                "only the person who started the conversation can change it",
+            ));
+        }
+        let payload = match &change {
+            MemberChange::Add(key) => {
+                if view.members.contains_key(&key.signing_key) {
+                    return Err(CliError::message("that person is already in it"));
+                }
+                if view.members.len() >= MAX_MEMBERS {
+                    return Err(CliError::message("that conversation is full"));
+                }
+                if key.signing_key == slot.card.signing_key {
+                    return Err(CliError::message("that card is this device"));
+                }
+                member_add_payload(&GenesisMember {
+                    signing_key: key.signing_key,
+                    encryption_key: key.encryption_key,
+                    role: 2,
+                    mailbox: key.mailbox,
+                })
+                .map_err(|_| CliError::message("could not encode member"))?
+            }
+            MemberChange::Remove(key) => {
+                if !view.members.contains_key(key) {
+                    return Err(CliError::message("that person is not in it"));
+                }
+                if *key == slot.card.signing_key {
+                    return Err(CliError::message("you cannot remove yourself"));
+                }
+                member_remove_payload(key)
+                    .map_err(|_| CliError::message("could not encode member"))?
+            }
+        };
+        let event_type = match change {
+            MemberChange::Add(_) => "space.member-add",
+            MemberChange::Remove(_) => "space.member-remove",
+        };
+        let prev = view.tip.get(&slot.card.signing_key).copied();
+        slot.wires.push(sign_as(
+            &slot.card,
+            prev,
+            Some(view.space_id),
+            now_ms(),
+            event_type,
+            &payload,
+        )?);
+        match write_log_if(&slot.log_path, &local.store_key, slot.stamp, &slot.wires) {
+            Ok(_) => return Ok(()),
+            Err(StoreError::Stale) => pause_before_retry(attempt),
+            Err(_) => return Err(CliError::message("could not write chats")),
+        }
+    }
+    Err(CliError::message(
+        "the chat changed while saving. Try again",
+    ))
+}
+
+fn is_blocked(dir: &Path, key: &[u8; 32]) -> Result<bool, CliError> {
+    Ok(read_blocked(dir)?.contains(key))
+}
+
+fn read_blocked(dir: &Path) -> Result<Vec<[u8; 32]>, CliError> {
+    let path = dir.join("blocked");
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let text = fs::read_to_string(&path).map_err(|_| CliError::message("could not read blocks"))?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        out.push(parse_note_id(line)?);
+    }
+    Ok(out)
+}
+
+fn write_blocked(dir: &Path, keys: &[[u8; 32]]) -> Result<(), CliError> {
+    let mut text = String::new();
+    for key in keys {
+        text.push_str(&hex_id(key));
+        text.push('\n');
+    }
+    fs::write(dir.join("blocked"), text).map_err(|_| CliError::message("could not write blocks"))
 }
 
 pub(crate) fn say(dir: &Path, text: &str) -> Result<(), CliError> {
@@ -633,16 +807,13 @@ pub(crate) fn sync(dir: &Path, url: &str) -> Result<String, CliError> {
     sync_except(dir, url, None)
 }
 
-pub(crate) fn sync_except(dir: &Path, url: &str, skip: Option<&str>) -> Result<String, CliError> {
-    check_relay_url(url)?;
-    let mut local = keys::open(dir)?;
-    let notes_path = local.notes_path.clone();
-    // Stamp first, then read. See `open_slot`.
-    let mut notes_stamp =
-        log_stamp(&notes_path).map_err(|_| CliError::message("could not open notes file"))?;
-    let mut notes = read_wires(&notes_path, &local.store_key)?;
-    let mut slots = load_slots(dir, &local.store_key)?;
-    for slot in &mut slots {
+fn arm_slots(
+    dir: &Path,
+    url: &str,
+    slots: &mut [Slot],
+    skip: Option<&str>,
+) -> Result<(), CliError> {
+    for slot in slots {
         let name = hex_id(&slot.card.mailbox);
         let legacy = slot.cursor_path.clone();
         slot.cursor = read_cursor_for(dir, url, &name, &legacy)?;
@@ -653,13 +824,35 @@ pub(crate) fn sync_except(dir: &Path, url: &str, skip: Option<&str>) -> Result<S
         };
         slot.before = slot.wires.len();
     }
+    Ok(())
+}
+
+pub(crate) fn sync_except(dir: &Path, url: &str, skip: Option<&str>) -> Result<String, CliError> {
+    check_relay_url(url)?;
+    let mut local = keys::open(dir)?;
+    let notes_path = local.notes_path.clone();
+    // Stamp first, then read. See `open_slot`.
+    let mut notes_stamp =
+        log_stamp(&notes_path).map_err(|_| CliError::message("could not open notes file"))?;
+    let mut notes = read_wires(&notes_path, &local.store_key)?;
+    let mut slots = load_slots(dir, &local.store_key)?;
+    arm_slots(dir, url, &mut slots, skip)?;
     let mut pushed = read_pushed_for(dir, url)?;
+    let mut files_pushed = read_files_pushed(dir, url)?;
     let recipients = if notes.is_empty() {
         Vec::new()
     } else {
         Notebook::open(dir)?.recipients()?
     };
-    let mut requests = queue_all(&local, &notes, &recipients, &slots, &mut pushed)?;
+    let mut requests = queue_all(
+        dir,
+        &local,
+        &notes,
+        &recipients,
+        &slots,
+        &mut pushed,
+        &mut files_pushed,
+    )?;
     let push_count = requests.len();
     let device_since = read_cursor_for(dir, url, "device", &dir.join("cursor-device"))?;
     requests.push(encode_request(&Request::Get {
@@ -695,7 +888,7 @@ pub(crate) fn sync_except(dir: &Path, url: &str, skip: Option<&str>) -> Result<S
         .sum();
     let mut dropped = Vec::new();
     file_incoming(&mut local, &mut notes, &mut dropped, &arrived)?;
-    take_chat_replies(&mut slots, &replies, push_count.saturating_add(1))?;
+    take_chat_replies(dir, &mut slots, &replies, push_count.saturating_add(1))?;
     let notes_before = if notes.len() == notes_before {
         notes_before
     } else {
@@ -713,6 +906,7 @@ pub(crate) fn sync_except(dir: &Path, url: &str, skip: Option<&str>) -> Result<S
     write_chat_slots(&mut slots, &local.store_key)?;
     write_cursor(&state.join("device"), device_cursor)?;
     write_pushed_for(dir, url, &pushed)?;
+    write_files_pushed(dir, url, &files_pushed)?;
     let notes_in = notes.len().saturating_sub(notes_before);
     let chats_in: usize = slots
         .iter()
@@ -731,11 +925,13 @@ pub(crate) fn sync_except(dir: &Path, url: &str, skip: Option<&str>) -> Result<S
 /// Everything this device has not sent yet: its notes, the recovery copy, and each conversation
 /// that is part of this sync. Returns the put requests.
 fn queue_all(
+    dir: &Path,
     local: &Local,
     notes: &[Vec<u8>],
     recipients: &[ambient_spaces::MemberInfo],
     slots: &[Slot],
     pushed: &mut PushSet,
+    files_pushed: &mut PushSet,
 ) -> Result<Vec<String>, CliError> {
     let mut requests = Vec::new();
     queue_pushes(
@@ -755,8 +951,100 @@ fn queue_all(
             pushed,
             &mut requests,
         )?;
+        queue_files(
+            dir,
+            &slot.card.mailbox,
+            &slot.wires,
+            &members,
+            files_pushed,
+            &mut requests,
+        )?;
     }
     Ok(requests)
+}
+
+fn queue_files(
+    dir: &Path,
+    own_mailbox: &[u8; 32],
+    wires: &[Vec<u8>],
+    members: &[ambient_spaces::MemberInfo],
+    pushed: &mut PushSet,
+    requests: &mut Vec<String>,
+) -> Result<(), CliError> {
+    let Ok(view) = conversation(wires) else {
+        return Ok(());
+    };
+    let conversation = hex_id(&view.space_id.0);
+    let mut seen = BTreeSet::new();
+    for wire in wires {
+        for file_id in crate::fileblob::cites(wire) {
+            if !seen.insert(file_id) {
+                continue;
+            }
+            let Some((name, bytes)) = local_chat_file(dir, &conversation, file_id) else {
+                continue;
+            };
+            for piece in crate::fileblob::pieces(view.space_id.0, file_id, &name, &bytes) {
+                for member in members {
+                    if member.mailbox == *own_mailbox {
+                        continue;
+                    }
+                    let key = (
+                        member.mailbox,
+                        crate::fileblob::push_id(&view.space_id.0, file_id, piece.index),
+                    );
+                    if !pushed.insert(key) {
+                        continue;
+                    }
+                    let mut ikm = [0_u8; 32];
+                    getrandom::getrandom(&mut ikm)
+                        .map_err(|_| CliError::message("random source failed"))?;
+                    let blob = seal_blob(
+                        &member.encryption_key,
+                        &member.mailbox,
+                        &crate::fileblob::encode(&piece),
+                        &ikm,
+                    )
+                    .map_err(|_| CliError::message("could not seal"))?;
+                    ikm.fill(0);
+                    requests.push(encode_request(&Request::Put {
+                        mailbox: member.mailbox,
+                        blob,
+                    }));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn local_chat_file(dir: &Path, conversation: &str, file_id: [u8; 8]) -> Option<(String, Vec<u8>)> {
+    if conversation.len() != 64 || !conversation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let id = hex_id(&file_id);
+    let folder = dir.join("chat-files").join(conversation);
+    let prefix = format!("{id}-");
+    let entries = fs::read_dir(&folder).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(text) = name.to_str() else {
+            continue;
+        };
+        if !text.starts_with(&prefix) || text.contains(".part-") || !entry.path().is_file() {
+            continue;
+        }
+        let display = text.get(prefix.len()..).unwrap_or("");
+        if display.is_empty() || display.contains("..") {
+            continue;
+        }
+        let bytes = fs::read(entry.path()).ok()?;
+        if bytes.len() > 256 * 1024 * 1024 {
+            return None;
+        }
+        return Some((display.to_owned(), bytes));
+    }
+    None
 }
 
 /// The relay's answers to the pushes. Any refusal stops the sync.
@@ -794,7 +1082,12 @@ fn read_device_inbox(
 
 /// File what the relay delivered into each conversation that is part of this sync. The replies
 /// come in the order the requests were made, which is the order of the active slots.
-fn take_chat_replies(slots: &mut [Slot], replies: &[String], first: usize) -> Result<(), CliError> {
+fn take_chat_replies(
+    dir: &Path,
+    slots: &mut [Slot],
+    replies: &[String],
+    first: usize,
+) -> Result<(), CliError> {
     for (nth, slot) in slots.iter_mut().filter(|slot| slot.active).enumerate() {
         let reply = replies
             .get(first.saturating_add(nth))
@@ -807,7 +1100,12 @@ fn take_chat_replies(slots: &mut [Slot], replies: &[String], first: usize) -> Re
                 &slot.card.mailbox,
                 &item.blob,
             ) {
-                got.push(plain);
+                if let Some(piece) = crate::fileblob::decode(&plain) {
+                    crate::fileblob::store(dir, &piece)
+                        .map_err(|_| CliError::message("could not save the file"))?;
+                } else {
+                    got.push(plain);
+                }
             }
         }
         accept_chat(&mut slot.wires, &got);

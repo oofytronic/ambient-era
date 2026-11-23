@@ -38,6 +38,8 @@ inbox = { 1 => bstr .size 32, 2 => bstr .size 32 } ; signing key, new mailbox
 
 Types: `space.member-add`, `space.member-remove`, `space.inbox`.
 
+A private Space has at most 16 members. A `space.genesis` with more than 16 members is `bad_payload` and MUST NOT be applied. A `space.member-add` that would make a 17th member is not applied. Later events from that signer are still read. Sixteen counts keys, so a person and each of their devices each take one. It is a handful, not a room.
+
 Adding one of the owner's devices to the Notes space MUST include a checkpoint: the accepted events of that Space, sealed to the new encryption key, written to the new inbox. Adding anyone else SHOULD include a checkpoint when the owner wants them to see history, and MUST NOT include one when the owner wants them to see only what happens next. Neither choice un-sends what a removed member already opened.
 
 A removed member's earlier events stay. New events MUST NOT be sealed to their key. Events they sign after removal are `not_member` and MUST NOT be applied.
@@ -106,3 +108,4 @@ Vector `conformance/vectors/spaces/0001-hpke-blob.json` seals the plaintext `hel
 
 - v1 (2026-10-27): notes and conversation Spaces, HPKE to member keys, snapshot notes with an explicit conflict rule.
 - v1 (2026-11-20): Merge says an event from a signer who is not yet a member waits for an enrollment instead of being refused at once. No change to the wire format.
+- v1 (2026-11-23): A private Space has at most 16 members. No change to the wire format.

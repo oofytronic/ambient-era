@@ -4,7 +4,7 @@ For the next agent. Written 2026-11-20 at the end of a long working session with
 
 ## State
 
-- v0.1 is declared. It is notes on one computer, in the Linux window (Aerodash, `crates/ambient-desktop`). The owner is using it daily for a week and sending small requests. v0.2 (a second computer, a relay, a 1:1) is next and has not started in the window.
+- v0.1 is declared. It is notes on one computer, in the Linux window (Aerodash, `crates/ambient-desktop`). v0.2 is groups and sealed chat files on this computer. The second computer, a real 1:1, and the phone push are the end of v0.2 and have not been checked.
 - `test` is the working branch. `trunk` is fast-forwarded to it after each batch the owner approves. Only fast-forward `trunk` when asked. Do not make other branches. Version is 0.1.0 and untagged.
 - No display was available in any session so far. Every window behavior is covered by state and pure-function tests, never by eyes. When the owner reports a visual problem, believe them over the tests.
 

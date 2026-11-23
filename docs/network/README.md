@@ -47,7 +47,7 @@ Build in this order. Do not start the later rows to make the demo more impressiv
 | 6 | Advanced, not the first screen | Done. The address fields are behind Advanced on the globe card. This computer, a pin, and a backup. No address on the notes screen. |
 | 7 | The replacement test | One relay from the list is up, with TLS and a disk. A second computer, with no address typed, receives a note and a chat line. Stop that relay. The next one on the list receives a re-send. The note arrives again. The first operator never saw plaintext. |
 
-**Exit.** The owner uses a second computer for real notes and one 1:1, with one relay turned off in the middle, and does not type an address to recover. A green test is not the exit.
+**Exit.** The owner uses a second computer for real notes and one 1:1, with one relay turned off in the middle, and does not type an address to recover. This is the last check of v0.2, not a gate in front of groups. A green test is not the exit.
 
 Polling with get is enough. Subscribe stays required for a conforming relay and optional for the client.
 

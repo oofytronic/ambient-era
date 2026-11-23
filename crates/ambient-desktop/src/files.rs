@@ -1,7 +1,8 @@
 //! Files a person adds from this computer.
 //!
-//! The bytes stay in the notebook folder. A chat message only cites them.
-//! The citation can sync. The bytes do not. That is not a new record.
+//! The bytes stay in the notebook folder until a sync. A chat message only
+//! cites them. The sync seals those bytes to the other members. That is not
+//! a new record.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

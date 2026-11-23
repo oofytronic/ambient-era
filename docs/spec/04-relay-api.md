@@ -72,8 +72,11 @@ Retention, quotas, and rate limits are deployment policy. A self-hosted relay MA
 
 ## Errors
 
-`bad_request`, `too_large`. No `unauthorized`. A wrong mailbox id is indistinguishable from an empty mailbox.
+`bad_request`, `too_large`, `rate_limited`. No `unauthorized`. A wrong mailbox id is indistinguishable from an empty mailbox.
+
+A relay MAY return `rate_limited` and store nothing when one mailbox is written faster than its policy. The reference relay allows 10000 puts to one mailbox in a minute. That count stays in memory for the minute. It is not written to disk and it is not logged. It is not a user id, and it is not a security boundary.
 
 ## Changelog
 
 - v1 (2026-10-27): put, get, delete, subscribe. Mailbox id is the capability.
+- v1 (2026-11-23): A relay MAY return `rate_limited`. The reference relay caps a mailbox at 10000 puts a minute, in memory. No wire field was added.

@@ -30,27 +30,29 @@ Declared by the owner on 2026-11-20. Desktop only. One person, one computer. No 
 
 **Still true at the end of v0.1.** The notes are on one disk until the owner makes a copy with Back up. Nothing makes one for them, and the recovery phrase does not bring the notes back by itself. A copy has the key file, so whoever has the copy can read the notes unless the key file is wrapped. A stolen or seized device whose key file is not wrapped, or that is unlocked, gives up the notes. The key file is not the OS keystore. The product is not anonymous. There is no agent, no sensing, and no public mirror.
 
-## v0.2 — a second computer and a private 1:1, then groups
+## v0.2 — groups and attachments on this computer, then a second computer
 
-Everything in steps 6 through 8 is already built and tested, on two folders on one computer. None of it has been used between two machines. Build, and use, in this order. Do not skip ahead.
-
-| Step | Work | Done when |
-|:--|:--|:--|
-| 6 | Relay and a second device | The window pairs a second folder and a note shows up there. The relay starts with the window and syncs on its own. It stores opaque blobs and binds `127.0.0.1` in the clear, which spec 04 says is not a public deployment. Two folders on one computer, not two machines. |
-| 7 | 1:1 | The window opens a conversation, and can open another. Each one has its own contact key. Text is sealed to that key. The invite is a link or a QR. Messages show up after both windows sync. |
-| 8 | Devices, activity, copy | Revoke a device from the root window. The note list shows which device wrote the current version. The editor's line for it was taken off the page on 2026-11-20 and comes back with a per-note info icon. Copy a note into a chat as text is in. Recovery restore from the phrase is in the window, and the restored folder enrolls its new device. |
-
-The network track in [docs/network/README.md](docs/network/README.md) is how a second computer reaches the first without an address being typed. It is part of this stage.
-
-**First exit, before any group.** The owner uses the notes on a second computer for real work, and uses 1:1 with at least one person, including an offline gap and one restore from the recovery phrase. A green test run is not the exit.
-
-Then, and only then:
+The owner cannot sit at a second computer yet. That check is the last step of this version, not the first. Steps 6 through 8 are already built and tested on two folders on one computer. They are not in use between two machines, and nothing below pretends that they are. Build, and test on one computer, in this order.
 
 | Step | Work | Done when |
 |:--|:--|:--|
-| 9 | Small private groups | The same HPKE sealing. A numeric member cap in the spaces spec. Member remove and block. A rate limit on first contact. |
-| 10 | Encrypted attachments | A file in a conversation reaches the other member as sealed bytes. Today the citation syncs and the bytes do not. |
-| 11 | Content-free push | A phone client exists, and a push carries no content. |
+| 9 | Small private groups | The same HPKE sealing. A private Space holds at most 16 member keys ([spec 03](docs/spec/03-spaces.md)). The person who started a conversation can add a member and remove one. A signing key in the local file `blocked` cannot be invited. The relay refuses a mailbox written more than 10000 times a minute ([spec 04](docs/spec/04-relay-api.md)). The count is in memory and is not logged. |
+| 10 | Encrypted attachments | A file cited in a chat line is sealed to the other members and written on their side. A file that does not fit in one relay blob is sent in pieces. A file over 256 MB is still refused. The bytes are not a new record. |
+
+The window does not yet have a button for adding, removing, or blocking. Those commands are `ambient add-member`, `ambient remove-member`, and `ambient block`. A file the window already cites is sealed on the next sync.
+
+Then, and only then, the second computer:
+
+| Step | Work | Done when |
+|:--|:--|:--|
+| 6 | Relay and a second device | The window pairs a second folder and a note shows up there. The relay starts with the window and syncs on its own. It stores opaque blobs and binds `127.0.0.1` in the clear, which spec 04 says is not a public deployment. Two folders on one computer, not two machines. The code is in. It has not been used on a second machine. |
+| 7 | 1:1 | The window opens a conversation, and can open another. Each one has its own contact key. Text is sealed to that key. The invite is a link or a QR. Messages show up after both windows sync. The code is in. It has not been used with another person. |
+| 8 | Devices, activity, copy | Revoke a device from the root window. The note list shows which device wrote the current version. Copy a note into a chat as text is in. Recovery restore from the phrase is in the window, and the restored folder enrolls its new device. Not yet done on a second machine. |
+| 11 | Content-free push | A phone client exists, and a push carries no content. Not started. A phone is another device. |
+
+The network track in [docs/network/README.md](docs/network/README.md) is how a second computer reaches the first without an address being typed. Its replacement test is part of step 6, and it waits with the second computer.
+
+**Exit, last.** The owner uses the notes on a second computer for real work, and uses 1:1 with at least one person, including an offline gap and one restore from the recovery phrase. A green test run is not the exit. Groups and attachments are not this exit.
 
 Not in v0.2: rooms of hundreds, a group ratchet, MLS.
 

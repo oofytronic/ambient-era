@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 use ambient_events::{EventId, encode_unsigned, sign_wire, signing_public, verify};
 use ambient_identity::is_retained;
 use ambient_spaces::{
-    GenesisMember, Revocation, Skip, member_add_payload, note_put_payload, notes_genesis_payload,
-    project_notes, project_notes_for_root, project_notes_verified,
+    GenesisMember, MAX_MEMBERS, Revocation, Skip, conversation_genesis_payload, member_add_payload,
+    note_put_payload, notes_genesis_payload, project_conversation, project_notes,
+    project_notes_for_root, project_notes_verified,
 };
 
 fn seed(fill: u8) -> [u8; 32] {
@@ -308,6 +309,54 @@ fn a_first_note_waits_for_an_enrollment_that_is_a_round_behind() -> Result<(), S
         || !view.skipped.iter().any(|(_, why)| *why == Skip::NotMember)
     {
         return Err("a stranger's note was applied".to_owned());
+    }
+    Ok(())
+}
+
+#[test]
+fn a_seventeenth_member_is_not_added() -> Result<(), String> {
+    let mut members = Vec::new();
+    for index in 0..MAX_MEMBERS {
+        let fill = u8::try_from(index).map_err(|err| err.to_string())?;
+        members.push(GenesisMember {
+            signing_key: signing_public(&seed(fill)),
+            encryption_key: seed(fill.wrapping_add(40)),
+            role: if index == 0 { 1 } else { 2 },
+            mailbox: seed(fill.wrapping_add(80)),
+        });
+    }
+    let payload = conversation_genesis_payload(&members).map_err(|err| err.to_string())?;
+    let owner = seed(0);
+    let genesis = sign(&owner, None, None, "space.genesis", &payload)?;
+    let space_id = verify(&genesis).map_err(|err| err.to_string())?.id;
+    let extra = GenesisMember {
+        signing_key: signing_public(&seed(30)),
+        encryption_key: seed(31),
+        role: 2,
+        mailbox: seed(32),
+    };
+    let add = member_add_payload(&extra).map_err(|err| err.to_string())?;
+    let add_wire = sign(
+        &owner,
+        Some(space_id),
+        Some(space_id),
+        "space.member-add",
+        &add,
+    )?;
+    let view = project_conversation(&[&genesis, &add_wire], &[]).map_err(|err| err.to_string())?;
+    if view.members.len() != MAX_MEMBERS {
+        return Err(format!("cap was not kept: {}", view.members.len()));
+    }
+    if !view.skipped.iter().any(|(_, why)| *why == Skip::Full) {
+        return Err(format!(
+            "the extra member was not refused: {:?}",
+            view.skipped
+        ));
+    }
+    let mut too_many = members;
+    too_many.push(extra);
+    if conversation_genesis_payload(&too_many).is_ok() {
+        return Err("genesis accepted 17 members".to_owned());
     }
     Ok(())
 }

@@ -5,6 +5,10 @@ use ambient_identity::is_retained;
 
 use crate::error::SpaceError;
 
+/// A private Space holds at most this many member keys. A person and each of
+/// their devices count. Sixteen is a handful, not a room.
+pub const MAX_MEMBERS: usize = 16;
+
 /// A revocation taken from the identity log.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Revocation {
@@ -27,6 +31,8 @@ pub enum Skip {
     Gap,
     /// `msg.put` in a notes Space, or the reverse.
     WrongKind,
+    /// The Space already has [`MAX_MEMBERS`] members.
+    Full,
 }
 
 /// One surviving snapshot of a note. A note with more than one head is a conflict.
@@ -534,6 +540,10 @@ fn apply_membership(
         "space.member-add" => {
             let payload = decode_cbor(&item.payload).map_err(|_| SpaceError::BadPayload)?;
             let (key, member) = read_member(&payload)?;
+            if !members.contains_key(&key) && members.len() >= MAX_MEMBERS {
+                skipped.push((item.id, Skip::Full));
+                return Ok(());
+            }
             members.insert(key, member);
         }
         "space.member-remove" => {
@@ -725,6 +735,9 @@ pub fn msg_put_citing(text: &str, cite: Option<&[u8; 32]>) -> Result<Vec<u8>, Sp
 }
 
 fn genesis_payload(kind: &str, members: &[GenesisMember]) -> Result<Vec<u8>, SpaceError> {
+    if members.len() > MAX_MEMBERS {
+        return Err(SpaceError::BadPayload);
+    }
     let mut encoded = Vec::new();
     for member in members {
         if member.role != 1 && member.role != 2 {
@@ -788,7 +801,7 @@ fn read_genesis(payload: &[u8]) -> Result<(String, BTreeMap<[u8; 32], Member>), 
     let Cbor::Array(members) = map.get(&2).ok_or(SpaceError::BadPayload)? else {
         return Err(SpaceError::BadPayload);
     };
-    if members.is_empty() {
+    if members.is_empty() || members.len() > MAX_MEMBERS {
         return Err(SpaceError::BadPayload);
     }
     let mut out = BTreeMap::new();

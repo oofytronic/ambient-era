@@ -11,6 +11,7 @@
 use std::path::Path;
 
 mod draft;
+mod fileblob;
 mod host;
 mod index;
 mod keys;

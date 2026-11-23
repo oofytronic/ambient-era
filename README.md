@@ -37,7 +37,7 @@ Each release is a usable product on its own. The order, the exit test for v0.1, 
 | Version | Ships |
 |:--|:--|
 | **v0.1** | Key identity, a personal Notes space, tasks and tags, local search, spelling, a recovery phrase. One computer, no network. Desktop first. |
-| **v0.2** | A second computer through a relay, and 1:1 E2EE chat (a Space of two). Then small private groups on the same sealing (not MLS), encrypted media, member management, abuse controls. Content-free push arrives with the first phone client. |
+| **v0.2** | Small private groups on the same sealing (not MLS), then encrypted file bytes in a chat. The second computer, 1:1 with another person, and content-free push are the end of this version, not the start. |
 | **v0.3** | **Write:** long-form creations (books, series, newsletters), each its own Space. Markdown editor, media embeds, versions, links and backlinks, export. Short notes already exist from v0.1. |
 | **v0.4** | **Weave:** chat about any creation, a creation-to-conversation sidebar, share a version into a conversation, capability-scoped local API |
 | **v0.5** | One-command self-hostable relay, multi-relay redundancy, full data export and import |
@@ -60,7 +60,7 @@ The second computer, the relay, 1:1 chat, device revoke, and recovery restore ar
 
 ### v0.2 — a second computer and a private 1:1, then groups
 
-First the second computer and the 1:1: a relay the owner can reach, a second folder paired to the first, one conversation with one contact by link or QR, an offline gap, and a restore from the recovery phrase. Then small private groups on the same sealing, encrypted media, and member management. The groups do not start until the 1:1 is in use. The relay is untrusted and self-hostable. What "encrypted" means, and what it does not mean, is [THREAT_MODEL.md](THREAT_MODEL.md).
+First the groups and the file bytes, on this computer: a Space of at most 16 members, add and remove, a local block, a relay put limit, and a cited file sealed to the other member. Then the second computer and the 1:1: a relay the owner can reach, a second folder paired to the first, one conversation with one contact by link or QR, an offline gap, and a restore from the recovery phrase. The second computer is the end of v0.2. The groups do not wait for it. The relay is untrusted and self-hostable. What "encrypted" means, and what it does not mean, is [THREAT_MODEL.md](THREAT_MODEL.md).
 
 No feed, no P2P, no phone push yet.
 

@@ -363,6 +363,74 @@ fn adding_while_a_sync_waits_loses_no_note() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn a_blocked_card_cannot_start_a_conversation() -> Result<(), String> {
+    let root = std::env::temp_dir().join(format!("ambient-block-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let alice = root.join("alice");
+    let bob = root.join("bob");
+    let alice_s = alice.to_string_lossy().to_string();
+    let bob_s = bob.to_string_lossy().to_string();
+    run_ok(&["init", &alice_s], "")?;
+    run_ok(&["init", &bob_s], "")?;
+    let bob_card = run_ok(&["card", &bob_s], "")?;
+    run_ok(&["block", &alice_s, bob_card.trim()], "")?;
+    let mut output = Vec::new();
+    let text = run(
+        &mut ["talk", &alice_s, bob_card.trim()]
+            .into_iter()
+            .map(str::to_owned),
+        &mut Cursor::new("".as_bytes()),
+        &mut output,
+    )
+    .err()
+    .map(|err| err.to_string())
+    .unwrap_or_default();
+    if text != "that person is blocked" {
+        return Err(format!("block did not hold: {text}"));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
+fn a_cited_file_reaches_the_other_folder() -> Result<(), String> {
+    let port = spawn_relay()?;
+    let url = format!("ws://127.0.0.1:{port}");
+    let root = std::env::temp_dir().join(format!("ambient-file-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let alice = root.join("alice");
+    let bob = root.join("bob");
+    run_ok(&["init", &alice.to_string_lossy()], "")?;
+    run_ok(&["init", &bob.to_string_lossy()], "")?;
+    let bob_card = run_ok(&["card", &bob.to_string_lossy()], "")?;
+    let id =
+        ambient_cli::start_conversation(&alice, bob_card.trim()).map_err(|err| err.to_string())?;
+    let file_id = "0123456789abcdef";
+    let folder = alice.join("chat-files").join(&id);
+    std::fs::create_dir_all(&folder).map_err(|err| err.to_string())?;
+    std::fs::write(folder.join(format!("{file_id}-note.txt")), b"hello file")
+        .map_err(|err| err.to_string())?;
+    ambient_cli::send_chat(&alice, &format!("![note.txt](aerodash-file:{file_id})"))
+        .map_err(|err| err.to_string())?;
+    ambient_cli::sync_folder(&alice, &url).map_err(|err| err.to_string())?;
+    ambient_cli::sync_folder(&bob, &url).map_err(|err| err.to_string())?;
+    let landed = bob
+        .join("chat-files")
+        .join(&id)
+        .join(format!("{file_id}-note.txt"));
+    let bytes = std::fs::read(&landed).map_err(|err| format!("{err} at {}", landed.display()))?;
+    if bytes != b"hello file" {
+        return Err(format!("file bytes were {bytes:?}"));
+    }
+    let text = run_ok(&["hear", &bob.to_string_lossy()], "")?;
+    if !text.contains("aerodash-file:0123456789abcdef") {
+        return Err(format!("the cite did not arrive: {text}"));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
 fn spawn_relay() -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|err| err.to_string())?;
     let port = listener.local_addr().map_err(|err| err.to_string())?.port();

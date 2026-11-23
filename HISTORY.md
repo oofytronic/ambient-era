@@ -4,6 +4,16 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-23 — the second computer is the end of v0.2
+
+The owner cannot use a second computer yet. On 2026-11-20 the second computer was the first exit of v0.2, and groups waited behind it. That order is reversed. v0.2 now builds what one computer can test, and the second computer is the last check.
+
+A private Space holds at most 16 member keys. A 17th `space.member-add` is not applied. Genesis of more than 16 members is `bad_payload`. [Spec 03](docs/spec/03-spaces.md). The person who started a conversation can add a member and remove one. A signing key in the local file `blocked` is not invited. That file does not sync. The relay refuses a mailbox written more than 10000 times in a minute, counted in memory and not logged ([spec 04](docs/spec/04-relay-api.md)). That is the rate limit on a flood, including a first contact. It is not a user id.
+
+A file cited from a chat line is sealed to the other members and written beside their copy of the conversation. It is not a new record. A file that does not fit in one relay blob is sent in pieces. The window still has no button for add, remove, or block. The commands are `ambient add-member`, `ambient remove-member`, and `ambient block`.
+
+The second computer, the 1:1 with another person, the offline gap, the restore, and the relay replacement test stay the exit of v0.2. Content-free push stays with them, because it needs a phone. None of that was run.
+
 ## 2026-11-20 — Back up this folder
 
 v0.1 had no copy of the notes off the computer, and the owner was about to use it every day. Back up, in settings, copies the notebook folder to a place the owner types, with a default of `Aerodash backups` in the home folder. It is by hand. The copy is named for the time, `aerodash-2026-11-20-1405`, and never overwrites an earlier one.

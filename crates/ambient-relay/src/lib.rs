@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ambient_transport::{Item, Request, Response, decode_request, encode_response};
 use rustls::ServerConfig;
@@ -27,6 +27,9 @@ mod disk;
 
 /// Four mebibytes, from spec 04.
 pub const MAX_BLOB: usize = 4_194_304;
+
+/// Puts one mailbox may take in a minute. In memory only. Not a user id.
+pub const PUTS_PER_MINUTE: usize = 10_000;
 
 /// What a mailbox operation or the listener can refuse.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,11 +60,24 @@ struct Slot {
 }
 
 /// Mailboxes keyed by the 32-byte id. Possession of the id is the only capability.
-#[derive(Default)]
 pub struct Relay {
     mailboxes: BTreeMap<[u8; 32], Slot>,
     /// Set by [`Relay::open`]. Absent means a put is not written anywhere.
     dir: Option<PathBuf>,
+    put_limit: usize,
+    /// Recent puts, forgotten after a minute. Not written to disk.
+    recent: BTreeMap<[u8; 32], Vec<Instant>>,
+}
+
+impl Default for Relay {
+    fn default() -> Self {
+        Self {
+            mailboxes: BTreeMap::new(),
+            dir: None,
+            put_limit: PUTS_PER_MINUTE,
+            recent: BTreeMap::new(),
+        }
+    }
 }
 
 impl Relay {
@@ -121,6 +137,14 @@ impl Relay {
     }
 
     fn put(&mut self, mailbox: [u8; 32], blob: Vec<u8>) -> (String, Option<([u8; 32], Item)>) {
+        if !self.allow_put(mailbox) {
+            return (
+                encode_response(&Response::Err {
+                    code: "rate_limited".to_owned(),
+                }),
+                None,
+            );
+        }
         if blob.len() > MAX_BLOB {
             return (
                 encode_response(&Response::Err {
@@ -153,6 +177,24 @@ impl Relay {
             }),
             Some((mailbox, item)),
         )
+    }
+
+    /// Test hook. The running relay uses [`PUTS_PER_MINUTE`].
+    #[cfg(test)]
+    pub(crate) fn set_put_limit(&mut self, limit: usize) {
+        self.put_limit = limit;
+    }
+
+    fn allow_put(&mut self, mailbox: [u8; 32]) -> bool {
+        let now = Instant::now();
+        let window = self.recent.entry(mailbox).or_default();
+        let keep = Duration::from_mins(1);
+        window.retain(|then| now.saturating_duration_since(*then) < keep);
+        if window.len() >= self.put_limit {
+            return false;
+        }
+        window.push(now);
+        true
     }
 
     fn undo_put(&mut self, mailbox: [u8; 32], cursor: u64, created: bool) {
@@ -214,6 +256,8 @@ fn fs_open(dir: &Path) -> Result<Relay, RelayError> {
     Ok(Relay {
         mailboxes,
         dir: Some(dir.to_path_buf()),
+        put_limit: PUTS_PER_MINUTE,
+        recent: BTreeMap::new(),
     })
 }
 
@@ -511,6 +555,29 @@ mod tests {
             panic!("err");
         };
         assert_eq!(code, "too_large");
+    }
+
+    #[test]
+    fn a_mailbox_written_too_fast_is_refused() {
+        let mut relay = Relay::new();
+        relay.set_put_limit(2);
+        let mailbox = [9_u8; 32];
+        for _ in 0..2 {
+            let (line, posted) = relay.handle_line(&encode_request(&Request::Put {
+                mailbox,
+                blob: b"ok".to_vec(),
+            }));
+            assert!(posted.is_some(), "{line}");
+        }
+        let (line, posted) = relay.handle_line(&encode_request(&Request::Put {
+            mailbox,
+            blob: b"no".to_vec(),
+        }));
+        assert!(posted.is_none());
+        let Response::Err { code } = decode_response(&line).expect("err") else {
+            panic!("err");
+        };
+        assert_eq!(code, "rate_limited");
     }
 
     #[test]
