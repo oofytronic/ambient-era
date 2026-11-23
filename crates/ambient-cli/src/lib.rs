@@ -227,10 +227,14 @@ pub fn chat_lines(dir: &Path) -> Result<Vec<String>, CliError> {
 pub struct ConversationSummary {
     /// Hex Space id.
     pub id: String,
-    /// Short label for the other member.
+    /// Short label for the other member. A group is "{n} people".
     pub label: String,
     /// First bytes of the other member's key, hex. Empty when unknown.
     pub other: String,
+    /// How many member keys the conversation has now.
+    pub members: usize,
+    /// True when this folder's card for the conversation started it.
+    pub started: bool,
 }
 
 /// Conversations in this folder, in storage order.
@@ -241,8 +245,26 @@ pub struct ConversationSummary {
 pub fn list_conversations(dir: &Path) -> Result<Vec<ConversationSummary>, CliError> {
     Ok(sync::conversations(dir)?
         .into_iter()
-        .map(|(id, label, other)| ConversationSummary { id, label, other })
+        .map(|chat| ConversationSummary {
+            id: chat.id,
+            label: chat.label,
+            other: chat.other,
+            members: chat.members,
+            started: chat.started,
+        })
         .collect())
+}
+
+/// Add a person to one conversation. The starter's folder signs it.
+///
+/// `card` is their contact link or the raw card. The bytes stay here until the next sync.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when this folder did not start the conversation, the person is blocked,
+/// the conversation is full, or the card is rejected.
+pub fn add_member_in(dir: &Path, id: &str, card: &str) -> Result<(), CliError> {
+    sync::add_member_in(dir, id, card)
 }
 
 /// One chat message for the window, oldest first.

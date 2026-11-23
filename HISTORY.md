@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-23 — a third person, from the window that is already open
+
+The extra window in Settings was one other person, and a group could only be changed from the command line. The same path now opens one more person, a new folder beside the notebook, and the conversation that this window started has Add someone. Paste that person's invite link. They wait. They do not press Start conversation. The next sync seals the conversation to them. The list names a conversation of more than two people by the count. Remove and block stay commands.
+
 ## 2026-11-23 — the second computer is the end of v0.2
 
 The owner cannot use a second computer yet. On 2026-11-20 the second computer was the first exit of v0.2, and groups waited behind it. That order is reversed. v0.2 now builds what one computer can test, and the second computer is the last check.

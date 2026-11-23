@@ -106,6 +106,60 @@ fn one_message_crosses() -> Result<(), String> {
 }
 
 #[test]
+fn a_third_person_joins_the_conversation() -> Result<(), String> {
+    let port = spawn_relay()?;
+    let url = format!("ws://127.0.0.1:{port}");
+    let root = std::env::temp_dir().join(format!("ambient-group-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let alice = root.join("alice");
+    let bob = root.join("bob");
+    let carol = root.join("carol");
+    let alice_s = alice.to_string_lossy().to_string();
+    let bob_s = bob.to_string_lossy().to_string();
+    let carol_s = carol.to_string_lossy().to_string();
+    run_ok(&["init", &alice_s], "")?;
+    run_ok(&["init", &bob_s], "")?;
+    run_ok(&["init", &carol_s], "")?;
+    let bob_card = run_ok(&["card", &bob_s], "")?;
+    let carol_card = run_ok(&["card", &carol_s], "")?;
+    run_ok(&["talk", &alice_s, bob_card.trim()], "")?;
+    run_ok(&["say", &alice_s, "hello"], "")?;
+    run_ok(&["sync", &alice_s, &url], "")?;
+    run_ok(&["sync", &bob_s, &url], "")?;
+    run_ok(&["add-member", &alice_s, carol_card.trim()], "")?;
+    run_ok(&["say", &alice_s, "you too"], "")?;
+    run_ok(&["sync", &alice_s, &url], "")?;
+    run_ok(&["sync", &bob_s, &url], "")?;
+    run_ok(&["sync", &carol_s, &url], "")?;
+    let heard = run_ok(&["hear", &carol_s], "")?;
+    if !heard.contains("hello") || !heard.contains("you too") {
+        return Err(format!("carol heard {heard}"));
+    }
+    run_ok(&["say", &carol_s, "i am here"], "")?;
+    run_ok(&["sync", &carol_s, &url], "")?;
+    run_ok(&["sync", &alice_s, &url], "")?;
+    run_ok(&["sync", &bob_s, &url], "")?;
+    for (name, dir) in [("alice", &alice), ("bob", &bob), ("carol", &carol)] {
+        let heard = run_ok(&["hear", &dir.to_string_lossy()], "")?;
+        if !heard.contains("i am here") {
+            return Err(format!("{name} heard {heard}"));
+        }
+        let chats = ambient_cli::list_conversations(dir).map_err(|err| err.to_string())?;
+        let chat = chats
+            .first()
+            .ok_or_else(|| format!("{name} has no conversation"))?;
+        if chat.members != 3 {
+            return Err(format!("{name} sees {} people", chat.members));
+        }
+        if chat.started != (name == "alice") {
+            return Err(format!("{name} started={}", chat.started));
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[test]
 fn paired_folder_lists_nothing_before_sync() -> Result<(), String> {
     let root = std::env::temp_dir().join(format!("ambient-empty-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);

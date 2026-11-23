@@ -108,6 +108,10 @@ struct App {
     draft_editor: text_editor::Content,
     my_card: String,
     their_card: String,
+    /// Link pasted to add someone to the open conversation.
+    add_draft: String,
+    /// The add field is open.
+    adding: bool,
     relay_ready: bool,
     relay_ours: bool,
     sync_open: bool,
@@ -396,6 +400,10 @@ enum Message {
     SavePinned,
     OpenPaired,
     OpenPerson,
+    OpenOneMore,
+    AddDraft(String),
+    ToggleAdd,
+    AddToChat,
     #[allow(dead_code)]
     CopyCard,
     #[allow(dead_code)]
@@ -929,6 +937,8 @@ impl App {
             draft_editor: text_editor::Content::new(),
             my_card: String::new(),
             their_card: String::new(),
+            add_draft: String::new(),
+            adding: false,
             relay_ready: false,
             relay_ours: false,
             sync_open: false,
@@ -1553,6 +1563,22 @@ impl App {
                 self.open_person();
                 Task::none()
             }
+            Message::OpenOneMore => {
+                self.open_one_more();
+                Task::none()
+            }
+            Message::AddDraft(text) => {
+                self.add_draft = text;
+                Task::none()
+            }
+            Message::ToggleAdd => {
+                self.adding = !self.adding;
+                Task::none()
+            }
+            Message::AddToChat => {
+                self.add_to_chat();
+                self.begin_sync()
+            }
             Message::CopyCard => self.copy_card(),
             Message::MyCardChanged(card) => {
                 self.my_card = card;
@@ -1599,6 +1625,8 @@ impl App {
             Message::SelectChat(id) => {
                 if self.chat_id.as_deref() != Some(id.as_str()) {
                     self.chat.clear();
+                    self.adding = false;
+                    self.add_draft.clear();
                 }
                 self.chat_id = Some(id);
                 self.screen = Screen::Chat;
@@ -4550,7 +4578,7 @@ impl App {
             composer = composer.push(chips);
             composer = composer.push(
                 text(
-                    "The file stays on this computer. The message can sync. The file cannot, yet.",
+                    "The file is sealed to the other people in this conversation on the next sync.",
                 )
                 .size(12)
                 .color(ink.muted),
@@ -4635,6 +4663,11 @@ impl App {
                 .align_y(iced::Alignment::Center),
             );
         }
+        if let Some(chat) = self.chats.iter().find(|chat| &chat.id == id).cloned()
+            && let Some(row) = self.add_row(&chat)
+        {
+            head = head.push(row);
+        }
         if searching {
             head = head.push(
                 text_input("Search this conversation", &self.chat_query)
@@ -4645,6 +4678,52 @@ impl App {
             );
         }
         head.into()
+    }
+
+    /// The count, and Add someone, under the conversation name. Nothing when this is a 1:1
+    /// that this window did not start.
+    fn add_row(&self, chat: &ambient_cli::ConversationSummary) -> Option<Element<'_, Message>> {
+        let ink = self.ink();
+        let named = self
+            .aliases
+            .get(&chat.id)
+            .is_some_and(|name| !name.trim().is_empty());
+        let show_count = chat.members > 2 && named;
+        if !show_count && !chat.started {
+            return None;
+        }
+        let mut rows = column![].spacing(4);
+        if show_count {
+            rows = rows.push(
+                text(format!("{} people", chat.members))
+                    .size(12)
+                    .color(ink.muted),
+            );
+        }
+        if chat.started && self.adding {
+            rows = rows
+                .push(
+                    text("Paste their Invite link. They wait. They do not start a conversation.")
+                        .size(13)
+                        .color(ink.muted),
+                )
+                .push(
+                    text_input("Their link", &self.add_draft)
+                        .on_input(Message::AddDraft)
+                        .padding(10)
+                        .style(field_style),
+                )
+                .push(
+                    row![
+                        action_label("Add", Message::AddToChat),
+                        ghost_label("Cancel", Message::ToggleAdd),
+                    ]
+                    .spacing(8),
+                );
+        } else if chat.started {
+            rows = rows.push(ghost_label("Add someone", Message::ToggleAdd));
+        }
+        Some(rows.into())
     }
 
     fn invite_sheet(&self) -> Element<'_, Message> {
@@ -4782,6 +4861,7 @@ impl App {
                 ]
                 .spacing(8),
             );
+            body = body.push(ghost_label("Open one more person", Message::OpenOneMore));
         }
         settings_card("Devices", body.into())
     }
@@ -5328,6 +5408,8 @@ impl App {
                 id: row.id.clone(),
                 label: row.label.clone(),
                 other: row.other.clone(),
+                members: row.members,
+                started: row.started,
             })
             .collect();
         let known = self
@@ -7391,6 +7473,54 @@ impl App {
             &path,
             "Opened the other person. In that window open Invite and copy the link. Paste it here. Only this window presses Start conversation.",
         );
+    }
+
+    fn open_one_more(&mut self) {
+        if !self.notebook.as_ref().is_some_and(Notebook::holds_root) {
+            self.say("Open another person from the window that holds the root.");
+            return;
+        }
+        for n in 2..=8 {
+            let path = sibling(&self.dir, &format!("-person-{n}"));
+            if path.join("key").exists() {
+                continue;
+            }
+            if let Err(err) = Notebook::create(&path) {
+                self.message = err.to_string();
+                return;
+            }
+            self.spawn_at(
+                &path,
+                "Opened one more person. In that window open Invite and copy the link. Paste it in the conversation and press Add someone. They wait. They do not start a conversation.",
+            );
+            return;
+        }
+        self.say("Eight extra people are already on this computer.");
+    }
+
+    fn add_to_chat(&mut self) {
+        let Some(id) = self.chat_id.clone() else {
+            self.say("Open a conversation first.");
+            return;
+        };
+        let card = self.add_draft.trim();
+        if card.is_empty() {
+            self.say("Paste their link first. In their window open Invite and copy the link.");
+            return;
+        }
+        match ambient_cli::add_member_in(&self.dir, &id, card) {
+            Ok(()) => {
+                self.add_draft.clear();
+                self.adding = false;
+                self.say(
+                    "Added. They show up once both windows sync. They do not press Start conversation.",
+                );
+                self.sync_watch();
+                self.post(lane::Job::Inbox);
+                self.mark_pending();
+            }
+            Err(err) => self.message = err.to_string(),
+        }
     }
 
     fn copy_card(&mut self) -> Task<Message> {
@@ -12371,6 +12501,8 @@ mod app_tests {
             id: "abc".to_owned(),
             label: "Key 12ab".to_owned(),
             other: String::new(),
+            members: 2,
+            started: false,
         }];
         app.chat_id = Some("abc".to_owned());
         assert!(app.alias_editing.is_none(), "the name starts as plain text");

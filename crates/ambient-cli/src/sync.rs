@@ -577,11 +577,16 @@ pub(crate) fn block_key(dir: &Path, card_or_key: &str) -> Result<(), CliError> {
 /// Add a person to the only conversation. The starter of that conversation signs it.
 pub(crate) fn add_member(dir: &Path, card_text: &str) -> Result<(), CliError> {
     let id = sole_conversation(dir)?;
+    add_member_in(dir, &id, card_text)
+}
+
+/// Add a person to one conversation. The starter of that conversation signs it.
+pub(crate) fn add_member_in(dir: &Path, id: &str, card_text: &str) -> Result<(), CliError> {
     let key = key_of(card_text)?;
     if is_blocked(dir, &key.signing_key)? {
         return Err(CliError::message("that person is blocked"));
     }
-    change_member(dir, &id, &MemberChange::Add(key))
+    change_member(dir, id, &MemberChange::Add(key))
 }
 
 /// Remove a person from the only conversation.
@@ -799,7 +804,7 @@ pub(crate) fn messages_in(dir: &Path, id: &str) -> Result<Vec<crate::ChatMessage
         .ok_or_else(|| CliError::message("no such conversation"))
 }
 
-pub(crate) fn conversations(dir: &Path) -> Result<Vec<(String, String, String)>, CliError> {
+pub(crate) fn conversations(dir: &Path) -> Result<Vec<ListedChat>, CliError> {
     Ok(chat_snap(dir)?.listed)
 }
 
@@ -1488,9 +1493,21 @@ impl Slot {
 #[derive(Clone)]
 struct ChatSnap {
     stamps: Vec<(PathBuf, u64, u64)>,
-    listed: Vec<(String, String, String)>,
+    listed: Vec<ListedChat>,
     text: HashMap<String, String>,
     messages: HashMap<String, Vec<crate::ChatMessage>>,
+}
+
+/// One conversation, as the window lists it.
+#[derive(Clone)]
+pub(crate) struct ListedChat {
+    pub id: String,
+    pub label: String,
+    pub other: String,
+    /// Member keys in the conversation now.
+    pub members: usize,
+    /// This folder's card for the conversation is the one that started it.
+    pub started: bool,
 }
 
 fn chat_cache() -> &'static Mutex<HashMap<PathBuf, ChatSnap>> {
@@ -1524,7 +1541,14 @@ fn chat_snap(dir: &Path) -> Result<ChatSnap, CliError> {
             .keys()
             .find(|key| **key != slot.card.signing_key);
         let other = other_key.map(|key| short_id(key)).unwrap_or_default();
-        let label = if other.is_empty() {
+        let members = view.members.len();
+        let started = view
+            .members
+            .get(&slot.card.signing_key)
+            .is_some_and(|member| member.role == 1);
+        let label = if members > 2 {
+            format!("{members} people")
+        } else if other.is_empty() {
             "Conversation".to_owned()
         } else {
             format!("Person {other}")
@@ -1540,7 +1564,13 @@ fn chat_snap(dir: &Path) -> Result<ChatSnap, CliError> {
                 cite: line.cite.map(|id| hex_id(&id)),
             });
         }
-        listed.push((id.clone(), label, other));
+        listed.push(ListedChat {
+            id: id.clone(),
+            label,
+            other,
+            members,
+            started,
+        });
         text.insert(id.clone(), body);
         messages.insert(id, lines);
     }
