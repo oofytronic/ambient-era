@@ -8890,57 +8890,45 @@ impl App {
 
     fn card_section(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        let short: String = self.contact_key.chars().take(8).collect();
-        let mut body = column![].spacing(10);
-        if !self.your_name.trim().is_empty() && !self.contact_key.is_empty() {
-            body = body.push(speaker(&self.your_name, &self.contact_key));
-        }
-        body = body
-            .push(
-                text("This name goes with the link you send. It is signed by your key. Changing it does not make a new key.")
-                    .size(14)
-                    .color(ink.muted),
+        column![
+            wallet_pass(&self.your_name, &self.card_line, &self.contact_key),
+            container(
+                column![
+                    text("This name goes with the link you send. It is signed by your key. Changing it does not make a new key.")
+                        .size(14)
+                        .color(ink.muted),
+                    text_input("Your name", &self.name_draft)
+                        .on_input(Message::NameDraft)
+                        .padding(12)
+                        .style(field_style),
+                    text_input("One line, optional", &self.line_draft)
+                        .on_input(Message::LineDraft)
+                        .padding(12)
+                        .style(field_style),
+                ]
+                .spacing(10),
             )
-            .push(
-                text_input("Your name", &self.name_draft)
-                    .on_input(Message::NameDraft)
-                    .padding(12)
-                    .style(field_style),
-            )
-            .push(
-                text_input("One line, optional", &self.line_draft)
-                    .on_input(Message::LineDraft)
-                    .padding(12)
-                    .style(field_style),
-            );
-        if !short.is_empty() {
-            body = body.push(text(short).size(13).color(ink.muted));
-        }
-        body = body.push(ghost_label("Copy link", Message::CopyLink));
-        settings_card("Card", body.into())
+            .padding(20)
+            .width(Fill)
+            .style(section_card),
+        ]
+        .spacing(14)
+        .into()
     }
 
     fn guide_card(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        if self.your_name.trim().is_empty() || self.contact_key.is_empty() {
+        if self.contact_key.is_empty() {
             return space().height(0).into();
         }
-        let short: String = self.contact_key.chars().take(8).collect();
-        let mut body = column![
-            text("Your card").font(serif()).size(22),
-            speaker(&self.your_name, &self.contact_key),
-        ]
-        .spacing(6);
-        if !self.card_line.trim().is_empty() {
-            body = body.push(text(&self.card_line).size(14).color(ink.muted));
-        }
-        body = body.push(text(short).size(13).color(ink.muted));
-        body = body.push(
+        column![
+            wallet_pass(&self.your_name, &self.card_line, &self.contact_key),
             text("This is what their computer can store when you send the link.")
                 .size(14)
                 .color(ink.muted),
-        );
-        body.into()
+        ]
+        .spacing(10)
+        .into()
     }
 
     fn appearance_section(&self) -> Element<'_, Message> {
@@ -11244,6 +11232,178 @@ fn clip_chars(text: String, max: usize) -> String {
         text
     } else {
         text.chars().take(max).collect()
+    }
+}
+
+const PASS_FACE: Color = Color::from_rgb8(0x14, 0x1C, 0x2C);
+const PASS_PAPER: Color = Color::from_rgb8(0xF6, 0xF1, 0xE6);
+const PASS_SOFT: Color = Color::from_rgb8(0xC5, 0xCD, 0xD6);
+const PASS_FAINT: Color = Color::from_rgb8(0x8E, 0x98, 0xA6);
+
+/// The card as an object. The same face in either theme, so it reads as something you hold.
+fn wallet_pass(name: &str, line: &str, key: &str) -> Element<'static, Message> {
+    let named = !name.trim().is_empty();
+    let shown = if named {
+        name.trim().to_owned()
+    } else {
+        "Your name".to_owned()
+    };
+    let name_color = if named { PASS_PAPER } else { PASS_FAINT };
+    let stripe = face_color(key);
+    let mut body = column![pass_top(name, key)]
+        .spacing(18)
+        .width(Fill)
+        .height(Fill);
+    body = body.push(text(shown).font(serif()).size(36).color(name_color));
+    if !line.trim().is_empty() {
+        body = body.push(text(line.trim().to_owned()).size(16).color(PASS_SOFT));
+    }
+    body = body.push(space().height(Fill));
+    body = body.push(pass_rule());
+    body = body.push(pass_foot(key));
+    let face = container(body).padding([22, 24]).width(Fill).height(Fill);
+    container(row![pass_stripe(stripe), face].height(Fill))
+        .height(280)
+        .width(Fill)
+        .clip(true)
+        .style(pass_face)
+        .into()
+}
+
+fn pass_top(name: &str, key: &str) -> Element<'static, Message> {
+    row![
+        text("AERODASH").size(12).color(PASS_SOFT),
+        space().width(Fill),
+        pass_seal(name, key),
+    ]
+    .align_y(iced::Alignment::Center)
+    .width(Fill)
+    .into()
+}
+
+fn pass_stripe(color: Color) -> Element<'static, Message> {
+    container(column![])
+        .width(8)
+        .height(Fill)
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(color)),
+            ..Default::default()
+        })
+        .into()
+}
+
+fn pass_seal(name: &str, key: &str) -> Element<'static, Message> {
+    let letter = name
+        .chars()
+        .find(|glyph| glyph.is_alphanumeric())
+        .map_or_else(|| "·".to_owned(), |glyph| glyph.to_uppercase().to_string());
+    let color = if key.is_empty() {
+        PASS_FAINT
+    } else {
+        face_color(key)
+    };
+    container(text(letter).size(16).color(Color::WHITE))
+        .width(42)
+        .height(42)
+        .align_x(iced::alignment::Horizontal::Center)
+        .align_y(iced::alignment::Vertical::Center)
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(color)),
+            border: iced::Border {
+                radius: 21.0.into(),
+                width: 0.0,
+                color: Color::TRANSPARENT,
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+fn pass_rule() -> Element<'static, Message> {
+    container(column![])
+        .height(1)
+        .width(Fill)
+        .style(|_theme| container::Style {
+            background: Some(iced::Background::Color(Color::from_rgba(
+                0.96, 0.94, 0.90, 0.18,
+            ))),
+            ..Default::default()
+        })
+        .into()
+}
+
+fn pass_foot(key: &str) -> Element<'static, Message> {
+    row![
+        column![
+            text("KEY").size(11).color(PASS_FAINT),
+            text(pass_number(key)).size(16).color(PASS_PAPER),
+        ]
+        .spacing(2),
+        space().width(Fill),
+        button(text("Copy link").size(13).color(PASS_PAPER))
+            .padding([8, 14])
+            .on_press(Message::CopyLink)
+            .style(pass_copy),
+    ]
+    .align_y(iced::Alignment::Center)
+    .width(Fill)
+    .into()
+}
+
+fn pass_number(key: &str) -> String {
+    let short: String = key
+        .chars()
+        .take(8)
+        .map(|glyph| glyph.to_ascii_uppercase())
+        .collect();
+    if short.is_empty() {
+        return "···· ····".to_owned();
+    }
+    let mut out = String::new();
+    for (index, glyph) in short.chars().enumerate() {
+        if index == 4 {
+            out.push(' ');
+        }
+        out.push(glyph);
+    }
+    out
+}
+
+fn pass_face(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(iced::Background::Color(PASS_FACE)),
+        text_color: Some(PASS_PAPER),
+        border: iced::Border {
+            radius: 22.0.into(),
+            width: 1.0,
+            color: Color::from_rgba(0.96, 0.94, 0.90, 0.14),
+        },
+        shadow: iced::Shadow {
+            color: Color::from_rgba(0.0, 0.0, 0.0, 0.42),
+            offset: iced::Vector::new(0.0, 16.0),
+            blur_radius: 32.0,
+        },
+        ..Default::default()
+    }
+}
+
+fn pass_copy(_theme: &Theme, status: button::Status) -> button::Style {
+    let wash = match status {
+        button::Status::Hovered => 0.16,
+        button::Status::Pressed => 0.24,
+        _ => 0.08,
+    };
+    button::Style {
+        background: Some(iced::Background::Color(Color::from_rgba(
+            0.96, 0.94, 0.90, wash,
+        ))),
+        text_color: PASS_PAPER,
+        border: iced::Border {
+            radius: 20.0.into(),
+            width: 0.0,
+            color: Color::TRANSPARENT,
+        },
+        ..Default::default()
     }
 }
 

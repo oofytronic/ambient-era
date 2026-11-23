@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-23 — the card is a pass
+
+The card in Settings, and on the guide before the notes, is a pass: a dark face, the name large, the initial as a seal, and the key along the bottom. It does not follow the light or dark theme. The fields that change it sit underneath.
+
 ## 2026-11-23 — the card is a name you offer
 
 The first thing in Settings is the card: a name, one optional line, the initial, the start of the key, and Copy link. The name is signed by the contact key and rides on the invite link. The other computer stores it only when it has not already named that key. Onboarding asks for the name before the notebook opens, and shows the card before the notes. The computer's name stays under Devices.
