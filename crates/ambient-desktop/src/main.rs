@@ -130,6 +130,8 @@ struct App {
     recovery_phrase: String,
     restore_phrase: String,
     contact_link: String,
+    /// This folder's contact signing key, hex.
+    contact_key: String,
     show_qr: bool,
     qr_bytes: Option<Vec<u8>>,
     unlock_input: String,
@@ -141,13 +143,18 @@ struct App {
     save_again: bool,
     save_token: u64,
     your_name: String,
+    /// One line on the card. This computer offers it with the name.
+    card_line: String,
     device_draft: String,
     name_draft: String,
+    line_draft: String,
     call_draft: String,
     wipe_draft: String,
     aliases: BTreeMap<String, String>,
     /// A name for a person's signing key. This computer only. Not the conversation's name.
     people: BTreeMap<String, String>,
+    /// The one line a person's card offered. Keyed by the same signing key. This computer only.
+    card_lines: BTreeMap<String, String>,
     /// Words this person added to the spellchecker. Kept on this computer, in `dictionary`.
     my_words: BTreeSet<String>,
     /// Where backups go, as typed. Empty until the person chooses, and then the default is used.
@@ -477,6 +484,7 @@ enum Message {
     Applied(Result<Vec<NoteSummary>, String>),
     DeviceDraft(String),
     NameDraft(String),
+    LineDraft(String),
     FinishOnboarding,
     PickAppearance(profile::Appearance),
     CallDraft(String),
@@ -962,6 +970,7 @@ impl App {
             recovery_phrase: String::new(),
             restore_phrase: String::new(),
             contact_link: String::new(),
+            contact_key: String::new(),
             show_qr: false,
             qr_bytes: None,
             unlock_input: String::new(),
@@ -973,12 +982,15 @@ impl App {
             save_again: false,
             save_token: 0,
             your_name: String::new(),
+            card_line: String::new(),
             device_draft: String::new(),
             name_draft: String::new(),
+            line_draft: String::new(),
             call_draft: String::new(),
             wipe_draft: String::new(),
             aliases: BTreeMap::new(),
             people: BTreeMap::new(),
+            card_lines: BTreeMap::new(),
             my_words: BTreeSet::new(),
             backup_to: String::new(),
             backup_at: 0,
@@ -1090,6 +1102,8 @@ impl App {
         app.seen = saved.seen;
         app.your_name.clone_from(&saved.name);
         app.name_draft.clone_from(&saved.name);
+        app.card_line.clone_from(&saved.line);
+        app.line_draft.clone_from(&saved.line);
         app.device_draft.clone_from(&saved.device);
         app.backup_to.clone_from(&saved.backup_to);
         app.backup_at = saved.backup_at;
@@ -1101,6 +1115,8 @@ impl App {
         for (id, name) in profile::load_names(&app.dir) {
             if let Some(key) = id.strip_prefix("key:") {
                 app.people.insert(key.to_owned(), name);
+            } else if let Some(key) = id.strip_prefix("line:") {
+                app.card_lines.insert(key.to_owned(), name);
             } else {
                 app.aliases.insert(id, name);
             }
@@ -1670,18 +1686,13 @@ impl App {
             }
             Message::SubmitUnlock => self.submit_unlock(),
             Message::ShowInvite => {
-                if let Ok(link) = ambient_cli::contact_link(&self.dir) {
-                    if link != self.contact_link {
-                        self.show_qr = false;
-                        self.qr_bytes = None;
-                    }
-                    self.contact_link = link;
-                }
+                self.refresh_link();
                 self.invite_pick = None;
                 self.sheet = Sheet::Invite;
                 Task::none()
             }
             Message::ShowSettings => {
+                self.refresh_link();
                 self.devices = self
                     .notebook
                     .as_ref()
@@ -1863,9 +1874,17 @@ impl App {
                 Task::none()
             }
             Message::NameDraft(text) => {
-                self.name_draft = text;
+                self.name_draft = clip_chars(text, 48);
                 self.your_name.clone_from(&self.name_draft);
                 self.persist_profile();
+                self.refresh_link();
+                Task::none()
+            }
+            Message::LineDraft(text) => {
+                self.line_draft = clip_chars(text, 120);
+                self.card_line.clone_from(&self.line_draft);
+                self.persist_profile();
+                self.refresh_link();
                 Task::none()
             }
             Message::FinishOnboarding => self.finish_onboarding(),
@@ -4738,7 +4757,7 @@ impl App {
                         .style(field_style),
                 )
                 .push(
-                    text("What do you call them? Only this computer remembers it.")
+                    text("What do you call them? Leave it blank to use the name on their link. Only this computer remembers it.")
                         .size(13)
                         .color(ink.muted),
                 )
@@ -4794,6 +4813,9 @@ impl App {
                     .padding(10)
                     .style(field_style),
             );
+            if let Some(line) = self.card_lines.get(key) {
+                body = body.push(text(line.clone()).size(12).color(ink.muted));
+            }
         }
         body = body.push(
             row![ghost_label("Done", Message::FinishAlias), search]
@@ -4872,7 +4894,7 @@ impl App {
                 .on_input(Message::TheirCardChanged)
                 .padding(10)
                 .style(field_style),
-            text("What do you call them? Leave it blank if you want. Only this computer remembers it.")
+            text("What do you call them? Leave it blank to use the name on their link. Only this computer remembers it.")
                 .size(13)
                 .color(ink.muted),
             text_input("A name on this computer", &self.call_draft)
@@ -7616,7 +7638,7 @@ impl App {
             self.say("Open a conversation first.");
             return;
         };
-        let card = self.add_draft.trim();
+        let card = self.add_draft.trim().to_owned();
         if card.is_empty() {
             self.say("Paste their link first. In their window open Invite and copy the link.");
             return;
@@ -7628,11 +7650,12 @@ impl App {
             .map(|chat| chat.others.clone())
             .unwrap_or_default();
         let call = self.add_call.trim().to_owned();
-        match ambient_cli::add_member_in(&self.dir, &id, card) {
+        match ambient_cli::add_member_in(&self.dir, &id, &card) {
             Ok(()) => {
                 if !call.is_empty() {
                     self.name_new_people(&id, &call, &before);
                 }
+                self.accept_offer(&card);
                 self.add_draft.clear();
                 self.add_call.clear();
                 self.adding = false;
@@ -7662,12 +7685,12 @@ impl App {
     }
 
     fn start_chat(&mut self) {
-        let card = self.their_card.trim();
+        let card = self.their_card.trim().to_owned();
         if card.is_empty() {
             self.say("Paste their link first. In their window open Invite and copy the link.");
             return;
         }
-        match ambient_cli::start_conversation(&self.dir, card) {
+        match ambient_cli::start_conversation(&self.dir, &card) {
             Ok(id) => {
                 let call = self.call_draft.trim().to_owned();
                 if !call.is_empty() {
@@ -7675,6 +7698,7 @@ impl App {
                     self.name_new_people(&id, &call, &[]);
                     self.persist_names();
                 }
+                self.accept_offer(&card);
                 self.call_draft.clear();
                 self.chat_id = Some(id);
                 self.screen = Screen::Chat;
@@ -7772,11 +7796,12 @@ impl App {
     }
 
     fn copy_link(&mut self) -> Task<Message> {
+        self.refresh_link();
         if self.contact_link.is_empty() {
             self.say("No invite link yet.");
             return Task::none();
         }
-        self.say("Invite link copied. Send it by text.");
+        self.say("Invite link copied. It carries the name on your card.");
         clipboard::write(self.contact_link.clone())
     }
 
@@ -8102,9 +8127,7 @@ impl App {
                             if let Ok(card) = ambient_cli::contact_card(&self.dir) {
                                 self.my_card = card;
                             }
-                            if let Ok(link) = ambient_cli::contact_link(&self.dir) {
-                                self.contact_link = link;
-                            }
+                            self.refresh_link();
                             self.say("Unlocked for this run. The key file on disk stays wrapped.");
                             self.pending = false;
                             self.start_relay();
@@ -8169,9 +8192,7 @@ impl App {
         if let Ok(card) = ambient_cli::contact_card(&self.dir) {
             self.my_card = card;
         }
-        if let Ok(link) = ambient_cli::contact_link(&self.dir) {
-            self.contact_link = link;
-        }
+        self.refresh_link();
         self.devices = self
             .notebook
             .as_ref()
@@ -8321,6 +8342,7 @@ impl App {
         let profile = profile::Profile {
             device: self.device_draft.clone(),
             name: self.your_name.clone(),
+            line: self.card_line.clone(),
             appearance: self.appearance,
             seen: self.seen,
             backup_to: self.backup_to.clone(),
@@ -8343,8 +8365,49 @@ impl App {
         for (key, name) in &self.people {
             names.push((format!("key:{key}"), name.clone()));
         }
+        for (key, line) in &self.card_lines {
+            names.push((format!("line:{key}"), line.clone()));
+        }
         if let Err(err) = profile::store_names(&self.dir, &names) {
             self.message = err;
+        }
+    }
+
+    fn refresh_link(&mut self) {
+        if self.notebook.is_none() {
+            return;
+        }
+        if let Ok(link) = ambient_cli::contact_link(&self.dir)
+            && link != self.contact_link
+        {
+            self.show_qr = false;
+            self.qr_bytes = None;
+            self.contact_link = link;
+        }
+        if let Ok(key) = ambient_cli::contact_key(&self.dir) {
+            self.contact_key = key;
+        }
+    }
+
+    fn accept_offer(&mut self, link: &str) {
+        let Some(face) = ambient_cli::offered_card(link) else {
+            return;
+        };
+        let mut wrote = false;
+        if self
+            .people
+            .get(&face.key)
+            .is_none_or(|name| name.trim().is_empty())
+        {
+            self.people.insert(face.key.clone(), face.name);
+            wrote = true;
+        }
+        if !face.line.is_empty() && !self.card_lines.contains_key(&face.key) {
+            self.card_lines.insert(face.key, face.line);
+            wrote = true;
+        }
+        if wrote {
+            self.persist_names();
         }
     }
 
@@ -8402,7 +8465,7 @@ impl App {
     }
 
     fn finish_onboarding(&mut self) -> Task<Message> {
-        let device = self.device_draft.trim();
+        let device = self.device_draft.trim().to_owned();
         if device.is_empty() {
             self.say("Name this computer.");
             return Task::none();
@@ -8411,15 +8474,23 @@ impl App {
             self.say("Use a shorter name for this computer. 32 bytes is the limit.");
             return Task::none();
         }
+        let name = self.name_draft.trim().to_owned();
+        if name.is_empty() {
+            self.say("Say what the card should call you.");
+            return Task::none();
+        }
+        let line = self.line_draft.trim().to_owned();
         if self.dir.join("key").exists() {
             self.say("This folder already has a notebook.");
             return Task::none();
         }
-        match Notebook::create_with_label(&self.dir, device) {
+        match Notebook::create_with_label(&self.dir, &device) {
             Ok(book) => {
-                self.device_draft = device.to_owned();
-                self.your_name = self.name_draft.trim().to_owned();
+                self.device_draft = device;
+                self.your_name = name;
                 self.name_draft.clone_from(&self.your_name);
+                self.card_line = line;
+                self.line_draft.clone_from(&self.card_line);
                 self.seen = false;
                 self.persist_profile();
                 self.open_error.clear();
@@ -8561,6 +8632,9 @@ impl App {
         self.people.clear();
         self.your_name.clear();
         self.name_draft.clear();
+        self.card_line.clear();
+        self.line_draft.clear();
+        self.card_lines.clear();
         self.device_draft.clear();
         self.appearance = profile::Appearance::Dark;
         self.seen = true;
@@ -8592,7 +8666,7 @@ impl App {
         container(
             column![
                 text("Welcome").font(serif()).size(40),
-                text("Name this computer, then say what to call you.")
+                text("Name this computer, then the card an invite will offer.")
                     .size(16)
                     .color(ink.muted),
                 column![
@@ -8601,20 +8675,29 @@ impl App {
                         .on_input(Message::DeviceDraft)
                         .padding(12)
                         .style(field_style),
-                    text("Saved with this computer. It is not sent as your name.")
+                    text("Saved with this computer. It is not the name on the card.")
                         .size(13)
                         .color(ink.muted),
                 ]
                 .spacing(8),
                 column![
                     text("Your name").size(13).color(ink.muted),
-                    text_input("What should this notebook call you?", &self.name_draft)
+                    text_input("What should people see?", &self.name_draft)
                         .on_input(Message::NameDraft)
                         .padding(12)
                         .style(field_style),
-                    text("This stays on this computer. An invite still has no name on it.")
+                    text("This goes on the link you send. It is signed by your key.")
                         .size(13)
                         .color(ink.muted),
+                ]
+                .spacing(8),
+                column![
+                    text("One line").size(13).color(ink.muted),
+                    text_input("Optional. A sentence.", &self.line_draft)
+                        .on_input(Message::LineDraft)
+                        .padding(12)
+                        .style(field_style),
+                    text("You can leave this blank.").size(13).color(ink.muted),
                 ]
                 .spacing(8),
                 column![
@@ -8691,9 +8774,10 @@ impl App {
         container(
             column![
                 text("Before the notes").font(serif()).size(40),
-                text("Settings holds the rest. Nothing on this page is sent.")
+                text("The card is ready. Settings holds the rest.")
                     .size(16)
                     .color(ink.muted),
+                self.guide_card(),
                 guide_line(
                     "Passphrase",
                     "Optional. Settings, then Devices. It locks the key file on this computer. It is not the recovery phrase, and this welcome does not ask for one.",
@@ -8712,7 +8796,7 @@ impl App {
                 ),
                 guide_line(
                     "People",
-                    "What you call someone stays on this computer. An invite still has no name on it.",
+                    "What you call someone stays on this computer. Their link can offer their name. If you already typed one, yours stays.",
                 ),
                 guide_line(
                     "Chat",
@@ -8735,7 +8819,7 @@ impl App {
                 container(
                     column![
                         Self::sheet_title("Settings"),
-                        self.you_section(),
+                        self.card_section(),
                         self.appearance_section(),
                         self.time_section(),
                         self.devices_sheet(),
@@ -8804,27 +8888,59 @@ impl App {
         settings_card("Keys", rows.into())
     }
 
-    fn you_section(&self) -> Element<'_, Message> {
+    fn card_section(&self) -> Element<'_, Message> {
         let ink = self.ink();
-        settings_card(
-            "You",
-            column![
-                text("Your name stays on this computer. It is not sent to anyone.")
+        let short: String = self.contact_key.chars().take(8).collect();
+        let mut body = column![].spacing(10);
+        if !self.your_name.trim().is_empty() && !self.contact_key.is_empty() {
+            body = body.push(speaker(&self.your_name, &self.contact_key));
+        }
+        body = body
+            .push(
+                text("This name goes with the link you send. It is signed by your key. Changing it does not make a new key.")
                     .size(14)
                     .color(ink.muted),
+            )
+            .push(
                 text_input("Your name", &self.name_draft)
                     .on_input(Message::NameDraft)
                     .padding(12)
                     .style(field_style),
-                text("This computer").size(13).color(ink.muted),
-                text(self.this_device_label()).size(16),
-                text("Set when this folder was created.")
-                    .size(13)
-                    .color(ink.muted),
-            ]
-            .spacing(10)
-            .into(),
-        )
+            )
+            .push(
+                text_input("One line, optional", &self.line_draft)
+                    .on_input(Message::LineDraft)
+                    .padding(12)
+                    .style(field_style),
+            );
+        if !short.is_empty() {
+            body = body.push(text(short).size(13).color(ink.muted));
+        }
+        body = body.push(ghost_label("Copy link", Message::CopyLink));
+        settings_card("Card", body.into())
+    }
+
+    fn guide_card(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        if self.your_name.trim().is_empty() || self.contact_key.is_empty() {
+            return space().height(0).into();
+        }
+        let short: String = self.contact_key.chars().take(8).collect();
+        let mut body = column![
+            text("Your card").font(serif()).size(22),
+            speaker(&self.your_name, &self.contact_key),
+        ]
+        .spacing(6);
+        if !self.card_line.trim().is_empty() {
+            body = body.push(text(&self.card_line).size(14).color(ink.muted));
+        }
+        body = body.push(text(short).size(13).color(ink.muted));
+        body = body.push(
+            text("This is what their computer can store when you send the link.")
+                .size(14)
+                .color(ink.muted),
+        );
+        body.into()
     }
 
     fn appearance_section(&self) -> Element<'_, Message> {
@@ -9009,7 +9125,7 @@ impl App {
         settings_card(
             "People",
             column![
-                text("Names you type here stay on this computer. The short key stays under the name, because an invite still cannot carry one.")
+                text("Names you type here stay on this computer. A link can offer their name. If you already typed one, yours stays.")
                     .size(14)
                     .color(ink.muted),
                 people,
@@ -9097,23 +9213,6 @@ impl App {
             .filter(|name| !name.trim().is_empty())
             .cloned()
             .unwrap_or_else(|| chat.label.clone())
-    }
-
-    fn this_device_label(&self) -> String {
-        self.devices
-            .iter()
-            .find(|device| device.current)
-            .map(|device| device.label.clone())
-            .filter(|label| !label.is_empty())
-            .or_else(|| {
-                let draft = self.device_draft.trim();
-                if draft.is_empty() {
-                    None
-                } else {
-                    Some(draft.to_owned())
-                }
-            })
-            .unwrap_or_else(|| "this computer".to_owned())
     }
 }
 
@@ -11138,6 +11237,14 @@ fn chat_row(
         .on_press(Message::SelectChat(id))
         .style(list_row(selected))
         .into()
+}
+
+fn clip_chars(text: String, max: usize) -> String {
+    if text.chars().count() <= max {
+        text
+    } else {
+        text.chars().take(max).collect()
+    }
 }
 
 /// An initial and a name for someone else in a group. The color comes from their key.

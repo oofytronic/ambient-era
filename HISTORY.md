@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-23 — the card is a name you offer
+
+The first thing in Settings is the card: a name, one optional line, the initial, the start of the key, and Copy link. The name is signed by the contact key and rides on the invite link. The other computer stores it only when it has not already named that key. Onboarding asks for the name before the notebook opens, and shows the card before the notes. The computer's name stays under Devices.
+
 ## 2026-11-23 — a group shows its people, and each name stays here
 
 A conversation of more than two people keeps the name it already had, and under that name, and in the list, it says how many people and what this computer calls them. The pencil in a group edits those names, and the conversation's own name, separately. Adding someone can name them at the same time. A message that is not yours shows that name and an initial. The color comes from their key. None of this is sent. A name this computer has not typed yet is the start of the key.

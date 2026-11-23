@@ -32,6 +32,8 @@ impl Appearance {
 pub(super) struct Profile {
     pub device: String,
     pub name: String,
+    /// One line offered with the name. Empty until they type one.
+    pub line: String,
     pub appearance: Appearance,
     /// False only for a folder that has not finished the first welcome.
     /// Older profiles have no line for this, and those count as finished.
@@ -54,6 +56,7 @@ impl Default for Profile {
         Self {
             device: String::new(),
             name: String::new(),
+            line: String::new(),
             appearance: Appearance::Dark,
             seen: true,
             backup_to: String::new(),
@@ -75,9 +78,10 @@ pub(super) fn load_profile(dir: &Path) -> Profile {
 pub(super) fn store_profile(dir: &Path, profile: &Profile) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|_| "could not write settings".to_owned())?;
     let text = format!(
-        "v1\ndevice={}\nname={}\ntheme={}\nseen={}\nbackup={}\nbackup_at={}\nclock={}\nweek={}\nhome_zone={}\n",
+        "v1\ndevice={}\nname={}\nline={}\ntheme={}\nseen={}\nbackup={}\nbackup_at={}\nclock={}\nweek={}\nhome_zone={}\n",
         one_line(&profile.device),
         one_line(&profile.name),
+        one_line(&profile.line),
         profile.appearance.as_str(),
         if profile.seen { "yes" } else { "no" },
         one_line(&profile.backup_to),
@@ -460,6 +464,8 @@ fn parse_profile(text: &str) -> Profile {
             value.trim().clone_into(&mut profile.device);
         } else if let Some(value) = line.strip_prefix("name=") {
             value.trim().clone_into(&mut profile.name);
+        } else if let Some(value) = line.strip_prefix("line=") {
+            value.trim().clone_into(&mut profile.line);
         } else if let Some(value) = line.strip_prefix("theme=") {
             profile.appearance = Appearance::parse(value.trim());
         } else if let Some(value) = line.strip_prefix("seen=") {

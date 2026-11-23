@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
 use crate::cbor::{self, Parsed, Value};
 use crate::error::EventError;
@@ -122,6 +122,24 @@ pub fn sign_wire(unsigned: &[u8], seed: &[u8; 32]) -> Result<Vec<u8>, EventError
 #[must_use]
 pub fn signing_public(seed: &[u8; 32]) -> [u8; 32] {
     SigningKey::from_bytes(seed).verifying_key().to_bytes()
+}
+
+/// Sign bytes that are not an event. The seed is the contact card's signing seed.
+#[must_use]
+pub fn sign_detached(message: &[u8], seed: &[u8; 32]) -> [u8; 64] {
+    SigningKey::from_bytes(seed).sign(message).to_bytes()
+}
+
+/// True when `signature` is an Ed25519 signature by `public` over `message`.
+#[must_use]
+pub fn verify_detached(message: &[u8], signature: &[u8; 64], public: &[u8; 32]) -> bool {
+    let Ok(key) = VerifyingKey::from_bytes(public) else {
+        return false;
+    };
+    let Ok(signature) = Signature::from_slice(signature) else {
+        return false;
+    };
+    key.verify(message, &signature).is_ok()
 }
 
 /// Verify a wire event: canonical CBOR, then the Ed25519 signature.

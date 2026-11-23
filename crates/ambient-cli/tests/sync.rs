@@ -485,6 +485,44 @@ fn a_cited_file_reaches_the_other_folder() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn an_invite_link_carries_a_signed_name() -> Result<(), String> {
+    let root = std::env::temp_dir().join(format!("ambient-card-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let alice = root.join("alice");
+    let bob = root.join("bob");
+    let cara = root.join("cara");
+    ambient_cli::Notebook::create(&alice).map_err(|err| err.to_string())?;
+    let bare = ambient_cli::contact_link(&alice).map_err(|err| err.to_string())?;
+    if bare.contains('.') || ambient_cli::offered_card(&bare).is_some() {
+        return Err(format!("a nameless link should stay bare: {bare}"));
+    }
+    std::fs::write(alice.join("profile"), "v1\nname=Sam\nline=From the river\n")
+        .map_err(|err| err.to_string())?;
+    let link = ambient_cli::contact_link(&alice).map_err(|err| err.to_string())?;
+    let face = ambient_cli::offered_card(&link).ok_or("link did not carry a name")?;
+    if face.name != "Sam" || face.line != "From the river" {
+        return Err(format!("offered {} / {}", face.name, face.line));
+    }
+    let key = ambient_cli::contact_key(&alice).map_err(|err| err.to_string())?;
+    if face.key != key {
+        return Err("the name was not signed by the contact key".to_owned());
+    }
+    let mut bad = link.clone();
+    let flipped = if bad.ends_with('A') { 'B' } else { 'A' };
+    bad.pop();
+    bad.push(flipped);
+    if ambient_cli::offered_card(&bad).is_some() {
+        return Err("a changed link still offered a name".to_owned());
+    }
+    ambient_cli::Notebook::create(&bob).map_err(|err| err.to_string())?;
+    ambient_cli::start_conversation(&bob, &link).map_err(|err| err.to_string())?;
+    ambient_cli::Notebook::create(&cara).map_err(|err| err.to_string())?;
+    ambient_cli::start_conversation(&cara, &bad).map_err(|err| err.to_string())?;
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
 fn spawn_relay() -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|err| err.to_string())?;
     let port = listener.local_addr().map_err(|err| err.to_string())?.port();

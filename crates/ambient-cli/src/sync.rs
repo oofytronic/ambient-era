@@ -503,15 +503,99 @@ pub(crate) fn card(dir: &Path) -> Result<String, CliError> {
     card_text(&slot.card)
 }
 
+/// The invite link. A name on the profile is signed by this folder's contact key and carried after the card.
+pub(crate) fn link(dir: &Path, name: &str, line: &str) -> Result<String, CliError> {
+    let slot = ensure_invite(dir)?;
+    let offer = card_text(&slot.card)?;
+    let Some(message) = claim_message(name, line) else {
+        return Ok(format!("ambient://contact/{offer}"));
+    };
+    let signature = ambient_events::sign_detached(&message, &slot.card.signing_seed);
+    let body = ambient_identity::pair_offer_text(&message);
+    let mark = ambient_identity::pair_offer_text(&signature);
+    Ok(format!("ambient://contact/{offer}.{body}.{mark}"))
+}
+
+pub(crate) fn signing_hex(dir: &Path) -> Result<String, CliError> {
+    let slot = ensure_invite(dir)?;
+    Ok(hex_id(&slot.card.signing_key))
+}
+
+/// The name a link offers, when the signature matches the card. A bad signature is `None`.
+pub(crate) fn offered(text: &str) -> Option<crate::OfferedCard> {
+    let (offer, claim) = peel(text).ok()?;
+    let (name, line) = claim?;
+    Some(crate::OfferedCard {
+        key: hex_id(&offer.signing_key),
+        name,
+        line,
+    })
+}
+
+const NAME_MAX: usize = 48;
+const LINE_MAX: usize = 120;
+
+fn clip_claim(text: &str, max: usize) -> String {
+    text.replace(['\n', '\r', '\t'], " ")
+        .trim()
+        .chars()
+        .take(max)
+        .collect()
+}
+
+fn claim_message(name: &str, line: &str) -> Option<Vec<u8>> {
+    let name = clip_claim(name, NAME_MAX);
+    let line = clip_claim(line, LINE_MAX);
+    if name.is_empty() {
+        return None;
+    }
+    Some(format!("ambient-card-v1\n{name}\n{line}\n").into_bytes())
+}
+
+fn peel(text: &str) -> Result<(ambient_identity::PairOffer, Option<(String, String)>), CliError> {
+    let trimmed = text.trim();
+    let rest = trimmed
+        .strip_prefix("ambient://contact/")
+        .unwrap_or(trimmed);
+    let (offer_text, tail) = match rest.split_once('.') {
+        Some((offer, tail)) => (offer, Some(tail)),
+        None => (rest, None),
+    };
+    let offer =
+        decode_pair_offer_text(offer_text).map_err(|_| CliError::message("card rejected"))?;
+    let claim = tail.and_then(|tail| verify_claim(&offer.signing_key, tail));
+    Ok((offer, claim))
+}
+
+fn verify_claim(public: &[u8; 32], tail: &str) -> Option<(String, String)> {
+    let (body, mark) = tail.split_once('.')?;
+    if mark.contains('.') {
+        return None;
+    }
+    let message = ambient_identity::decode_base64url(body).ok()?;
+    let signature = ambient_identity::decode_base64url(mark).ok()?;
+    let signature = <[u8; 64]>::try_from(signature.as_slice()).ok()?;
+    if !ambient_events::verify_detached(&message, &signature, public) {
+        return None;
+    }
+    let text = String::from_utf8(message).ok()?;
+    let mut lines = text.lines();
+    if lines.next() != Some("ambient-card-v1") {
+        return None;
+    }
+    let name = clip_claim(lines.next().unwrap_or(""), NAME_MAX);
+    let line = clip_claim(lines.next().unwrap_or(""), LINE_MAX);
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, line))
+}
+
 pub(crate) fn talk(dir: &Path, card_text: &str) -> Result<String, CliError> {
     let _ = Notebook::open(dir)?;
     let slot = ensure_invite(dir)?;
     let trimmed = card_text.trim();
-    let offer_text = trimmed
-        .strip_prefix("ambient://contact/")
-        .unwrap_or(trimmed);
-    let theirs =
-        decode_pair_offer_text(offer_text).map_err(|_| CliError::message("card rejected"))?;
+    let (theirs, _) = peel(trimmed)?;
     let local = keys::open(dir)?;
     let mut wires = read_wires(&slot.log_path, &local.store_key)?;
     if !wires.is_empty() {
@@ -608,18 +692,14 @@ enum MemberChange {
 }
 
 fn key_of(card_or_key: &str) -> Result<OfferKey, CliError> {
-    let trimmed = card_or_key.trim();
-    let offer_text = trimmed
-        .strip_prefix("ambient://contact/")
-        .unwrap_or(trimmed);
-    if let Ok(theirs) = decode_pair_offer_text(offer_text) {
+    if let Ok((theirs, _)) = peel(card_or_key) {
         return Ok(OfferKey {
             signing_key: theirs.signing_key,
             encryption_key: theirs.encryption_key,
             mailbox: theirs.mailbox,
         });
     }
-    let signing_key = parse_note_id(trimmed)?;
+    let signing_key = parse_note_id(card_or_key.trim())?;
     Ok(OfferKey {
         signing_key,
         encryption_key: [0; 32],

@@ -157,8 +157,50 @@ pub fn contact_card(dir: &Path) -> Result<String, CliError> {
 ///
 /// Returns [`CliError`] when the card cannot be read.
 pub fn contact_link(dir: &Path) -> Result<String, CliError> {
-    let card = sync::card(dir)?;
-    Ok(format!("ambient://contact/{card}"))
+    let (name, line) = profile_claim(dir);
+    sync::link(dir, &name, &line)
+}
+
+/// This folder's contact signing key, hex. The same key that signs the name on the link.
+///
+/// # Errors
+///
+/// Returns [`CliError`] when the card cannot be read.
+pub fn contact_key(dir: &Path) -> Result<String, CliError> {
+    sync::signing_hex(dir)
+}
+
+/// A name and one line carried on a contact link, when the signature matches that card.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OfferedCard {
+    /// Signing key, hex.
+    pub key: String,
+    /// The name they offer. Empty is not returned.
+    pub name: String,
+    /// One line. Empty when they left it blank.
+    pub line: String,
+}
+
+/// The signed name on a contact link. `None` when the link has none, or the signature does not match.
+#[must_use]
+pub fn offered_card(text: &str) -> Option<OfferedCard> {
+    sync::offered(text)
+}
+
+fn profile_claim(dir: &Path) -> (String, String) {
+    let Ok(text) = std::fs::read_to_string(dir.join("profile")) else {
+        return (String::new(), String::new());
+    };
+    let mut name = String::new();
+    let mut line = String::new();
+    for row in text.lines() {
+        if let Some(value) = row.strip_prefix("name=") {
+            value.trim().clone_into(&mut name);
+        } else if let Some(value) = row.strip_prefix("line=") {
+            value.trim().clone_into(&mut line);
+        }
+    }
+    (name, line)
 }
 
 /// Open a conversation with the other person's card. Returns the Space id.

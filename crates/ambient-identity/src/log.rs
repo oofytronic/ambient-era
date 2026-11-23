@@ -517,7 +517,12 @@ fn map_uint(value: &Cbor) -> Result<u64, IdentityError> {
     }
 }
 
-fn decode_base64url(text: &str) -> Result<Vec<u8>, IdentityError> {
+/// Decode unpadded base64url. Padding and the standard alphabet are rejected.
+///
+/// # Errors
+///
+/// Returns [`IdentityError::BadPayload`] when the text is empty or not base64url.
+pub fn decode_base64url(text: &str) -> Result<Vec<u8>, IdentityError> {
     if text.is_empty() {
         return Err(IdentityError::BadPayload);
     }
