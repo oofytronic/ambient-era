@@ -20,7 +20,6 @@ These are not for an agent to settle.
 
 ## Asked for, not built
 
-- **Spotlight the paragraph being written** in focus mode. Focus is the place for it. Nothing else in the page changes.
 - **Focus mode for a narrow window.** It is only for the wide layout today. There is no key to leave it other than the icon and Ctrl or Cmd + a full stop.
 
 ## Asked for, not built (2026-11-20, second list)
@@ -28,7 +27,6 @@ These are not for an agent to settle.
 - **Transitions between tabs, and on hover.** Only focus mode eases. Iced has no animation layer: a tab change would need the old view kept to fade out, and a hover color would need a widget that holds its own state. Both are a small widget each.
 - **The tag field with nothing typed** offers nothing. There is no focus event on a text field to show the list on. Typing one letter shows it.
 - **A scroll speed setting.** The wheel follows a page step now. Nothing reads a system wheel setting, because Linux has none to read: the system sends the notches already scaled or it does not.
-- **Settings in the note's panel** show only the home device, send, and delete. Tags and the note's id are not there yet.
 
 ## Links, groups, and the graph, not built
 
@@ -36,7 +34,6 @@ These are not for an agent to settle.
 - **Group order does not sync.** Notes in a group are alphabetical, and can be moved by hand with a grip. The hand order is a plain local file, `order`, so a second computer would show alphabetical order. Syncing it needs a place in the log, which is a record with its own merge rule, so it needs an ADR. A group also has no text of its own. A note in two groups is ordered separately in each.
 - **Drag is by the grip only,** and only inside one group. There is no moving a note to another group by dragging, no keyboard way to reorder, and no way to clear a hand order except moving notes back.
 - **The graph.** It lays out once and does not animate, pan, or zoom. Past thirty notes the titles are shown only on hover or for the open note. A click opens a note. Only the top of a group path is a circle, so `Novel/Part 1` is not a circle inside `Novel`. There is no filter, and no way to show only one group.
-- **Fold state** of groups is not kept between runs.
 - **Reading a group** is in title order. There is no hand-set order, and no per-group word count.
 
 ## Platforms, first step done

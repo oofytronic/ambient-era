@@ -206,6 +206,151 @@ pub(super) fn store_seen(dir: &Path, rows: &[(String, usize)]) -> Result<(), Str
     fs::write(dir.join("seen"), text).map_err(|_| "could not write seen".to_owned())
 }
 
+/// Groups folded in the list. Not sealed. Not sent. A group's name is a word from the notes.
+pub(super) fn load_folds(dir: &Path) -> std::collections::BTreeSet<String> {
+    let mut found = std::collections::BTreeSet::new();
+    let Ok(text) = fs::read_to_string(dir.join("folds")) else {
+        return found;
+    };
+    for line in text.lines().skip(1) {
+        let line = line.trim();
+        if !line.is_empty() {
+            found.insert(line.to_owned());
+        }
+    }
+    found
+}
+
+pub(super) fn store_folds(
+    dir: &Path,
+    folded: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let mut text = String::from("v1\n");
+    for key in folded {
+        text.push_str(&one_line(key));
+        text.push('\n');
+    }
+    fs::write(dir.join("folds"), text).map_err(|_| "could not write the folds".to_owned())
+}
+
+/// The note that was open, and the line the caret was on. Not sealed. Not sent.
+pub(super) fn load_place(dir: &Path) -> Option<(String, usize)> {
+    let text = fs::read_to_string(dir.join("place")).ok()?;
+    let line = text.lines().nth(1)?;
+    let (id, at) = line.split_once('\t')?;
+    let at = at.trim().parse().ok()?;
+    if id.is_empty() {
+        None
+    } else {
+        Some((id.to_owned(), at))
+    }
+}
+
+pub(super) fn store_place(dir: &Path, id: &str, line: usize) -> Result<(), String> {
+    let text = format!("v1\n{}\t{line}\n", one_line(id));
+    fs::write(dir.join("place"), text).map_err(|_| "could not write the place".to_owned())
+}
+
+/// The day a task was checked, on this computer. Key is the note id, a tab, and the task's words.
+pub(super) fn load_done_on(dir: &Path) -> std::collections::BTreeMap<String, String> {
+    let mut found = std::collections::BTreeMap::new();
+    let Ok(text) = fs::read_to_string(dir.join("done")) else {
+        return found;
+    };
+    for line in text.lines().skip(1) {
+        let mut parts = line.splitn(3, '\t');
+        let Some(day) = parts.next() else { continue };
+        let Some(id) = parts.next() else { continue };
+        let Some(words) = parts.next() else { continue };
+        if !day.is_empty() && !id.is_empty() {
+            found.insert(format!("{id}\t{words}"), day.to_owned());
+        }
+    }
+    found
+}
+
+pub(super) fn store_done_on(
+    dir: &Path,
+    rows: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let mut text = String::from("v1\n");
+    for (key, day) in rows {
+        let Some((id, words)) = key.split_once('\t') else {
+            continue;
+        };
+        text.push_str(&one_line(day));
+        text.push('\t');
+        text.push_str(&one_line(id));
+        text.push('\t');
+        text.push_str(&one_line(words));
+        text.push('\n');
+    }
+    fs::write(dir.join("done"), text).map_err(|_| "could not write done".to_owned())
+}
+
+/// An unsent line, per conversation. Not the log, and not sent.
+pub(super) fn load_drafts(dir: &Path) -> std::collections::BTreeMap<String, String> {
+    let mut found = std::collections::BTreeMap::new();
+    let Ok(text) = fs::read_to_string(dir.join("drafts")) else {
+        return found;
+    };
+    for line in text.lines().skip(1) {
+        let Some((id, body)) = line.split_once('\t') else {
+            continue;
+        };
+        if !id.is_empty() && !body.is_empty() {
+            found.insert(id.to_owned(), unescape_draft(body));
+        }
+    }
+    found
+}
+
+pub(super) fn store_drafts(
+    dir: &Path,
+    drafts: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let mut text = String::from("v1\n");
+    for (id, body) in drafts {
+        if id.is_empty() || body.trim().is_empty() {
+            continue;
+        }
+        text.push_str(&one_line(id));
+        text.push('\t');
+        text.push_str(&escape_draft(body));
+        text.push('\n');
+    }
+    fs::write(dir.join("drafts"), text).map_err(|_| "could not write drafts".to_owned())
+}
+
+fn escape_draft(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' | '\t' => out.push(' '),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn unescape_draft(text: &str) -> String {
+    let mut out = String::new();
+    let mut slash = false;
+    for ch in text.chars() {
+        if slash {
+            out.push(if ch == 'n' { '\n' } else { ch });
+            slash = false;
+        } else if ch == '\\' {
+            slash = true;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Whether the system is set to dark. When the host cannot tell, dark.
 pub(super) fn system_is_dark() -> bool {
     ambient_cli::host().prefers_dark().unwrap_or(true)

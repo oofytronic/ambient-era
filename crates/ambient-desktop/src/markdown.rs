@@ -392,6 +392,12 @@ impl NoteBody {
         self.shown_top = f32::NAN;
     }
 
+    /// Puts the caret at the start of a line. Used when opening a search hit or a task.
+    pub(super) fn place_line(&mut self, line: usize) {
+        let text = self.text();
+        self.place_byte(line_start(&text, line));
+    }
+
     /// `move_to` leaves a selection in place when the new cursor has none.
     /// A left motion is the only public way to drop that anchor, and parking
     /// both ends on the caret keeps it from stepping backward.
@@ -635,16 +641,19 @@ pub(super) fn view(
     dark: bool,
     dragging: bool,
     measure: f32,
+    spotlight: bool,
 ) -> Element<'_, Message> {
     let text = body.text();
     let (win_start, win_end) = body.live_at.unwrap_or((0, 0));
     let active = byte_pos(&text, win_start.min(text.len())).line;
+    let lines = split_lines(&text);
+    set_spotlight(spotlight.then(|| paragraph_span(&lines, active)));
     let selected = body.selection_bounds();
     let paint = selection_color(dark);
     let placeholder = text.is_empty();
     let mut page = column![].spacing(LINE_GAP).width(Length::Fill);
     let mut next_base = 0_usize;
-    for (index, line) in split_lines(&text).into_iter().enumerate() {
+    for (index, line) in lines.into_iter().enumerate() {
         let incoming = body
             .cache
             .get(index)
@@ -3722,6 +3731,57 @@ fn split_lines(text: &str) -> Vec<&str> {
     }
 }
 
+fn paragraph_span(lines: &[&str], at: usize) -> (usize, usize) {
+    let at = at.min(lines.len().saturating_sub(1));
+    if lines.get(at).is_some_and(|line| line.trim().is_empty()) {
+        return (at, at);
+    }
+    let mut start = at;
+    while start > 0
+        && lines
+            .get(start - 1)
+            .is_some_and(|line| !line.trim().is_empty())
+    {
+        start -= 1;
+    }
+    let mut end = at;
+    while lines
+        .get(end + 1)
+        .is_some_and(|line| !line.trim().is_empty())
+    {
+        end += 1;
+    }
+    (start, end)
+}
+
+thread_local! {
+    static SPOTLIGHT: RefCell<Option<(usize, usize)>> = const { RefCell::new(None) };
+}
+
+fn set_spotlight(range: Option<(usize, usize)>) {
+    SPOTLIGHT.with(|slot| *slot.borrow_mut() = range);
+}
+
+fn line_dim(index: usize) -> bool {
+    SPOTLIGHT.with(|slot| {
+        slot.borrow()
+            .is_some_and(|(start, end)| index < start || index > end)
+    })
+}
+
+fn dim_pieces(mut pieces: Vec<Piece>, dark: bool) -> Vec<Piece> {
+    let muted = if dark {
+        Color::from_rgb8(0x6A, 0x64, 0x5E)
+    } else {
+        Color::from_rgb8(0xB7, 0xB1, 0xA6)
+    };
+    for piece in &mut pieces {
+        piece.look.color = Some(Color { a: 0.72, ..muted });
+        piece.look.background = None;
+    }
+    pieces
+}
+
 fn line_start(text: &str, line: usize) -> usize {
     let mut start = 0;
     for (index, part) in text.split('\n').enumerate() {
@@ -5142,6 +5202,11 @@ fn settled_line(
         selected,
         paint,
     );
+    let shown = if line_dim(index) {
+        dim_pieces(shown, dark)
+    } else {
+        shown
+    };
     let size = shown
         .iter()
         .fold(BODY, |size, piece| size.max(piece.look.size));

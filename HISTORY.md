@@ -4,6 +4,14 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-23 — a tighter notes, tasks, and chat
+
+Focus has a light on the far right. It leaves the paragraph under the caret as it is and draws the rest quieter. The list remembers which groups are folded, and which note and line were open. A search hit and a task open on that line. Insert on the format bar stays closed until it is asked for. The note's panel shows its tags and its id.
+
+The Tasks tab counts what is overdue. Done is grouped by the day it was checked, on this computer. A repeat that moves says when it comes back if it has left the list. Arrow keys move through the tasks, and Alt with an arrow moves one up or down in its note.
+
+A chat shows a time when the hour changes, the person changes, or it is the latest line. Scrolling up and receiving a line offers Latest, and does not jump. An unsent line stays with its conversation. The people under a group's name open the same names, remove, and block as the pencil.
+
 ## 2026-11-23 — how to stand a relay up, written and not started
 
 [docs/network/standing-up.md](docs/network/standing-up.md) is the path for a Raspberry Pi or any other machine: a name, a Let's Encrypt certificate, and the relay on port 8443. A homemade certificate will not do. The owner is not doing this yet. The window's relay stays this computer.

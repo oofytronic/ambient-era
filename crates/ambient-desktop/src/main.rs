@@ -261,8 +261,26 @@ struct App {
     focus: bool,
     /// The right panel shows this note's settings, not its links.
     note_panel: bool,
-    /// Groups the owner has folded in the list. Only for this run.
+    /// Groups the owner has folded in the list. Kept in `folds` on this computer.
     folded: BTreeSet<String>,
+    /// The paragraph under the caret is the only one at full strength. Focus mode only.
+    spotlight: bool,
+    /// Insert stays behind one button until it is opened.
+    insert_open: bool,
+    /// Note id, task words, and the day it was checked. This computer only.
+    done_on: BTreeMap<String, String>,
+    /// Unsent text per conversation. Not the log.
+    drafts: BTreeMap<String, String>,
+    /// True while the open conversation is scrolled to the latest line.
+    chat_follow: bool,
+    /// A line arrived while the conversation was scrolled up.
+    chat_behind: bool,
+    /// The task the arrow keys are on.
+    task_pick: Option<(String, usize)>,
+    /// A repeating task that just moved, so the list can still say when it comes back.
+    held_repeat: Option<(String, String, String)>,
+    /// Where a search hit sits, by note id. Not kept once the query is cleared.
+    search_at: BTreeMap<String, usize>,
     /// The order notes were put in by hand, per group key. A note not listed comes after, in
     /// alphabetical order. On this computer only.
     orders: BTreeMap<String, Vec<String>>,
@@ -506,6 +524,20 @@ enum Message {
     FinishAlias,
     /// The icon at the top right of a note: write with nothing else in view, or come back.
     ToggleFocus,
+    ToggleSpotlight,
+    ToggleInsert,
+    OpenAt {
+        id: String,
+        line: usize,
+    },
+    ChatAtEnd(bool),
+    ChatLatest,
+    PickTask {
+        down: bool,
+    },
+    NudgeTask {
+        up: bool,
+    },
     /// Enter in the title: start writing.
     TitleSubmit,
     /// Ctrl or Cmd + Shift + D: tell the spellchecker the word at the caret is fine.
@@ -1075,6 +1107,15 @@ impl App {
             orders: BTreeMap::new(),
             list_drag: None,
             folded: BTreeSet::new(),
+            spotlight: false,
+            insert_open: false,
+            done_on: BTreeMap::new(),
+            drafts: BTreeMap::new(),
+            chat_follow: true,
+            chat_behind: false,
+            task_pick: None,
+            held_repeat: None,
+            search_at: BTreeMap::new(),
             slide_bar: Slide::settled(true),
             slide_panels: Slide::settled(true),
             alias_editing: None,
@@ -1134,6 +1175,9 @@ impl App {
                 app.aliases.insert(id, name);
             }
         }
+        app.folded = profile::load_folds(&app.dir);
+        app.done_on = profile::load_done_on(&app.dir);
+        app.drafts = profile::load_drafts(&app.dir);
         app.orders = profile::load_order(&app.dir);
         app.my_words = profile::load_words(&app.dir).into_iter().collect();
         if !app.my_words.is_empty() {
@@ -1154,53 +1198,7 @@ impl App {
     }
 
     fn subscription(app: &App) -> iced::Subscription<Message> {
-        let window = iced::event::listen_with(|event, status, _id| match event {
-            iced::Event::Window(
-                iced::window::Event::Resized(size) | iced::window::Event::Opened { size, .. },
-            ) => Some(Message::Resized(size)),
-            iced::Event::Window(iced::window::Event::FileDropped(path)) => {
-                Some(Message::FileDropped(path))
-            }
-            iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) => {
-                Some(Message::Mods {
-                    command: mods.control() || mods.command(),
-                    shift: mods.shift(),
-                })
-            }
-            iced::Event::Window(iced::window::Event::Focused) => Some(Message::ClockTick),
-            iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. }) => scroll_seen(),
-            iced::Event::Mouse(
-                iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)
-                | iced::mouse::Event::CursorLeft,
-            )
-            | iced::Event::Window(iced::window::Event::Unfocused)
-            | iced::Event::Touch(
-                iced::touch::Event::FingerLifted { .. } | iced::touch::Event::FingerLost { .. },
-            ) => Some(Message::SelectStop),
-            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
-                if status == iced::event::Status::Ignored
-                    && (modifiers.control() || modifiers.command())
-                    && matches!(key.as_ref(), Key::Character(text) if text.eq_ignore_ascii_case("f")) =>
-            {
-                Some(Message::FindOpen)
-            }
-            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
-                if status == iced::event::Status::Ignored
-                    && (modifiers.control() || modifiers.command())
-                    && matches!(key.as_ref(), Key::Character(".")) =>
-            {
-                Some(Message::ToggleFocus)
-            }
-            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                key,
-                modifiers,
-                text,
-                ..
-            }) if status == iced::event::Status::Ignored => {
-                ignored_key(&key, text.as_deref(), modifiers).map(Message::TypedIgnored)
-            }
-            _ => None,
-        });
+        let window = iced::event::listen_with(window_event);
         let mut parts = vec![window];
         if app.editing_note() && !app.pointer_down && app.body.selection_bounds().is_some() {
             parts.push(iced::event::listen_with(
@@ -1276,6 +1274,7 @@ impl App {
                 self.query = query;
                 self.search_hits = None;
                 self.search_lines.clear();
+                self.search_at.clear();
                 self.search_chats.clear();
                 if self.query.trim().is_empty() {
                     self.disarm_search();
@@ -1446,6 +1445,10 @@ impl App {
             }
             Message::Save => self.start_save(true),
             Message::ShowNotes => {
+                if self.screen == Screen::Chat {
+                    self.keep_draft();
+                }
+                self.held_repeat = None;
                 if self.compact()
                     && self.screen == Screen::Notes
                     && self.detail
@@ -1463,6 +1466,9 @@ impl App {
                 Task::none()
             }
             Message::ShowTasks => {
+                if self.screen == Screen::Chat {
+                    self.keep_draft();
+                }
                 self.refresh_clock();
                 self.tasks_note_open = false;
                 self.rebuild_tasks();
@@ -1473,6 +1479,7 @@ impl App {
                 focus_named("task-input")
             }
             Message::ShowChat => {
+                self.held_repeat = None;
                 if self.compact()
                     && self.screen == Screen::Chat
                     && self.detail
@@ -1655,6 +1662,14 @@ impl App {
             }
             Message::DraftEdited(action) => {
                 self.draft_editor.perform(action);
+                if let Some(id) = self.chat_id.clone() {
+                    let text = self.draft_editor.text();
+                    if text.trim().is_empty() {
+                        self.drafts.remove(&id);
+                    } else {
+                        self.drafts.insert(id, text);
+                    }
+                }
                 Task::none()
             }
             Message::SendChat => {
@@ -1685,10 +1700,14 @@ impl App {
             }
             Message::SelectChat(id) => {
                 if self.chat_id.as_deref() != Some(id.as_str()) {
+                    self.keep_draft();
                     self.chat.clear();
                     self.adding = false;
                     self.add_draft.clear();
                     self.member_ask = None;
+                    self.chat_follow = true;
+                    self.chat_behind = false;
+                    self.take_draft(&id);
                 }
                 self.chat_id = Some(id);
                 self.screen = Screen::Chat;
@@ -1867,6 +1886,7 @@ impl App {
                 Wake::Pause(token) if self.pause_armed && token == self.pause_token => {
                     self.pause_armed = false;
                     self.maybe_proof();
+                    self.remember_place();
                     self.start_save(true)
                 }
                 Wake::Search(token) if self.search_armed && token == self.search_token => {
@@ -1952,6 +1972,9 @@ impl App {
                     return Task::none();
                 }
                 self.focus = !self.focus;
+                if !self.focus {
+                    self.spotlight = false;
+                }
                 // Going in, the bar slides away. Coming out it is back at once.
                 self.slide_bar.set(!self.focus);
                 self.slide_panels.set(!self.focus);
@@ -1960,6 +1983,45 @@ impl App {
                 }
                 Task::none()
             }
+            Message::ToggleSpotlight => {
+                if self.focused() {
+                    self.spotlight = !self.spotlight;
+                }
+                Task::none()
+            }
+            Message::ToggleInsert => {
+                self.insert_open = !self.insert_open;
+                Task::none()
+            }
+            Message::OpenAt { id, line } => {
+                self.show_note(&id);
+                self.body.place_line(line);
+                self.screen = Screen::Notes;
+                self.detail = true;
+                Task::none()
+            }
+            Message::ChatAtEnd(at_end) => {
+                if at_end {
+                    self.chat_follow = true;
+                    self.chat_behind = false;
+                } else if scrolled_recently() {
+                    self.chat_follow = false;
+                }
+                Task::none()
+            }
+            Message::ChatLatest => {
+                self.chat_follow = true;
+                self.chat_behind = false;
+                iced::widget::operation::snap_to(
+                    iced::widget::Id::new("chat-log"),
+                    iced::widget::operation::RelativeOffset::END,
+                )
+            }
+            Message::PickTask { down } => {
+                self.pick_task(down);
+                Task::none()
+            }
+            Message::NudgeTask { up } => self.nudge_task(up),
             Message::TitleSubmit => focus_named("note-body"),
             Message::AddWord => {
                 self.add_word();
@@ -2001,6 +2063,7 @@ impl App {
                 if !self.folded.remove(&id) {
                     self.folded.insert(id);
                 }
+                let _ = profile::store_folds(&self.dir, &self.folded);
                 Task::none()
             }
             Message::ShowLinks => {
@@ -3133,6 +3196,18 @@ impl App {
         if !meta.is_empty() {
             lines = lines.push(text(meta).size(12).color(ink.muted).width(Fill));
         }
+        let press = self
+            .search_at
+            .get(&note.id)
+            .copied()
+            .filter(|_| !self.query.trim().is_empty())
+            .map_or_else(
+                || Message::Select(note.id.clone()),
+                |line| Message::OpenAt {
+                    id: note.id.clone(),
+                    line,
+                },
+            );
         let face = button(lines)
             .width(Fill)
             .padding(iced::Padding {
@@ -3141,7 +3216,7 @@ impl App {
                 bottom: 8.0,
                 left: 10.0,
             })
-            .on_press(Message::Select(note.id.clone()))
+            .on_press(press)
             .style(list_row(selected));
         let over = self.hover_row.as_deref() == Some(note.id.as_str());
         let movable = group.filter(|key| !key.is_empty() && has_exact_tag(&note.tags, key));
@@ -3365,21 +3440,32 @@ impl App {
                     .size(14)
                     .color(ink.muted),
             );
+        } else if *view == TaskView::Done {
+            list = list.push(text("Done").font(serif()).size(32));
+            if done.is_empty() {
+                list = list.push(
+                    text("Nothing done.")
+                        .font(serif())
+                        .size(22)
+                        .color(ink.muted),
+                );
+            } else {
+                list = list.push(self.done_days(&done));
+            }
         } else if open.is_empty() && done.is_empty() {
             let empty = if self.task_query.trim().is_empty() {
-                format!("Nothing in {heading}.")
+                self.empty_tasks()
             } else {
                 "No tasks match.".to_owned()
             };
             list = list.push(text(empty).font(serif()).size(32));
         } else if open.is_empty() {
-            list = list.push(
-                text(format!("Nothing open in {heading}."))
-                    .font(serif())
-                    .size(32),
-            );
+            list = list.push(text(self.empty_tasks()).font(serif()).size(32));
         } else {
-            list = list.push(text(heading.clone()).font(serif()).size(32));
+            list = list.push(text(heading).font(serif()).size(32));
+            if let Some(held) = self.held_line(&open) {
+                list = list.push(text(held).size(14).color(ink.muted));
+            }
             for task in open {
                 list = list.push(self.task_row(task));
             }
@@ -3391,6 +3477,65 @@ impl App {
             }
         }
         list.into()
+    }
+
+    fn empty_tasks(&self) -> String {
+        match &self.task_view {
+            TaskView::Overdue => "Nothing overdue.".to_owned(),
+            TaskView::Today => "Nothing due today.".to_owned(),
+            TaskView::Upcoming => "Nothing coming up.".to_owned(),
+            TaskView::NoDate => "Nothing without a date.".to_owned(),
+            TaskView::Done => "Nothing done.".to_owned(),
+            TaskView::Open => "Nothing to do.".to_owned(),
+            TaskView::Group(name) => format!("Nothing in {name}."),
+            TaskView::Note(_) => "Nothing in this note.".to_owned(),
+        }
+    }
+
+    /// The repeating task, if it left this list. The row that stayed says when it comes back.
+    fn held_line(&self, open: &[&TaskRow]) -> Option<String> {
+        let (id, label, next) = self.held_repeat.as_ref()?;
+        let still = open.iter().any(|task| &task.note_id == id);
+        if still {
+            None
+        } else {
+            Some(format!("{label} · next {next}"))
+        }
+    }
+
+    fn done_days(&self, done: &[&TaskRow]) -> Element<'_, Message> {
+        let ink = self.ink();
+        let mut days: BTreeMap<String, Vec<&TaskRow>> = BTreeMap::new();
+        for task in done {
+            let key = self
+                .done_on
+                .get(&done_key(task))
+                .cloned()
+                .unwrap_or_else(|| "earlier".to_owned());
+            days.entry(key).or_default().push(*task);
+        }
+        let mut body = column![].spacing(12).width(Fill);
+        let mut keys: Vec<String> = days.keys().cloned().collect();
+        keys.sort_by(|left, right| right.cmp(left));
+        if let Some(index) = keys.iter().position(|key| key == "earlier") {
+            let earlier = keys.remove(index);
+            keys.push(earlier);
+        }
+        for key in keys {
+            let Some(rows) = days.get(&key) else { continue };
+            let label = if key == "earlier" {
+                "Earlier".to_owned()
+            } else if key == self.clock.today.to_string() {
+                "Today".to_owned()
+            } else {
+                key
+            };
+            body = body.push(text(label).size(14).color(ink.muted));
+            for task in rows {
+                body = body.push(self.task_row(task));
+            }
+        }
+        body.into()
     }
 
     /// Read the clock and the zone again, and keep what it says. Called when the Tasks tab
@@ -3941,7 +4086,13 @@ impl App {
             .task_rename
             .as_ref()
             .is_some_and(|(note, row)| note == &task.note_id && *row == task.line);
-        let words = if task.done { ink.muted } else { ink.text };
+        let words = if task.done {
+            ink.muted
+        } else if self.task_pick.as_ref() == Some(&(task.note_id.clone(), task.line)) {
+            ink.accent
+        } else {
+            ink.text
+        };
         let main: Element<'_, Message> = if editing {
             row![
                 text_input("Task", &self.task_rename_text)
@@ -3972,7 +4123,10 @@ impl App {
             button(lines)
                 .width(Fill)
                 .padding([2, 0])
-                .on_press(Message::Select(open_id))
+                .on_press(Message::OpenAt {
+                    id: open_id,
+                    line: task.line,
+                })
                 .style(quiet_style)
                 .into()
         };
@@ -4159,9 +4313,25 @@ impl App {
         let Some((next, moved)) = self.checked_or_advanced(&body, line, done) else {
             return Task::none();
         };
+        let words = markdown::task_lines(&body)
+            .into_iter()
+            .find(|task| task.line == line)
+            .map(|task| markdown::task_words(&task.text))
+            .unwrap_or_default();
         if let Some(moved) = moved {
-            let words = self.due_words(&moved, false);
-            self.say(&format!("Done. It repeats: next {words}."));
+            let next_words = self.due_words(&moved, false);
+            self.held_repeat = Some((id.to_owned(), words, next_words.clone()));
+            self.say(&format!("Done. It repeats: next {next_words}."));
+        } else {
+            self.held_repeat = None;
+            let key = format!("{id}\t{words}");
+            if done {
+                self.refresh_clock();
+                self.done_on.insert(key, self.clock.today.to_string());
+            } else {
+                self.done_on.remove(&key);
+            }
+            let _ = profile::store_done_on(&self.dir, &self.done_on);
         }
         self.put_note_text(id, &title, &next)
     }
@@ -4286,6 +4456,88 @@ impl App {
         }
     }
 
+    fn visible_tasks(&self) -> Vec<(String, usize)> {
+        let view = &self.task_view;
+        self.tasks
+            .iter()
+            .filter(|task| self.task_hit(task) && self.in_view(task, view))
+            .filter(|task| {
+                if *view == TaskView::Done {
+                    task.done
+                } else {
+                    !task.done || !self.hide_done
+                }
+            })
+            .map(|task| (task.note_id.clone(), task.line))
+            .collect()
+    }
+
+    fn pick_task(&mut self, down: bool) {
+        if self.screen != Screen::Tasks || self.sheet != Sheet::None {
+            return;
+        }
+        let rows = self.visible_tasks();
+        if rows.is_empty() {
+            self.task_pick = None;
+            return;
+        }
+        let index = self
+            .task_pick
+            .as_ref()
+            .and_then(|pick| rows.iter().position(|row| row == pick));
+        let next = match index {
+            Some(index) if down => index.saturating_add(1).min(rows.len() - 1),
+            Some(index) => index.saturating_sub(1),
+            None => 0,
+        };
+        self.task_pick = rows.get(next).cloned();
+    }
+
+    fn nudge_task(&mut self, up: bool) -> Task<Message> {
+        if self.screen != Screen::Tasks || self.sheet != Sheet::None {
+            return Task::none();
+        }
+        if self.task_pick.is_none() {
+            self.pick_task(false);
+        }
+        let Some((id, line)) = self.task_pick.clone() else {
+            return Task::none();
+        };
+        let moved = if up {
+            line.saturating_sub(1)
+        } else {
+            line.saturating_add(1)
+        };
+        self.task_pick = Some((id.clone(), moved));
+        self.move_listed_task(&id, line, up)
+    }
+
+    fn remember_place(&mut self) {
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        let line = self.body.cursor().position.line;
+        let _ = profile::store_place(&self.dir, &id, line);
+    }
+
+    fn keep_draft(&mut self) {
+        let Some(id) = self.chat_id.clone() else {
+            return;
+        };
+        let text = self.draft_editor.text();
+        if text.trim().is_empty() {
+            self.drafts.remove(&id);
+        } else {
+            self.drafts.insert(id, text);
+        }
+        let _ = profile::store_drafts(&self.dir, &self.drafts);
+    }
+
+    fn take_draft(&mut self, id: &str) {
+        let text = self.drafts.get(id).cloned().unwrap_or_default();
+        self.draft_editor = text_editor::Content::with_text(&text);
+    }
+
     fn task_neighbor(&self, task: &TaskRow, up: bool) -> bool {
         self.tasks.iter().any(|other| {
             other.note_id == task.note_id
@@ -4316,11 +4568,15 @@ impl App {
     }
 
     fn tasks_tab(&self) -> String {
-        let open = self.tasks.iter().filter(|task| !task.done).count();
-        if open == 0 {
+        let late = self
+            .tasks
+            .iter()
+            .filter(|task| self.in_view(task, &TaskView::Overdue))
+            .count();
+        if late == 0 {
             "Tasks".to_owned()
         } else {
-            format!("Tasks {open}")
+            format!("Tasks {late}")
         }
     }
 
@@ -4498,6 +4754,17 @@ impl App {
             },
             Message::ToggleFocus,
         ));
+        if self.focused() {
+            corner = corner.push(mini_button(
+                mini_handle(Mini::Lamp, self.is_dark()),
+                if self.spotlight {
+                    "Leave spotlight"
+                } else {
+                    "Spotlight this paragraph"
+                },
+                Message::ToggleSpotlight,
+            ));
+        }
         stack![
             page,
             container(corner)
@@ -4563,7 +4830,12 @@ impl App {
         let mut day = String::new();
         let mut shown = 0_usize;
         let mut previous = String::new();
-        for line in &self.chat {
+        let mut previous_at: Option<u64> = None;
+        let last = self
+            .chat
+            .iter()
+            .rposition(|line| query.is_empty() || line.text.to_lowercase().contains(&query));
+        for (index, line) in self.chat.iter().enumerate() {
             if !query.is_empty() && !line.text.to_lowercase().contains(&query) {
                 continue;
             }
@@ -4578,8 +4850,17 @@ impl App {
                 );
             }
             let show_who = group && !line.mine && line.sender != previous;
+            let hour_gap = match (previous_at, line.unix) {
+                (Some(before), Some(now)) => {
+                    now.saturating_sub(before) >= 3_600_000
+                        || before.saturating_sub(now) >= 3_600_000
+                }
+                _ => true,
+            };
+            let show_time = Some(index) == last || line.sender != previous || hour_gap;
             previous.clone_from(&line.sender);
-            lines = lines.push(self.chat_bubble(line, width, show_who));
+            previous_at = line.unix.or(previous_at);
+            lines = lines.push(self.chat_bubble(line, width, show_who, show_time));
         }
         if shown == 0 && !query.is_empty() {
             lines = lines.push(text("No messages match.").color(ink.muted));
@@ -4592,12 +4873,23 @@ impl App {
         if self.chat_id.is_some() {
             page = page.push(self.chat_header());
         }
-        page = page.push(
-            vscroll(lines.width(Fill))
-                .height(Fill)
-                .width(Fill)
-                .anchor_bottom(),
-        );
+        let mut log = vscroll(lines.width(Fill))
+            .id(iced::widget::Id::new("chat-log"))
+            .height(Fill)
+            .width(Fill)
+            .on_scroll(chat_at_end);
+        if self.chat_follow {
+            log = log.anchor_bottom();
+        }
+        page = page.push(log);
+        if self.chat_behind {
+            page = page.push(
+                button(text("Latest").size(13))
+                    .padding([6, 12])
+                    .on_press(Message::ChatLatest)
+                    .style(ghost_style),
+            );
+        }
         page = page.push(composer);
         container(page).width(Fill).height(Fill).clip(true).into()
     }
@@ -4753,7 +5045,12 @@ impl App {
             if chat.members > 2 && !editing {
                 let who = self.who_line(&chat);
                 if !who.is_empty() {
-                    head = head.push(text(who).size(12).color(ink.muted));
+                    head = head.push(
+                        button(text(who).size(12).style(muted_style))
+                            .padding(0)
+                            .on_press(Message::EditAlias)
+                            .style(quiet_style),
+                    );
                 }
             }
             if let Some(row) = self.add_row(&chat) {
@@ -5338,6 +5635,7 @@ impl App {
     }
 
     fn show_note(&mut self, id: &str) {
+        self.remember_place();
         self.graph_open = false;
         self.graph = None;
         self.older = None;
@@ -5684,7 +5982,11 @@ impl App {
             lane::Done::Side(side) => self.apply_side(side),
             lane::Done::Chat { id, messages } => {
                 if self.chat_id.as_deref() == Some(id.as_str()) {
+                    let grew = messages.len() > self.chat.len();
                     self.chat = bubbles(messages);
+                    if grew && !self.chat_follow {
+                        self.chat_behind = true;
+                    }
                     if self.reading_chat() {
                         self.mark_open_chat();
                     }
@@ -5700,6 +6002,11 @@ impl App {
                     self.search_lines = notes
                         .iter()
                         .map(|hit| (hit.note.id.clone(), hit.line.clone()))
+                        .collect();
+                    self.search_at = notes
+                        .iter()
+                        .filter(|hit| !hit.line.is_empty())
+                        .map(|hit| (hit.note.id.clone(), hit.at))
                         .collect();
                     self.search_chats = chats;
                     self.search_hits = Some(notes.into_iter().map(|hit| hit.note).collect());
@@ -6252,18 +6559,18 @@ impl App {
     /// The formatting bar. In focus it slides down from the top edge of the page, or away.
     fn format_slot(&self) -> Element<'static, Message> {
         if !self.focused() {
-            return Self::format_bar();
+            return Self::format_bar(self.insert_open);
         }
         let shown = self.slide_bar.shown();
         if shown <= 0.0 {
             return space().height(0).into();
         }
         if shown >= 1.0 {
-            return Self::format_bar();
+            return Self::format_bar(self.insert_open);
         }
         // The bar is kept against the bottom of a box that grows, so it comes down into view.
         // It is clipped, and it is only in the tree while it is partly or fully shown.
-        container(Self::format_bar())
+        container(Self::format_bar(self.insert_open))
             .width(Fill)
             .height(FORMAT_BAR * shown)
             .align_y(iced::alignment::Vertical::Bottom)
@@ -6271,43 +6578,52 @@ impl App {
             .into()
     }
 
-    fn format_bar() -> Element<'static, Message> {
-        hscroll(
-            row![
-                format_caption("Word"),
-                format_button("B", "Bold", FormatKind::Bold),
-                format_button("I", "Italic", FormatKind::Italic),
-                format_button("S", "Strike", FormatKind::Strike),
-                format_button("==", "Highlight", FormatKind::Highlight),
-                format_button("</>", "Code", FormatKind::Code),
-                space().width(14),
-                format_caption("Line"),
-                format_button("H", "Heading", FormatKind::Heading),
-                format_button("List", "List", FormatKind::List),
-                format_button("Task", "Task", FormatKind::Task),
-                format_button("Quote", "Quote", FormatKind::Quote),
-                space().width(14),
-                format_caption("Insert"),
-                format_button("Link", "Link", FormatKind::Link),
-                format_button("[[]]", "Link a note", FormatKind::Wiki),
-                format_button("Image", "Image", FormatKind::Image),
-                format_button("Table", "Table", FormatKind::Table),
-                format_button("—", "Rule", FormatKind::Rule),
-                format_button("Callout", "Callout", FormatKind::Callout),
-                format_button("```", "Code block", FormatKind::CodeBlock),
-            ]
-            .spacing(4)
-            .align_y(iced::Alignment::Center)
-            .padding([2, 0]),
-        )
-        .width(Fill)
-        .into()
+    fn format_bar(insert_open: bool) -> Element<'static, Message> {
+        let mut bar = row![
+            format_caption("Word"),
+            format_button("B", "Bold", FormatKind::Bold),
+            format_button("I", "Italic", FormatKind::Italic),
+            format_button("S", "Strike", FormatKind::Strike),
+            format_button("==", "Highlight", FormatKind::Highlight),
+            format_button("</>", "Code", FormatKind::Code),
+            space().width(14),
+            format_caption("Line"),
+            format_button("H", "Heading", FormatKind::Heading),
+            format_button("List", "List", FormatKind::List),
+            format_button("Task", "Task", FormatKind::Task),
+            format_button("Quote", "Quote", FormatKind::Quote),
+            space().width(14),
+            pill_button(
+                "Insert",
+                if insert_open {
+                    "Hide inserts"
+                } else {
+                    "Insert"
+                },
+                Message::ToggleInsert,
+            ),
+        ]
+        .spacing(4)
+        .align_y(iced::Alignment::Center)
+        .padding([2, 0]);
+        if insert_open {
+            bar = bar.push(format_button("Link", "Link", FormatKind::Link));
+            bar = bar.push(format_button("[[]]", "Link a note", FormatKind::Wiki));
+            bar = bar.push(format_button("Image", "Image", FormatKind::Image));
+            bar = bar.push(format_button("Table", "Table", FormatKind::Table));
+            bar = bar.push(format_button("—", "Rule", FormatKind::Rule));
+            bar = bar.push(format_button("Callout", "Callout", FormatKind::Callout));
+            bar = bar.push(format_button("```", "Code block", FormatKind::CodeBlock));
+        }
+        hscroll(bar).width(Fill).into()
     }
 
     fn bottom_bar(&self) -> Element<'_, Message> {
         let mut bar = column![].width(Fill);
         if self.editing_note() {
-            bar = bar.push(Self::format_bar()).push(hairline());
+            bar = bar
+                .push(Self::format_bar(self.insert_open))
+                .push(hairline());
         }
         let tasks_name = self.tasks_tab();
         let chat_name = self.chat_tab();
@@ -6471,6 +6787,7 @@ impl App {
         line: &ChatBubble,
         width: f32,
         show_who: bool,
+        show_time: bool,
     ) -> Element<'static, Message> {
         let ink = self.ink();
         let copy_text = line.text.clone();
@@ -6521,7 +6838,7 @@ impl App {
             ink.muted
         };
         let mut meta = row![].spacing(8).align_y(iced::Alignment::Center);
-        if !when.is_empty() {
+        if show_time && !when.is_empty() {
             meta = meta.push(text(when).size(11).color(time_color));
         }
         meta = meta.push(
@@ -6972,7 +7289,13 @@ impl App {
         markdown::set_known_links(self.known_links.clone());
         markdown::set_misspellings(Arc::clone(&self.misspellings));
         let dragging = self.pointer_down && self.drag_from.is_some();
-        let page = markdown::view(&self.body, self.is_dark(), dragging, self.writing_width());
+        let page = markdown::view(
+            &self.body,
+            self.is_dark(),
+            dragging,
+            self.writing_width(),
+            self.spotlight && self.focused(),
+        );
         let Some((y, height)) = (!dragging)
             .then(|| self.body.selection_origin(self.writing_width()))
             .flatten()
@@ -7153,6 +7476,24 @@ impl App {
             .spacing(4)
             .padding([0, 8]),
         );
+        if saved || !self.tags.is_empty() {
+            let tags = if self.tags.is_empty() {
+                "No tags.".to_owned()
+            } else {
+                self.tags.join(", ")
+            };
+            let id = self.selected.clone().unwrap_or_default();
+            block = block.push(
+                column![
+                    text("TAGS").size(11).color(ink.muted),
+                    text(tags).size(15),
+                    text("ID").size(11).color(ink.muted),
+                    text(id).size(13).color(ink.muted),
+                ]
+                .spacing(4)
+                .padding([0, 8]),
+            );
+        }
         let has_words = saved || !self.body.text().is_empty() || !self.title_text.is_empty();
         if has_words || saved || self.editor_dirty() {
             block = block.push(hairline());
@@ -7835,6 +8176,8 @@ impl App {
             return;
         }
         self.draft_editor = text_editor::Content::new();
+        self.drafts.remove(&id);
+        let _ = profile::store_drafts(&self.dir, &self.drafts);
         self.screen = Screen::Chat;
         self.detail = true;
         self.sync_watch();
@@ -8291,6 +8634,13 @@ impl App {
         let paired = !book.holds_root();
         self.notebook = Some(book);
         self.reload();
+        if self.selected.is_none()
+            && let Some((id, line)) = profile::load_place(&self.dir)
+            && self.catalog.iter().any(|note| note.id == id)
+        {
+            self.show_note(&id);
+            self.body.place_line(line);
+        }
         if let Some(side) = lane::take_side() {
             self.apply_side(side);
         }
@@ -8679,6 +9029,12 @@ impl App {
         // must not be written back into the next notebook's file.
         self.my_words.clear();
         self.orders.clear();
+        self.folded.clear();
+        self.drafts.clear();
+        self.done_on.clear();
+        self.spotlight = false;
+        self.held_repeat = None;
+        self.task_pick = None;
         self.list_drag = None;
         self.share_words();
         self.focus = false;
@@ -9425,6 +9781,7 @@ fn bubbles(lines: Vec<ambient_cli::ChatMessage>) -> Vec<ChatBubble> {
                 text: line.text,
                 time: when.time,
                 day: when.day,
+                unix: line.unix_ms,
                 mine: line.mine,
                 sender: line.sender,
                 cite: line.cite,
@@ -10760,6 +11117,7 @@ struct ChatBubble {
     text: String,
     time: String,
     day: String,
+    unix: Option<u64>,
     mine: bool,
     sender: String,
     cite: Option<String>,
@@ -11069,6 +11427,92 @@ impl<'a> From<Wheel<'a>> for Element<'a, Message> {
 /// Room between content and the bar. The bar is drawn over the content, so without this it sits
 /// on the edge of a button or a line of text.
 const BAR_ROOM: f32 = 10.0;
+
+fn window_event(
+    event: iced::Event,
+    status: iced::event::Status,
+    _id: iced::window::Id,
+) -> Option<Message> {
+    match event {
+        iced::Event::Window(
+            iced::window::Event::Resized(size) | iced::window::Event::Opened { size, .. },
+        ) => Some(Message::Resized(size)),
+        iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+            Some(Message::FileDropped(path))
+        }
+        iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) => {
+            Some(Message::Mods {
+                command: mods.control() || mods.command(),
+                shift: mods.shift(),
+            })
+        }
+        iced::Event::Window(iced::window::Event::Focused) => Some(Message::ClockTick),
+        iced::Event::Mouse(iced::mouse::Event::WheelScrolled { .. }) => scroll_seen(),
+        iced::Event::Mouse(
+            iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)
+            | iced::mouse::Event::CursorLeft,
+        )
+        | iced::Event::Window(iced::window::Event::Unfocused)
+        | iced::Event::Touch(
+            iced::touch::Event::FingerLifted { .. } | iced::touch::Event::FingerLost { .. },
+        ) => Some(Message::SelectStop),
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
+            if status == iced::event::Status::Ignored && task_arrow(&key, modifiers).is_some() =>
+        {
+            task_arrow(&key, modifiers)
+        }
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
+            if status == iced::event::Status::Ignored
+                && (modifiers.control() || modifiers.command())
+                && matches!(key.as_ref(), Key::Character(text) if text.eq_ignore_ascii_case("f")) =>
+        {
+            Some(Message::FindOpen)
+        }
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
+            if status == iced::event::Status::Ignored
+                && (modifiers.control() || modifiers.command())
+                && matches!(key.as_ref(), Key::Character(".")) =>
+        {
+            Some(Message::ToggleFocus)
+        }
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key,
+            modifiers,
+            text,
+            ..
+        }) if status == iced::event::Status::Ignored => {
+            ignored_key(&key, text.as_deref(), modifiers).map(Message::TypedIgnored)
+        }
+        _ => None,
+    }
+}
+
+fn task_arrow(key: &Key, modifiers: iced::keyboard::Modifiers) -> Option<Message> {
+    let down = match key.as_ref() {
+        Key::Named(iced::keyboard::key::Named::ArrowDown) => true,
+        Key::Named(iced::keyboard::key::Named::ArrowUp) => false,
+        _ => return None,
+    };
+    if modifiers.control() || modifiers.command() || modifiers.logo() {
+        return None;
+    }
+    if modifiers.alt() {
+        Some(Message::NudgeTask { up: !down })
+    } else {
+        Some(Message::PickTask { down })
+    }
+}
+
+fn chat_at_end(view: iced::widget::scrollable::Viewport) -> Message {
+    let room = view.content_bounds().height - view.bounds().height;
+    let y = view.relative_offset().y;
+    let at_end = room <= 1.0 || !y.is_finite() || y >= 0.96;
+    Message::ChatAtEnd(at_end)
+}
+
+fn done_key(task: &TaskRow) -> String {
+    format!("{}\t{}", task.note_id, markdown::task_words(&task.text))
+}
 
 fn vscroll<'a>(content: impl Into<Element<'a, Message>>) -> scrollable::Scrollable<'a, Message> {
     vscroll_flush(container(content).width(Fill).padding(iced::Padding {
@@ -11779,6 +12223,7 @@ enum Mini {
     Plus,
     Quote,
     Send,
+    Lamp,
 }
 
 fn mini_button(
@@ -11795,7 +12240,7 @@ fn mini_button(
 
 fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
     use std::sync::OnceLock;
-    static HANDLES: OnceLock<[iced_image::Handle; 24]> = OnceLock::new();
+    static HANDLES: OnceLock<[iced_image::Handle; 26]> = OnceLock::new();
     let handles = HANDLES.get_or_init(|| {
         let ink = [0xED, 0xEA, 0xDE];
         let day = [0x1C, 0x19, 0x17];
@@ -11824,6 +12269,8 @@ fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
             iced_image::Handle::from_bytes(icon_png(day, quote_ink)),
             iced_image::Handle::from_bytes(icon_png(ink, send_ink)),
             iced_image::Handle::from_bytes(icon_png(day, send_ink)),
+            iced_image::Handle::from_bytes(icon_png(ink, lamp_ink)),
+            iced_image::Handle::from_bytes(icon_png(day, lamp_ink)),
         ]
     });
     let index = match kind {
@@ -11839,6 +12286,7 @@ fn mini_handle(kind: Mini, dark: bool) -> iced_image::Handle {
         Mini::Plus => 18,
         Mini::Quote => 20,
         Mini::Send => 22,
+        Mini::Lamp => 24,
     } + usize::from(!dark);
     handles
         .get(index)
@@ -11900,6 +12348,15 @@ fn focus_ink(dx: f64, dy: f64) -> bool {
     let upright = (16.0..20.5).contains(&x) && (8.0..=20.5).contains(&y);
     let across = (16.0..20.5).contains(&y) && (8.0..=20.5).contains(&x);
     upright || across || x.hypot(y) < 4.5
+}
+
+/// A bulb and a short base. Spotlight, in focus.
+fn lamp_ink(dx: f64, dy: f64) -> bool {
+    let bulb = dx.hypot(dy + 6.0);
+    let ring = (9.0..13.5).contains(&bulb);
+    let neck = (4.0..9.0).contains(&dy) && dx.abs() < 2.6;
+    let base = (9.0..13.0).contains(&dy) && dx.abs() < 7.0 && !(10.2..=11.6).contains(&dy);
+    ring || neck || base
 }
 
 /// A cross: add.
@@ -13176,9 +13633,16 @@ mod app_tests {
         let _ = app.update(Message::FocusBar);
         assert!(!app.slide_bar.open);
 
+        let _ = app.update(Message::ToggleSpotlight);
+        assert!(app.spotlight, "the light is on");
+        let _ = app.update(Message::ToggleSpotlight);
+        assert!(!app.spotlight, "the light is off");
+        let _ = app.update(Message::ToggleSpotlight);
+
         // Leaving puts everything back at once, so nothing is left hidden.
         let _ = app.update(Message::ToggleFocus);
         assert!(!app.focused());
+        assert!(!app.spotlight, "leaving focus turns the light off");
         assert!(app.slide_bar.open);
         assert!((app.slide_bar.shown() - 1.0).abs() < f32::EPSILON);
         let _ = std::fs::remove_dir_all(&dir);
@@ -13217,6 +13681,8 @@ mod app_tests {
         let _ = app.update(Message::ToggleFocus);
         drop(app.view());
         let _ = app.update(Message::FocusBar);
+        drop(app.view());
+        let _ = app.update(Message::ToggleSpotlight);
         drop(app.view());
         let _ = app.update(Message::FocusBar);
         drop(app.view());

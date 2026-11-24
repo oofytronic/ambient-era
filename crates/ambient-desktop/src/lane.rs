@@ -136,6 +136,8 @@ pub(super) enum Done {
 pub(super) struct NoteHit {
     pub note: NoteSummary,
     pub line: String,
+    /// Line index of `line` in the note. Zero when nothing matched.
+    pub at: usize,
 }
 
 /// One conversation line the search found.
@@ -661,7 +663,7 @@ fn search_one(
     let mut notes = Vec::new();
     if let Some(opened) = book.as_ref() {
         for note in found {
-            let line = opened
+            let (at, line) = opened
                 .show_held(&note.id)
                 .ok()
                 .and_then(|shown| {
@@ -670,8 +672,8 @@ fn search_one(
                         .first()
                         .map(|head| snippet_line(&head.body, query))
                 })
-                .unwrap_or_default();
-            notes.push(NoteHit { note, line });
+                .unwrap_or((0, String::new()));
+            notes.push(NoteHit { note, line, at });
         }
     }
     let chats = chat_matches(dir, chats, query);
@@ -749,21 +751,21 @@ fn version_one(
     }
 }
 
-fn snippet_line(body: &str, query: &str) -> String {
+fn snippet_line(body: &str, query: &str) -> (usize, String) {
     let needle = query.trim().to_lowercase();
     if needle.is_empty() {
-        return String::new();
+        return (0, String::new());
     }
-    for line in body.lines() {
+    for (index, line) in body.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.starts_with("%%ambient-tags:") {
             continue;
         }
         if trimmed.to_lowercase().contains(&needle) {
-            return clip_line(trimmed);
+            return (index, clip_line(trimmed));
         }
     }
-    String::new()
+    (0, String::new())
 }
 
 fn clip_line(line: &str) -> String {
