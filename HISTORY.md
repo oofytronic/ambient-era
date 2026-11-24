@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-23 — how to stand a relay up, written and not started
+
+[docs/network/standing-up.md](docs/network/standing-up.md) is the path for a Raspberry Pi or any other machine: a name, a Let's Encrypt certificate, and the relay on port 8443. A homemade certificate will not do. The owner is not doing this yet. The window's relay stays this computer.
+
 ## 2026-11-23 — remove and block from the window
 
 The pencil on a conversation can remove a person or block them. Only the window that started it can remove, and they keep what was already sealed to them. Block is this computer only: an invite from here will not include them, and conversations they are already in stay. The commands are still there.

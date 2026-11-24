@@ -69,7 +69,7 @@ That form is cleartext and only binds this computer. A relay another computer ca
 ambient-relay --tls fullchain.pem privkey.pem --store /var/lib/ambient-relay --bind 0.0.0.0:443
 ```
 
-This program does not request a certificate. A small VPS is the straightforward machine. A computer at home is the same binary, if the port can be reached and the machine stays up. Neither is a special image. Do not rent one until there is a certificate and the address is put in the introduction list or pinned. Until then the app stays on this computer.
+This program does not request a certificate. A small VPS is the straightforward machine. A computer at home is the same binary, if the port can be reached and the machine stays up. Neither is a special image. Do not rent one until there is a certificate and the address is put in the introduction list or pinned. Until then the app stays on this computer. The long way, for a Raspberry Pi or any other machine, is [standing-up.md](standing-up.md). It is written down and not started.
 
 ## How a sync writes
 
