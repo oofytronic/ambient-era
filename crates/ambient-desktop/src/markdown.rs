@@ -647,7 +647,10 @@ pub(super) fn view(
     let (win_start, win_end) = body.live_at.unwrap_or((0, 0));
     let active = byte_pos(&text, win_start.min(text.len())).line;
     let lines = split_lines(&text);
-    set_spotlight(spotlight.then(|| paragraph_span(&lines, active)));
+    // The open word can stay on an earlier line while the caret has moved. The light follows
+    // the caret's line, not that word, or it never leaves the first paragraph.
+    let at = spotlight_at(&text, body.caret_byte());
+    set_spotlight(spotlight.then_some((at, at)));
     let selected = body.selection_bounds();
     let paint = selection_color(dark);
     let placeholder = text.is_empty();
@@ -3731,27 +3734,10 @@ fn split_lines(text: &str) -> Vec<&str> {
     }
 }
 
-fn paragraph_span(lines: &[&str], at: usize) -> (usize, usize) {
-    let at = at.min(lines.len().saturating_sub(1));
-    if lines.get(at).is_some_and(|line| line.trim().is_empty()) {
-        return (at, at);
-    }
-    let mut start = at;
-    while start > 0
-        && lines
-            .get(start - 1)
-            .is_some_and(|line| !line.trim().is_empty())
-    {
-        start -= 1;
-    }
-    let mut end = at;
-    while lines
-        .get(end + 1)
-        .is_some_and(|line| !line.trim().is_empty())
-    {
-        end += 1;
-    }
-    (start, end)
+/// The line the light keeps. One source line, so a wrapped line stays together and the next
+/// line does not. A blank-line block was leaving everything after the first break bright.
+fn spotlight_at(text: &str, caret: usize) -> usize {
+    line_index(text, caret)
 }
 
 thread_local! {
@@ -5044,6 +5030,16 @@ fn active_line<'a>(
         )
     } else {
         Vec::new()
+    };
+    let prefix = if line_dim(index) {
+        dim_pieces(prefix, dark)
+    } else {
+        prefix
+    };
+    let suffix = if line_dim(index) {
+        dim_pieces(suffix, dark)
+    } else {
+        suffix
     };
     let sample = line.get(win.start..win.end).unwrap_or("").to_owned();
     let probe = if win.start < win.end {
@@ -7875,6 +7871,25 @@ mod tests {
         assert_eq!(body.live_at, window);
         assert!(body.caret_byte() > 8);
         assert_eq!(body.open_line(), 0);
+    }
+
+    #[test]
+    fn the_light_follows_the_caret_not_the_open_word() {
+        let mut body = super::NoteBody::new();
+        body.load("First paragraph.\n\nSecond paragraph.\nThird line.");
+        body.place_byte(0);
+        assert_eq!(body.open_line(), 0);
+        let second = body.text().find("Second").unwrap_or(0);
+        body.place_byte_soft(second);
+        assert_eq!(
+            body.open_line(),
+            0,
+            "the open word stayed on the first line"
+        );
+        let at = super::spotlight_at(&body.text(), body.caret_byte());
+        assert_eq!(at, 2, "the light is the caret's line");
+        let third = body.text().find("Third").unwrap_or(0);
+        assert_eq!(super::spotlight_at(&body.text(), third), 3);
     }
 
     #[test]

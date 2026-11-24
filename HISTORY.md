@@ -4,6 +4,12 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-23 — the light follows the line, and the chat log stays still
+
+The spotlight was the open word's paragraph, so it stayed on the first block. It is now the line the caret is on. A wrapped line stays together. The next line does not.
+
+The chat log stays anchored at the latest line. Scrolling up still offers Latest. Scrolling on at the bottom no longer flips the anchor, which was what shook the thread. Enter on the task the arrows are on checks it, or clears the check.
+
 ## 2026-11-23 — a tighter notes, tasks, and chat
 
 Focus has a light on the far right. It leaves the paragraph under the caret as it is and draws the rest quieter. The list remembers which groups are folded, and which note and line were open. A search hit and a task open on that line. Insert on the format bar stays closed until it is asked for. The note's panel shows its tags and its id.

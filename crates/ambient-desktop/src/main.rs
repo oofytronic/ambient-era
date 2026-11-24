@@ -535,6 +535,8 @@ enum Message {
     PickTask {
         down: bool,
     },
+    /// Enter on the task the arrows are on. Checks it, or clears the check.
+    TogglePicked,
     NudgeTask {
         up: bool,
     },
@@ -1699,7 +1701,8 @@ impl App {
                 Task::none()
             }
             Message::SelectChat(id) => {
-                if self.chat_id.as_deref() != Some(id.as_str()) {
+                let switched = self.chat_id.as_deref() != Some(id.as_str());
+                if switched {
                     self.keep_draft();
                     self.chat.clear();
                     self.adding = false;
@@ -1715,7 +1718,11 @@ impl App {
                 self.detail = true;
                 self.sync_watch();
                 self.post(lane::Job::Pull);
-                Task::none()
+                if switched {
+                    snap_chat_latest()
+                } else {
+                    Task::none()
+                }
             }
             Message::SetTask { id, line, done } => {
                 let follow = self.set_task(&id, line, done);
@@ -2001,6 +2008,8 @@ impl App {
                 Task::none()
             }
             Message::ChatAtEnd(at_end) => {
+                // The anchor stays on. Turning it off here flips the same offset to the other
+                // end, and the next wheel tick flips it back, so the log shakes.
                 if at_end {
                     self.chat_follow = true;
                     self.chat_behind = false;
@@ -2012,15 +2021,13 @@ impl App {
             Message::ChatLatest => {
                 self.chat_follow = true;
                 self.chat_behind = false;
-                iced::widget::operation::snap_to(
-                    iced::widget::Id::new("chat-log"),
-                    iced::widget::operation::RelativeOffset::END,
-                )
+                snap_chat_latest()
             }
             Message::PickTask { down } => {
                 self.pick_task(down);
                 Task::none()
             }
+            Message::TogglePicked => self.toggle_picked(),
             Message::NudgeTask { up } => self.nudge_task(up),
             Message::TitleSubmit => focus_named("note-body"),
             Message::AddWord => {
@@ -3317,10 +3324,21 @@ impl App {
 
     fn tasks_pane(&self) -> Element<'_, Message> {
         let ink = self.ink();
+        // Up and down are not taken by this field, so they move through the tasks. Enter is.
+        // An empty field checks the task those arrows are on, instead of adding a blank one.
+        let submit = if self.task_draft.trim().is_empty()
+            && self.new_due.due().is_none()
+            && self.task_cite.is_none()
+            && self.task_pick.is_some()
+        {
+            Message::TogglePicked
+        } else {
+            Message::AddTask
+        };
         let field = text_input("Add a task", &self.task_draft)
             .id(iced::widget::Id::new("task-input"))
             .on_input(Message::TaskDraft)
-            .on_submit(Message::AddTask)
+            .on_submit(submit)
             .padding(10)
             .width(Fill)
             .style(field_style);
@@ -4493,6 +4511,21 @@ impl App {
         self.task_pick = rows.get(next).cloned();
     }
 
+    fn toggle_picked(&mut self) -> Task<Message> {
+        if self.screen != Screen::Tasks || self.sheet != Sheet::None || self.task_rename.is_some() {
+            return Task::none();
+        }
+        let Some((id, line)) = self.task_pick.clone() else {
+            return Task::none();
+        };
+        let done = self
+            .tasks
+            .iter()
+            .find(|task| task.note_id == id && task.line == line)
+            .is_none_or(|task| !task.done);
+        self.set_task(&id, line, done)
+    }
+
     fn nudge_task(&mut self, up: bool) -> Task<Message> {
         if self.screen != Screen::Tasks || self.sheet != Sheet::None {
             return Task::none();
@@ -4873,14 +4906,12 @@ impl App {
         if self.chat_id.is_some() {
             page = page.push(self.chat_header());
         }
-        let mut log = vscroll(lines.width(Fill))
+        let log = vscroll(lines.width(Fill))
             .id(iced::widget::Id::new("chat-log"))
             .height(Fill)
             .width(Fill)
-            .on_scroll(chat_at_end);
-        if self.chat_follow {
-            log = log.anchor_bottom();
-        }
+            .on_scroll(chat_at_end)
+            .anchor_bottom();
         page = page.push(log);
         if self.chat_behind {
             page = page.push(
@@ -11457,9 +11488,9 @@ fn window_event(
             iced::touch::Event::FingerLifted { .. } | iced::touch::Event::FingerLost { .. },
         ) => Some(Message::SelectStop),
         iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
-            if status == iced::event::Status::Ignored && task_arrow(&key, modifiers).is_some() =>
+            if status == iced::event::Status::Ignored && task_key(&key, modifiers).is_some() =>
         {
-            task_arrow(&key, modifiers)
+            task_key(&key, modifiers)
         }
         iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
             if status == iced::event::Status::Ignored
@@ -11487,27 +11518,46 @@ fn window_event(
     }
 }
 
-fn task_arrow(key: &Key, modifiers: iced::keyboard::Modifiers) -> Option<Message> {
-    let down = match key.as_ref() {
-        Key::Named(iced::keyboard::key::Named::ArrowDown) => true,
-        Key::Named(iced::keyboard::key::Named::ArrowUp) => false,
-        _ => return None,
-    };
+fn task_key(key: &Key, modifiers: iced::keyboard::Modifiers) -> Option<Message> {
     if modifiers.control() || modifiers.command() || modifiers.logo() {
         return None;
     }
-    if modifiers.alt() {
-        Some(Message::NudgeTask { up: !down })
-    } else {
-        Some(Message::PickTask { down })
+    match key.as_ref() {
+        Key::Named(iced::keyboard::key::Named::Enter) if !modifiers.alt() && !modifiers.shift() => {
+            Some(Message::TogglePicked)
+        }
+        Key::Named(iced::keyboard::key::Named::ArrowDown) if modifiers.alt() => {
+            Some(Message::NudgeTask { up: false })
+        }
+        Key::Named(iced::keyboard::key::Named::ArrowUp) if modifiers.alt() => {
+            Some(Message::NudgeTask { up: true })
+        }
+        Key::Named(iced::keyboard::key::Named::ArrowDown) => Some(Message::PickTask { down: true }),
+        Key::Named(iced::keyboard::key::Named::ArrowUp) => Some(Message::PickTask { down: false }),
+        _ => None,
     }
 }
 
+/// The log is anchored at the end, so an offset of 0 is the latest line. A value near 1 is
+/// not: that reading is for a list anchored at the top, and using it made the bottom shake.
+fn chat_is_at_end(content: f32, view: f32, offset: f32) -> bool {
+    let room = content - view;
+    room <= 1.0 || !offset.is_finite() || offset <= 24.0
+}
+
 fn chat_at_end(view: iced::widget::scrollable::Viewport) -> Message {
-    let room = view.content_bounds().height - view.bounds().height;
-    let y = view.relative_offset().y;
-    let at_end = room <= 1.0 || !y.is_finite() || y >= 0.96;
-    Message::ChatAtEnd(at_end)
+    Message::ChatAtEnd(chat_is_at_end(
+        view.content_bounds().height,
+        view.bounds().height,
+        view.absolute_offset().y,
+    ))
+}
+
+fn snap_chat_latest<T>() -> Task<T> {
+    iced::widget::operation::snap_to(
+        iced::widget::Id::new("chat-log"),
+        iced::widget::operation::RelativeOffset::START,
+    )
 }
 
 fn done_key(task: &TaskRow) -> String {
@@ -13562,6 +13612,46 @@ mod app_tests {
             "the removal did not show"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn enter_checks_the_task_the_arrows_are_on() {
+        let _turn = one_at_a_time();
+        let dir = folder("task-enter");
+        let mut app = open_app(&dir);
+        let _ = app.update(Message::ShowTasks);
+        let _ = app.update(Message::TaskDraft("buy milk".to_owned()));
+        let _ = app.update(Message::AddTask);
+        settle(&mut app);
+        let _ = app.update(Message::PickTask { down: true });
+        let _ = app.update(Message::TogglePicked);
+        settle(&mut app);
+        let milk = app
+            .tasks
+            .iter()
+            .find(|task| task.text == "buy milk")
+            .expect("task");
+        assert!(milk.done, "enter did not check it");
+        let _ = app.update(Message::TogglePicked);
+        settle(&mut app);
+        let milk = app
+            .tasks
+            .iter()
+            .find(|task| task.text == "buy milk")
+            .expect("task");
+        assert!(!milk.done, "enter again did not clear it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_bottom_of_a_chat_is_an_offset_of_zero() {
+        assert!(super::chat_is_at_end(800.0, 400.0, 0.0));
+        assert!(super::chat_is_at_end(800.0, 400.0, 12.0));
+        assert!(!super::chat_is_at_end(800.0, 400.0, 80.0));
+        assert!(
+            super::chat_is_at_end(200.0, 400.0, 400.0),
+            "a short log is already at the end"
+        );
     }
 
     #[test]
