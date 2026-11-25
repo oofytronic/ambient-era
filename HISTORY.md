@@ -525,3 +525,9 @@ The same report found that the centered cards on a narrow window could not be cl
 The owner also found the narrow window confusing: the Tasks tab's list had become a popup behind a button, the graph could not be opened from the list, and a conversation had no way back to the list of conversations. Every tab is now the same two steps: its list, then the thing chosen, with a Back at the top of the second. For Tasks the list is the views, which the panel on the left is on a wide window, and the popup and its button are gone. In a conversation, Add, Cite, and Send are icons on one line with the box.
 
 The explanation under the add row of the Tasks tab, and the legend above the graph, are gone. An onboarding sequence will explain things. Nothing was seen in a window.
+
+## 2026-11-25 — A test that draws and clicks real frames
+
+The popup bug got past every test because the tests built the views and never drew them. `headless.rs` now lays out, draws, and clicks the whole window on the software renderer, with the program's fonts, with no display. It checks that the sync card, the Cite menu, and the calendar are drawn and that a press elsewhere closes them, that a press on the dimmed page closes a card and a press on the card does not, that the right panel closes as a sheet, and that nothing runs past the right edge at nine widths. With the wheel wrapper's overlay passing taken out again, the first of those fails. It rasterizes nothing.
+
+It needed two crates as test-only dependencies, `iced_runtime` and `iced_tiny_skia`, which are already in the build as parts of `iced`, at the same versions. No crate was added to the program, and `just deny` was not run.

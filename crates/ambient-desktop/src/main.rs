@@ -13498,19 +13498,22 @@ mod tests_support {
 
 /// Tests that drive a real `App` on a real folder, through the same `update` the window uses.
 #[cfg(test)]
+mod headless;
+
+#[cfg(test)]
 mod app_tests {
     use super::tests_support::one_at_a_time;
     use super::{App, Message, Notebook, tests_support, write_snapshot};
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    fn folder(name: &str) -> PathBuf {
+    pub(super) fn folder(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("aerodash-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
 
-    fn open_app(dir: &Path) -> App {
+    pub(super) fn open_app(dir: &Path) -> App {
         Notebook::create(dir).expect("create");
         let (mut app, _) = App::at(dir.to_path_buf());
         app.loaded = true;
@@ -13699,7 +13702,7 @@ mod app_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn wide(app: &mut App) {
+    pub(super) fn wide(app: &mut App) {
         let _ = app.update(Message::Resized(iced::Size::new(1100.0, 720.0)));
     }
 
@@ -13907,7 +13910,7 @@ mod app_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn summary(id: &str, tags: &[&str]) -> super::NoteSummary {
+    pub(super) fn summary(id: &str, tags: &[&str]) -> super::NoteSummary {
         super::NoteSummary {
             id: id.to_owned(),
             title: id.to_owned(),
@@ -14338,7 +14341,7 @@ mod app_tests {
     }
 
     /// Fix the clock at 2026-11-20 in Los Angeles, at this minute of the day.
-    fn pinned(app: &mut App, minutes: u32) -> super::dates::Date {
+    pub(super) fn pinned(app: &mut App, minutes: u32) -> super::dates::Date {
         let today = super::dates::Date::new(2026, 11, 20).expect("a day");
         let clock = super::clock::Clock {
             today,

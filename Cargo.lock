@@ -124,6 +124,8 @@ version = "0.1.0"
 dependencies = [
  "ambient-cli",
  "iced",
+ "iced_runtime",
+ "iced_tiny_skia",
  "image",
  "qrcode",
  "tokio",

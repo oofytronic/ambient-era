@@ -37,7 +37,7 @@ The owner chose the long-term path for a Mac and later phones: one Rust core wit
 
 ## Popups
 
-Nothing that opens may push the page. A menu under a button is `anchored`, a question is `modal()`, the panel on the right is beside the page from 1020 pixels and a sheet below. Every custom widget that wraps a child must forward `overlay`, or its popups are silently never drawn. Narrow windows are list, then detail, with a Back, for every tab. See the last section of `crates/ambient-desktop/AGENTS.md`. When you add something that opens, use one of those, and add it to the sweep test.
+Nothing that opens may push the page. A menu under a button is `anchored`, a question is `modal()`, the panel on the right is beside the page from 1020 pixels and a sheet below. Every custom widget that wraps a child must forward `overlay`, or its popups are silently never drawn. Narrow windows are list, then detail, with a Back, for every tab. See the last section of `crates/ambient-desktop/AGENTS.md`. When you add something that opens, use one of those, and add it to the headless tests in `headless.rs`, which lay out and click a real frame.
 
 ## Time
 

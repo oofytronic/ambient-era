@@ -18,5 +18,13 @@ tokio = { workspace = true }
 qrcode = { workspace = true }
 image = { workspace = true }
 
+# Test only. Both are already in the build as parts of `iced`, at these versions, so no crate is
+# added. They let a test lay out, draw, and click a real frame without a window, which the
+# popup bug showed was missing: a test that only built the views could not see that nothing was
+# drawn. Neither is in the shipped program.
+[dev-dependencies]
+iced_runtime = "=0.14.0"
+iced_tiny_skia = "=0.14.1"
+
 [lints]
 workspace = true
