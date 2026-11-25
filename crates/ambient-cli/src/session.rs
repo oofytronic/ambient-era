@@ -88,6 +88,36 @@ pub struct ShownNote {
     pub heads: Vec<ShownHead>,
 }
 
+/// A note that was deleted, as it read just before. The text is still in the log.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeletedNote {
+    /// Hex note id.
+    pub id: String,
+    /// Title of the last version that was not the delete marker.
+    pub title: String,
+    /// Body of that version.
+    pub body: String,
+    /// When the delete was written, in advisory unix milliseconds, if the event says.
+    pub deleted_at: Option<u64>,
+}
+
+/// One snapshot a note has had, for a list of its history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NoteVersion {
+    /// Event id of the snapshot. A link can name this version.
+    pub version: String,
+    /// Title at that snapshot.
+    pub title: String,
+    /// Body at that snapshot.
+    pub body: String,
+    /// When it was written, in advisory unix milliseconds, if the event says.
+    pub unix_ms: Option<u64>,
+    /// Label of the device that wrote it.
+    pub writer: String,
+    /// True when it is a current head of the note.
+    pub current: bool,
+}
+
 /// One stored snapshot of a note. `current` means it is still a head.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NoteSnap {
@@ -272,6 +302,142 @@ impl Notebook {
             .filter(|(_, heads)| !heads_are_deleted(heads))
             .map(|(id, heads)| summary(id, heads, &item.projected.names))
             .collect())
+    }
+
+    /// Every snapshot a note has had, newest first, from memory. The events were verified when
+    /// the log was loaded, so this does not check a signature. A delete is one of them, with
+    /// the marker for its body, and is left in so the list tells the whole story.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when the id is not 64 hex characters or this notebook has not been
+    /// opened.
+    pub fn versions_held(&self, id_hex: &str) -> Result<Vec<NoteVersion>, CliError> {
+        let note_id = parse_hex32(id_hex)?;
+        let guard = self.cache.borrow();
+        let Some(item) = guard.as_ref() else {
+            return Err(CliError::message("folder is not open"));
+        };
+        let heads: Vec<[u8; 32]> = item
+            .projected
+            .view
+            .as_ref()
+            .and_then(|view| view.notes.get(&note_id))
+            .map(|heads| heads.iter().map(|head| head.event_id.0).collect())
+            .unwrap_or_default();
+        let mut found: Vec<NoteVersion> = Vec::new();
+        for event in &item.events {
+            if event.event_type != "note.put" {
+                continue;
+            }
+            let Ok((id, title, body, _)) = ambient_spaces::note_put_parts(&event.payload) else {
+                continue;
+            };
+            if id != note_id {
+                continue;
+            }
+            found.push(NoteVersion {
+                version: event.id.to_string(),
+                title,
+                body,
+                unix_ms: event.unix_ms,
+                writer: item
+                    .projected
+                    .names
+                    .get(&event.signer)
+                    .cloned()
+                    .unwrap_or_else(|| short_hex(&event.signer)),
+                current: heads.contains(&event.id.0),
+            });
+        }
+        // Events are in the order they were written, so the last is the newest.
+        found.reverse();
+        Ok(found)
+    }
+
+    /// The notes that were deleted, newest delete first, each as it read before.
+    ///
+    /// A delete is a later snapshot whose body is only the marker, so the text before it is the
+    /// snapshot its parents name. Bringing a note back is an edit with that text, which makes a
+    /// new snapshot after the delete. Nothing is rewritten.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CliError`] when this notebook has not been opened.
+    pub fn deleted_held(&self) -> Result<Vec<DeletedNote>, CliError> {
+        let guard = self.cache.borrow();
+        let Some(item) = guard.as_ref() else {
+            return Err(CliError::message("folder is not open"));
+        };
+        let Some(view) = item.projected.view.as_ref() else {
+            return Ok(Vec::new());
+        };
+        // One stored snapshot: when it was written, its title, body, and its parents.
+        let read = |version: &[u8; 32]| {
+            let index = *item.projected.snaps.get(version)?;
+            let event = verify(item.wires.get(index)?).ok()?;
+            let (_, title, body, parents) = ambient_spaces::note_put_parts(&event.payload).ok()?;
+            Some((event.unix_ms, title, body, parents))
+        };
+        let mut found: Vec<(usize, DeletedNote)> = Vec::new();
+        for (id, heads) in &view.notes {
+            if !heads_are_deleted(heads) {
+                continue;
+            }
+            let Some(head) = heads.first() else {
+                continue;
+            };
+            let Some((deleted_at, _, _, parents)) = read(&head.event_id.0) else {
+                continue;
+            };
+            // Back from the delete to the first snapshot that has words in it.
+            let mut waiting: Vec<EventId> = parents;
+            let mut seen = 0_usize;
+            let mut before = None;
+            while let Some(parent) = waiting.pop() {
+                seen = seen.saturating_add(1);
+                if seen > 64 {
+                    break;
+                }
+                let Some((_, title, body, more)) = read(&parent.0) else {
+                    continue;
+                };
+                if note_is_deleted(&body) {
+                    waiting.extend(more);
+                } else {
+                    before = Some((title, body));
+                    break;
+                }
+            }
+            let Some((title, body)) = before else {
+                continue;
+            };
+            // Where in the log the delete was written. When two carry the same time, or none,
+            // the one written later is newer.
+            let written = item
+                .projected
+                .snaps
+                .get(&head.event_id.0)
+                .copied()
+                .unwrap_or(0);
+            found.push((
+                written,
+                DeletedNote {
+                    id: hex(id),
+                    title,
+                    body,
+                    deleted_at,
+                },
+            ));
+        }
+        found.sort_by(|left, right| {
+            right
+                .1
+                .deleted_at
+                .cmp(&left.1.deleted_at)
+                .then(right.0.cmp(&left.0))
+        });
+        Ok(found.into_iter().map(|(_, note)| note).collect())
     }
 
     /// Walk each visible note without cloning its body.
@@ -1260,6 +1426,116 @@ mod tests {
             .expect("current");
         assert!(current.current);
         assert_eq!(current.body, "buy oats");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_deleted_note_is_listed_as_it_read_and_comes_back_with_an_edit() {
+        let dir = scratch("deleted");
+        let book = Notebook::create(&dir).expect("create");
+        let keep = book.add("Keep", "stays").expect("add");
+        let gone = book.add("Market", "buy milk").expect("add");
+        book.edit(&gone, "Market", "buy oats").expect("edit");
+        let other = book.add("Other", "also going").expect("add");
+        assert!(book.deleted_held().expect("none yet").is_empty());
+        book.edit(&gone, "", super::DELETED_BODY).expect("delete");
+        book.edit(&other, "", super::DELETED_BODY).expect("delete");
+        // They have left the list, and are here as they were just before the delete.
+        let listed = book.list_held().expect("list");
+        assert!(listed.iter().all(|note| note.id == keep));
+        let deleted = book.deleted_held().expect("deleted");
+        assert_eq!(deleted.len(), 2);
+        let market = deleted.iter().find(|note| note.id == gone).expect("market");
+        assert_eq!(
+            (market.title.as_str(), market.body.as_str()),
+            ("Market", "buy oats")
+        );
+        // The newest delete is first.
+        assert_eq!(
+            deleted.first().map(|note| note.id.as_str()),
+            Some(other.as_str())
+        );
+        // Deleted twice in a row still reads as the last real text.
+        book.edit(&gone, "", super::DELETED_BODY)
+            .expect("delete again");
+        let again = book.deleted_held().expect("again");
+        assert_eq!(
+            again
+                .iter()
+                .find(|note| note.id == gone)
+                .map(|note| note.body.as_str()),
+            Some("buy oats")
+        );
+        // Bringing one back is an edit with that text. It is in the list again and not here.
+        book.edit(&gone, &market.title, &market.body)
+            .expect("restore");
+        assert!(
+            book.list_held()
+                .expect("list")
+                .iter()
+                .any(|note| note.id == gone)
+        );
+        assert!(
+            book.deleted_held()
+                .expect("left")
+                .iter()
+                .all(|note| note.id != gone)
+        );
+        // The log agrees, from a fresh open.
+        let fresh = Notebook::open(&dir).expect("reopen");
+        assert_eq!(fresh.deleted_held().expect("fresh").len(), 1);
+        assert_eq!(
+            fresh.show_held(&gone).expect("show").heads[0].body,
+            "buy oats"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_lists_every_snapshot_it_has_had_newest_first() {
+        let dir = scratch("versions");
+        let book = Notebook::create(&dir).expect("create");
+        let id = book.add("Plan", "one").expect("add");
+        let other = book.add("Other", "unrelated").expect("add");
+        book.edit(&id, "Plan", "two").expect("edit");
+        book.edit(&other, "Other", "still unrelated").expect("edit");
+        book.edit(&id, "Plan v3", "three").expect("edit");
+        let versions = book.versions_held(&id).expect("versions");
+        let bodies: Vec<&str> = versions.iter().map(|v| v.body.as_str()).collect();
+        assert_eq!(
+            bodies,
+            ["three", "two", "one"],
+            "only this note, newest first"
+        );
+        assert_eq!(versions[0].title, "Plan v3");
+        assert!(versions[0].current && !versions[1].current && !versions[2].current);
+        // A version can be read by the id it is listed under, and brought back with an edit.
+        let older = book
+            .snapshot_held(&id, &versions[2].version)
+            .expect("lookup")
+            .expect("found");
+        assert_eq!(older.body, "one");
+        book.edit(&id, &versions[2].title, &versions[2].body)
+            .expect("restore");
+        let after = book.versions_held(&id).expect("after");
+        assert_eq!(after.len(), 4);
+        assert_eq!(after[0].body, "one");
+        assert!(
+            after[0].current && !after[1].current,
+            "the restore is the head, and the rest stay"
+        );
+        // A delete is in the story, and so is a note that has none.
+        book.edit(&id, "", super::DELETED_BODY).expect("delete");
+        assert_eq!(
+            book.versions_held(&id).expect("deleted")[0].body,
+            super::DELETED_BODY
+        );
+        assert!(
+            book.versions_held(&"0".repeat(64))
+                .expect("none")
+                .is_empty()
+        );
+        assert!(book.versions_held("not hex").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

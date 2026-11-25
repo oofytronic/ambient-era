@@ -322,6 +322,14 @@ struct App {
     graph_edges: Vec<(String, String)>,
     /// The graph is shown in place of the note.
     graph_open: bool,
+    /// The list of deleted notes is shown in place of the note.
+    deleted_open: bool,
+    /// The notes deleted, as they read before, newest first. Read when the list is opened.
+    deleted: Vec<ambient_cli::DeletedNote>,
+    /// The versions of the open note are shown in place of it.
+    history_open: bool,
+    /// Every snapshot the open note has had, newest first. Read when the list is opened.
+    versions: Vec<ambient_cli::NoteVersion>,
     /// The graph's dots and lines, laid out. Built when it is opened and when the list changes.
     graph: Option<Arc<GraphData>>,
     cached_chapters: Vec<Chapter>,
@@ -566,6 +574,20 @@ enum Message {
     },
     /// Show the graph of notes and links in place of the note, or go back.
     ToggleGraph,
+    /// Show the notes that were deleted, with a way to bring each back, or go back.
+    ToggleDeleted,
+    /// Bring a deleted note back, as it read before.
+    RestoreNote(String),
+    /// Show the versions the open note has had, or go back to it.
+    ToggleHistory,
+    /// Read one of those versions, which is not the note and is not saved.
+    ViewVersion(String),
+    /// Make a version the note's words again, as a new snapshot after the others.
+    RestoreVersion(String),
+    /// Make the older version on screen the note's words again.
+    RestoreOlder,
+    /// A note came back: its id, and the notes now.
+    Restored(Result<(String, Vec<NoteSummary>), String>),
     /// A dot in the graph was clicked.
     GraphPick(String),
     /// The line of link counts under the title: open the right panel on the links.
@@ -1138,6 +1160,10 @@ impl App {
             links_to: Vec::new(),
             graph_edges: Vec::new(),
             graph_open: false,
+            deleted_open: false,
+            deleted: Vec::new(),
+            history_open: false,
+            versions: Vec::new(),
             graph: None,
             cached_chapters: Vec::new(),
             cached_backlinks: Vec::new(),
@@ -1298,6 +1324,8 @@ impl App {
                 Task::none()
             }
             Message::NewNote => {
+                self.history_open = false;
+                self.deleted_open = false;
                 self.graph_open = false;
                 self.graph = None;
                 self.clear_editor();
@@ -2058,7 +2086,69 @@ impl App {
                 self.send_selection();
                 Task::none()
             }
+            Message::ToggleDeleted => {
+                self.deleted_open = !self.deleted_open;
+                self.graph_open = false;
+                self.graph = None;
+                if self.compact() {
+                    self.detail = self.deleted_open;
+                }
+                self.refresh_deleted();
+                Task::none()
+            }
+            Message::RestoreNote(id) => {
+                let Some(note) = self.deleted.iter().find(|note| note.id == id).cloned() else {
+                    return Task::none();
+                };
+                self.restore_text(note.id, note.title, note.body)
+            }
+            Message::ToggleHistory => {
+                self.history_open = !self.history_open;
+                self.deleted_open = false;
+                self.graph_open = false;
+                self.graph = None;
+                if self.history_open {
+                    self.refresh_history();
+                }
+                Task::none()
+            }
+            Message::ViewVersion(version) => {
+                if let (Some(id), Some(found)) = (
+                    self.selected.clone(),
+                    self.versions.iter().find(|item| item.version == version),
+                ) {
+                    self.older = Some(OlderNote {
+                        id,
+                        title: found.title.clone(),
+                        body: found.body.clone(),
+                    });
+                    self.history_open = false;
+                    self.reading = false;
+                }
+                Task::none()
+            }
+            Message::RestoreVersion(version) => {
+                let (Some(id), Some(found)) = (
+                    self.selected.clone(),
+                    self.versions
+                        .iter()
+                        .find(|item| item.version == version)
+                        .cloned(),
+                ) else {
+                    return Task::none();
+                };
+                self.restore_text(id, found.title, found.body)
+            }
+            Message::RestoreOlder => {
+                let Some(older) = self.older.as_ref() else {
+                    return Task::none();
+                };
+                let (id, title, body) = (older.id.clone(), older.title.clone(), older.body.clone());
+                self.restore_text(id, title, body)
+            }
+            Message::Restored(result) => self.finish_restore(result),
             Message::ToggleGraph => {
+                self.deleted_open = false;
                 self.graph_open = !self.graph_open;
                 // On a narrow window the graph is the thing opened from the list, and closing it
                 // goes back to the list.
@@ -2241,6 +2331,8 @@ impl App {
             }
             Message::BackToList => {
                 self.detail = false;
+                self.history_open = false;
+                self.deleted_open = false;
                 self.graph_open = false;
                 self.graph = None;
                 self.cal = None;
@@ -3000,6 +3092,15 @@ impl App {
                     "Show notes and links as a graph"
                 },
                 Message::ToggleGraph,
+            ),
+            mini_button(
+                mini_handle(Mini::Trash, self.is_dark()),
+                if self.deleted_open {
+                    "Back to the note"
+                } else {
+                    "Recently deleted"
+                },
+                Message::ToggleDeleted,
             ),
             mini_button(
                 mini_handle(Mini::Search, self.is_dark()),
@@ -4704,6 +4805,8 @@ impl App {
             Sheet::None if self.screen == Screen::Chat => self.chat_pane(),
             Sheet::None if self.screen == Screen::Tasks => self.tasks_pane(),
             Sheet::None if self.graph_open && !self.compact() => self.graph_pane(),
+            Sheet::None if self.deleted_open && !self.compact() => self.deleted_pane(),
+            Sheet::None if self.history_open && !self.compact() => self.history_pane(),
             Sheet::None => self.notes_pane(),
         };
         container(body)
@@ -5572,6 +5675,258 @@ impl App {
         };
     }
 
+    /// Read the deleted notes again from what is held in memory.
+    fn refresh_deleted(&mut self) {
+        self.deleted = self
+            .notebook
+            .as_ref()
+            .and_then(|book| book.deleted_held().ok())
+            .unwrap_or_default();
+    }
+
+    /// Read the versions of the open note again from what is held in memory.
+    fn refresh_history(&mut self) {
+        self.versions = match (self.notebook.as_ref(), self.selected.as_deref()) {
+            (Some(book), Some(id)) => book.versions_held(id).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+    }
+
+    /// Write a note's words as they were, as a new snapshot after the others, so nothing in the
+    /// log is changed. A deleted note and an older version come back the same way. It is not
+    /// done over words that have not been saved, so those are not lost.
+    fn restore_text(&mut self, id: String, title: String, body: String) -> Task<Message> {
+        if self.saving {
+            self.say("Still saving. Try again in a moment.");
+            return Task::none();
+        }
+        if self.selected.as_deref() == Some(id.as_str()) && self.editor_dirty() {
+            self.say("Finish saving this note first, then bring the old words back.");
+            return Task::none();
+        }
+        self.saving = true;
+        let dir = self.dir.clone();
+        Task::perform(
+            async move {
+                let (sender, receiver) = iced::futures::channel::oneshot::channel();
+                std::thread::spawn(move || {
+                    let result = write_snapshot(&dir, Some(&id), &title, &body);
+                    let _ = sender.send(result);
+                });
+                receiver
+                    .await
+                    .unwrap_or_else(|_| Err("Restore stopped before it finished.".to_owned()))
+            },
+            Message::Restored,
+        )
+    }
+
+    fn finish_restore(
+        &mut self,
+        result: Result<(String, Vec<NoteSummary>), String>,
+    ) -> Task<Message> {
+        self.saving = false;
+        match result {
+            Ok((id, notes)) => {
+                self.writes = self.writes.saturating_add(1);
+                self.pending = true;
+                if !self.install_latest() {
+                    self.take_notes(notes);
+                }
+                self.refresh_deleted();
+                self.show_note(&id);
+                self.say("Restored.");
+            }
+            Err(err) => self.message = err,
+        }
+        Task::none()
+    }
+
+    /// Every version the open note has had, newest first, each to read or to make the note again.
+    fn history_pane(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let count = self.versions.len();
+        let summary = format!(
+            "{count} {}",
+            if count == 1 { "version" } else { "versions" }
+        );
+        let head: Element<'_, Message> = if self.compact() {
+            row![
+                ghost_label("‹ Note", Message::ToggleHistory),
+                space().width(Fill),
+                text(summary).size(13).color(ink.muted),
+            ]
+            .align_y(iced::Alignment::Center)
+            .into()
+        } else {
+            row![
+                text("Version history").font(serif()).size(26).width(Fill),
+                text(summary).size(13).color(ink.muted),
+                ghost_label("Back to the note", Message::ToggleHistory),
+            ]
+            .spacing(12)
+            .align_y(iced::Alignment::Center)
+            .into()
+        };
+        let now = clock::now_ms();
+        let mut list = column![].spacing(10).width(Fill);
+        if self.versions.is_empty() {
+            list = list.push(
+                text("This note has no earlier versions.")
+                    .size(14)
+                    .color(ink.muted),
+            );
+        }
+        for item in &self.versions {
+            list = list.push(self.version_row(item, now));
+        }
+        column![head, vscroll(list).height(Fill).width(Fill)]
+            .spacing(14)
+            .into()
+    }
+
+    /// One version in the list: when and by whom, its first line, and what can be done with it.
+    fn version_row(&self, item: &ambient_cli::NoteVersion, now: u64) -> Element<'_, Message> {
+        let ink = self.ink();
+        let title = if item.title.trim().is_empty() {
+            "Untitled".to_owned()
+        } else {
+            item.title.clone()
+        };
+        let deleted = ambient_cli::note_is_deleted(&item.body);
+        let (prose, _) = ambient_cli::split_note_tags(&item.body);
+        let first = if deleted {
+            "Deleted".to_owned()
+        } else {
+            prose
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("")
+                .chars()
+                .take(120)
+                .collect()
+        };
+        let when = item.unix_ms.map_or_else(String::new, |at| {
+            let found = clock::when(Some(at), &self.zone, now);
+            format!("{} {}", found.day, found.time)
+        });
+        let mut who = when;
+        if !item.writer.is_empty() {
+            if !who.is_empty() {
+                who.push_str(" · ");
+            }
+            who.push_str(&item.writer);
+        }
+        if item.current {
+            who.push_str(" · now");
+        }
+        let mut actions = row![ghost_label(
+            "Read",
+            Message::ViewVersion(item.version.clone())
+        )]
+        .spacing(4)
+        .align_y(iced::Alignment::Center);
+        if !item.current && !deleted {
+            actions = actions.push(action_label(
+                "Restore",
+                Message::RestoreVersion(item.version.clone()),
+            ));
+        }
+        container(
+            row![
+                column![
+                    text(title).font(serif()).size(17),
+                    text(first).size(13).color(ink.muted),
+                    text(who).size(12).color(ink.muted),
+                ]
+                .spacing(2)
+                .width(Fill),
+                actions,
+            ]
+            .spacing(12)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding(12)
+        .width(Fill)
+        .style(card_style)
+        .into()
+    }
+
+    /// The notes that were deleted, each with its last words and a button to bring it back.
+    fn deleted_pane(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let count = self.deleted.len();
+        let summary = format!(
+            "{count} {}",
+            if count == 1 {
+                "deleted note"
+            } else {
+                "deleted notes"
+            }
+        );
+        let head: Element<'_, Message> = if self.compact() {
+            Self::detail_header(
+                "‹ Notes",
+                vec![text(summary).size(13).color(ink.muted).into()],
+            )
+        } else {
+            row![
+                text("Recently deleted").font(serif()).size(26).width(Fill),
+                text(summary).size(13).color(ink.muted),
+                ghost_label("Back to the note", Message::ToggleDeleted),
+            ]
+            .spacing(12)
+            .align_y(iced::Alignment::Center)
+            .into()
+        };
+        let now = clock::now_ms();
+        let mut list = column![].spacing(10).width(Fill);
+        if self.deleted.is_empty() {
+            list = list.push(text("Nothing has been deleted.").size(14).color(ink.muted));
+        }
+        for note in &self.deleted {
+            let title = if note.title.trim().is_empty() {
+                "Untitled".to_owned()
+            } else {
+                note.title.clone()
+            };
+            let (prose, _) = ambient_cli::split_note_tags(&note.body);
+            let first = prose
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("");
+            let preview: String = first.chars().take(120).collect();
+            let when = note.deleted_at.map_or_else(String::new, |at| {
+                let found = clock::when(Some(at), &self.zone, now);
+                format!("Deleted {} {}", found.day, found.time)
+            });
+            list = list.push(
+                container(
+                    row![
+                        column![
+                            text(title).font(serif()).size(17),
+                            text(preview).size(13).color(ink.muted),
+                            text(when).size(12).color(ink.muted),
+                        ]
+                        .spacing(2)
+                        .width(Fill),
+                        action_label("Bring back", Message::RestoreNote(note.id.clone())),
+                    ]
+                    .spacing(12)
+                    .align_y(iced::Alignment::Center),
+                )
+                .padding(12)
+                .width(Fill)
+                .style(card_style),
+            );
+        }
+        column![head, vscroll(list).height(Fill).width(Fill)]
+            .spacing(14)
+            .into()
+    }
+
     /// The Tasks note's words, for showing it over the Tasks tab.
     fn graph_pane(&self) -> Element<'_, Message> {
         let ink = self.ink();
@@ -5690,6 +6045,8 @@ impl App {
 
     fn show_note(&mut self, id: &str) {
         self.remember_place();
+        self.history_open = false;
+        self.deleted_open = false;
         self.graph_open = false;
         self.graph = None;
         self.older = None;
@@ -6236,7 +6593,11 @@ impl App {
         };
         let page = column![
             text("This is an older version.").size(13).color(ink.muted),
-            ghost_label("Current note", Message::CloseVersion),
+            row![
+                ghost_label("Current note", Message::CloseVersion),
+                action_label("Restore this version", Message::RestoreOlder),
+            ]
+            .spacing(8),
             text(title)
                 .font(serif())
                 .size(if self.compact() { 32.0 } else { 36.0 }),
@@ -6747,6 +7108,8 @@ impl App {
             Sheet::None if self.screen == Screen::Chat && !self.detail => self.chat_browser(),
             Sheet::None if self.screen == Screen::Chat => self.chat_pane(),
             Sheet::None if self.graph_open && self.detail => self.graph_pane(),
+            Sheet::None if self.deleted_open && self.detail => self.deleted_pane(),
+            Sheet::None if self.history_open && self.detail => self.history_pane(),
             Sheet::None if !self.detail => self.note_browser(),
             Sheet::None => self.notes_pane(),
         };
@@ -7552,6 +7915,9 @@ impl App {
         if has_words || saved || self.editor_dirty() {
             block = block.push(hairline());
         }
+        if saved {
+            block = block.push(ghost_label("Version history", Message::ToggleHistory));
+        }
         if has_words {
             block = block.push(action_fill("Send to a chat", Message::SendNoteToChat));
         }
@@ -7736,6 +8102,7 @@ impl App {
             .last()
             .map_or_else(String::new, |last| (*last).to_owned());
         self.cached_chapters = chapters;
+        self.deleted_open = false;
         self.graph_open = false;
         self.graph = None;
         self.reading = true;
@@ -15155,6 +15522,109 @@ mod app_tests {
         put(&mut app, 1);
         let _ = app.update(Message::ToggleTaskUnderCaret);
         assert_eq!(app.body.text(), "- [ ] call\n- [ ] plain line\n- [ ] done");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_deleted_note_is_listed_and_brought_back_as_it_read() {
+        let _turn = one_at_a_time();
+        let dir = folder("restore");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let (id, _) = write_snapshot(&dir, None, "Market", "buy oats").expect("note");
+        let _ = write_snapshot(&dir, Some(&id), "Market", "buy oats and milk").expect("edit");
+        let _ = write_snapshot(&dir, Some(&id), "", ambient_cli::DELETED_BODY).expect("delete");
+        app.adopt_open_book(Notebook::open(&dir).expect("open"));
+        let _ = app.update(Message::ToggleDeleted);
+        assert!(app.deleted_open);
+        assert_eq!(app.deleted.len(), 1);
+        assert_eq!(
+            (app.deleted[0].title.as_str(), app.deleted[0].body.as_str()),
+            ("Market", "buy oats and milk"),
+            "as it read just before"
+        );
+        drop(app.view());
+        // The same screens at a narrow width, where it is the thing opened from the list.
+        let _ = app.update(Message::Resized(iced::Size::new(420.0, 760.0)));
+        drop(app.view());
+        let _ = app.update(Message::BackToList);
+        assert!(!app.deleted_open && !app.detail);
+        let _ = app.update(Message::ToggleDeleted);
+        assert!(app.deleted_open && app.detail);
+        let _ = app.update(Message::Resized(iced::Size::new(1100.0, 760.0)));
+        // Bringing it back writes its words again, and it is the open note.
+        let note = app.deleted[0].clone();
+        let result = write_snapshot(&dir, Some(&id), &note.title, &note.body);
+        let _ = app.update(Message::Restored(result));
+        assert_eq!(app.selected.as_deref(), Some(id.as_str()));
+        assert_eq!(app.title_text, "Market");
+        assert_eq!(app.body.text(), "buy oats and milk");
+        assert!(!app.deleted_open && app.deleted.is_empty());
+        assert!(app.catalog.iter().any(|item| item.id == id));
+        // Nothing to bring back, and a note that is not there, change nothing.
+        let _ = app.update(Message::ToggleDeleted);
+        drop(app.view());
+        let _ = app.update(Message::RestoreNote("nope".to_owned()));
+        assert!(!app.saving);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_versions_of_a_note_are_listed_read_and_brought_back() {
+        let _turn = one_at_a_time();
+        let dir = folder("versions");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let (id, _) = write_snapshot(&dir, None, "Plan", "first words").expect("note");
+        let _ = write_snapshot(&dir, Some(&id), "Plan", "second words").expect("edit");
+        let _ = write_snapshot(&dir, Some(&id), "Plan", "third words").expect("edit");
+        app.adopt_open_book(Notebook::open(&dir).expect("open"));
+        let _ = app.update(Message::Select(id.clone()));
+        assert_eq!(app.selected.as_deref(), Some(id.as_str()));
+        // The panel on the right offers it, and the list is the three, newest first.
+        let _ = app.update(Message::ToggleNoteSettings);
+        drop(app.view());
+        let _ = app.update(Message::ToggleHistory);
+        assert!(app.history_open);
+        let bodies: Vec<&str> = app.versions.iter().map(|item| item.body.as_str()).collect();
+        assert_eq!(bodies, ["third words", "second words", "first words"]);
+        drop(app.view());
+        let _ = app.update(Message::Resized(iced::Size::new(420.0, 760.0)));
+        drop(app.view());
+        let _ = app.update(Message::Resized(iced::Size::new(1100.0, 760.0)));
+        // Reading one is the older page, which is not the note and is not saved.
+        let oldest = app.versions[2].version.clone();
+        let _ = app.update(Message::ViewVersion(oldest));
+        assert!(!app.history_open);
+        assert_eq!(
+            app.older.as_ref().map(|older| older.body.as_str()),
+            Some("first words")
+        );
+        assert_eq!(app.body.text(), "third words", "the note is as it was");
+        drop(app.view());
+        // Bringing it back from there writes it again as a new snapshot, and it is the note.
+        let _ = app.update(Message::RestoreOlder);
+        assert!(app.saving, "the write is on its way");
+        app.saving = false;
+        let result = write_snapshot(&dir, Some(&id), "Plan", "first words");
+        let _ = app.update(Message::Restored(result));
+        assert_eq!(app.body.text(), "first words");
+        assert!(app.older.is_none() && !app.history_open);
+        // And nothing was lost: there are four, and the three before are still there.
+        let _ = app.update(Message::ToggleHistory);
+        assert_eq!(app.versions.len(), 4);
+        assert!(app.versions[0].current);
+        // Words that are not saved yet are not written over.
+        let _ = app.update(Message::ToggleHistory);
+        let _ = app.update(Message::BodyEdited(
+            iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert('x')),
+        ));
+        assert!(app.editor_dirty());
+        let _ = app.update(Message::ToggleHistory);
+        let second = app.versions[2].version.clone();
+        let _ = app.update(Message::RestoreVersion(second));
+        assert!(!app.saving, "refused while there is unsaved typing");
+        assert!(app.message.contains("saving"), "{}", app.message);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

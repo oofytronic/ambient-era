@@ -72,7 +72,6 @@ See [platforms.md](platforms.md).
 Small things that would help daily use.
 
 - Open the last note again when the app starts.
-- A list of recently deleted notes, with a way to bring one back. A delete is a snapshot whose body is a marker, so the text is still in the log.
 - Remember the window's size and place.
 - A way to see and remove the words in the personal dictionary. There is only an add.
 - Spelling for other languages, and for words with an accent. A word with a non-ASCII letter is never checked.

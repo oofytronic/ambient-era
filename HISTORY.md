@@ -535,3 +535,7 @@ It needed two crates as test-only dependencies, `iced_runtime` and `iced_tiny_sk
 ## 2026-11-25 — The editing gaps are closed
 
 A bold or italic key inside code does nothing, and the address of a link is left alone. A web address is one word when it is marked. Enter in the middle of an item no longer leaves a space at the start of the next one. An ordered list is counted again when an item is nested, brought out, added, or removed, and a nested list starts at one. Backspace at the start of an item's words takes it out a level, or takes the marker off. Ctrl or Cmd with Enter checks a task. A backtick comes in a pair, and a mark typed on a selection wraps it. The typing path is unchanged for every other character. Nothing was seen in a window.
+
+## 2026-11-25 — Recently deleted, and a note's version history
+
+The trash button at the top of the notes list shows the notes that were deleted, each as it read before, with Bring back. A note's panel has Version history, which lists every snapshot the note has had with Read and Restore. Both restore by writing the old words as a new snapshot after the others. Nothing in the log is changed or removed, and no event or format is new. A restore is refused while the open note has typing that is not saved yet. Neither is a way to erase anything: a deleted note's text stays in the log, as the threat model says.

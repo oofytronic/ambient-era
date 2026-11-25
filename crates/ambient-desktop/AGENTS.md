@@ -25,6 +25,10 @@ cargo run -p ambient-desktop -- path/to/folder
 
 With no path it uses `./notebook`.
 
+## Recently deleted and version history
+
+A delete is a snapshot whose body is only the marker, so what a note said before is still in the log. `Notebook::deleted_held` lists the notes that were deleted, newest first, each as it read just before (the last snapshot reachable from the delete through its parents that has words in it). The trash button at the top of the notes list opens them in place of the note, each with Bring back. `Notebook::versions_held` lists every snapshot a note has had, newest first, with when, who, and whether it is a current head. The note's panel has Version history, which lists them with Read and Restore. Read is the older page, which is not the note and is not saved, and which also has Restore this version. **Restoring is an edit:** it writes the old words as a new snapshot whose parents are the current heads, so nothing in the log changes, and the restore can itself be undone by restoring a later version. A restore is refused while the open note has typing that is not saved yet, so those words are not written over. Both views are the same list-then-detail on a narrow window.
+
 ## Popups, panels, and narrow windows
 
 Nothing that opens may push the page. There are three ways to open something, and a new thing uses one of them.
