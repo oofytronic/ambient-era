@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-25 — a palette, quick capture, templates, and pins, all over what was already there
+
+`Ctrl+P` opens a palette: jump to a note, switch tab, run an action. `Ctrl+J` opens a small box that writes a note or a task without leaving the page. A new note can start from a template. A template is a note tagged `Templates`, and the daily note is the first row of the picker and is never made unless chosen. A note can be pinned to the top of the list. The pin is a local file, like the order of a group. No record, no room, no wire change. These keys work inside the window only. A system-wide hotkey is not claimed.
+
 ## 2026-11-23 — the light follows the line, and the chat log stays still
 
 The spotlight was the open word's paragraph, so it stayed on the first block. It is now the line the caret is on. A wrapped line stays together. The next line does not.

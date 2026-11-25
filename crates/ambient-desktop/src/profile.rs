@@ -233,6 +233,29 @@ pub(super) fn store_folds(
     fs::write(dir.join("folds"), text).map_err(|_| "could not write the folds".to_owned())
 }
 
+/// The notes held at the top of the list, in the order they were pinned. Not sealed. Not sent:
+/// a pin is a bookmark on this computer, not a fact about the note.
+pub(super) fn load_pinned(dir: &Path) -> Vec<String> {
+    let Ok(text) = fs::read_to_string(dir.join("pinned")) else {
+        return Vec::new();
+    };
+    text.lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+pub(super) fn store_pinned(dir: &Path, pinned: &[String]) -> Result<(), String> {
+    let mut text = String::from("v1\n");
+    for id in pinned {
+        text.push_str(&one_line(id));
+        text.push('\n');
+    }
+    fs::write(dir.join("pinned"), text).map_err(|_| "could not write the pins".to_owned())
+}
+
 /// The note that was open, and the line the caret was on. Not sealed. Not sent.
 pub(super) fn load_place(dir: &Path) -> Option<(String, usize)> {
     let text = fs::read_to_string(dir.join("place")).ok()?;

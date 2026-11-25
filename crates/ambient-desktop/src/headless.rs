@@ -196,6 +196,18 @@ fn every_screen_lays_out_and_draws_at_every_width() {
             let _ = app.update(show);
             screen.draw(&app, size);
         }
+        // The cards that take the keyboard, over whichever page is behind them.
+        for open in [
+            Message::PaletteOpen,
+            Message::CaptureOpen,
+            Message::TemplatesOpen,
+        ] {
+            let _ = app.update(Message::ShowNotes);
+            let _ = app.update(open);
+            assert!(app.overlay_open());
+            screen.draw(&app, size);
+            let _ = app.update(Message::CloseOverlays);
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

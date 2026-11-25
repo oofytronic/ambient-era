@@ -268,6 +268,17 @@ struct App {
     note_panel: bool,
     /// Groups the owner has folded in the list. Kept in `folds` on this computer.
     folded: BTreeSet<String>,
+    /// Notes held at the top of the list. A local bookmark, never sent.
+    pinned: Vec<String>,
+    /// The command palette: what has been typed, while it is open. It is a way to reach what is
+    /// already in the window and writes nothing of its own.
+    palette: Option<String>,
+    palette_pick: usize,
+    /// The quick capture box: what has been typed, while it is open, and whether it is a task.
+    capture: Option<String>,
+    capture_task: bool,
+    /// The list of templates a new note can start from.
+    templates_open: bool,
     /// The paragraph under the caret is the only one at full strength. Focus mode only.
     spotlight: bool,
     /// Insert stays behind one button until it is opened.
@@ -581,6 +592,20 @@ enum Message {
     ToggleGraph,
     /// Show the notes that were deleted, with a way to bring each back, or go back.
     ToggleDeleted,
+    TogglePin(String),
+    PaletteOpen,
+    PaletteQuery(String),
+    PaletteMove(i32),
+    PaletteEnter,
+    PaletteRun(usize),
+    CaptureOpen,
+    CaptureText(String),
+    CaptureMode(bool),
+    CaptureSave,
+    TemplatesOpen,
+    FromTemplate(Option<String>),
+    /// Escape, or a press beside a card: close the palette, the capture box, or the templates.
+    CloseOverlays,
     /// Bring a deleted note back, as it read before.
     RestoreNote(String),
     /// Show the versions the open note has had, or go back to it.
@@ -1186,6 +1211,12 @@ impl App {
             orders: BTreeMap::new(),
             list_drag: None,
             folded: BTreeSet::new(),
+            pinned: Vec::new(),
+            palette: None,
+            palette_pick: 0,
+            capture: None,
+            capture_task: false,
+            templates_open: false,
             spotlight: false,
             insert_open: false,
             done_on: BTreeMap::new(),
@@ -1259,6 +1290,7 @@ impl App {
             }
         }
         app.folded = profile::load_folds(&app.dir);
+        app.pinned = profile::load_pinned(&app.dir);
         app.done_on = profile::load_done_on(&app.dir);
         app.drafts = profile::load_drafts(&app.dir);
         app.orders = profile::load_order(&app.dir);
@@ -1297,6 +1329,9 @@ impl App {
                     _ => None,
                 },
             ));
+        }
+        if app.overlay_open() {
+            parts.push(iced::event::listen_with(overlay_key));
         }
         if app.breeze_on() {
             parts.push(
@@ -2139,6 +2174,71 @@ impl App {
                 self.send_selection();
                 Task::none()
             }
+            Message::TogglePin(id) => {
+                if let Some(at) = self.pinned.iter().position(|held| *held == id) {
+                    self.pinned.remove(at);
+                } else {
+                    self.pinned.push(id);
+                }
+                if let Err(err) = profile::store_pinned(&self.dir, &self.pinned) {
+                    self.say(&err);
+                }
+                Task::none()
+            }
+            Message::PaletteOpen => {
+                self.capture = None;
+                self.templates_open = false;
+                self.palette = Some(String::new());
+                self.palette_pick = 0;
+                focus_named("palette-input")
+            }
+            Message::PaletteQuery(query) => {
+                self.palette = Some(query);
+                self.palette_pick = 0;
+                Task::none()
+            }
+            Message::PaletteMove(step) => {
+                let last = self.palette_rows().len().saturating_sub(1);
+                let next = i64::try_from(self.palette_pick)
+                    .unwrap_or(0)
+                    .saturating_add(i64::from(step))
+                    .clamp(0, i64::try_from(last).unwrap_or(0));
+                self.palette_pick = usize::try_from(next).unwrap_or(0);
+                Task::none()
+            }
+            Message::PaletteEnter => self.palette_run(self.palette_pick),
+            Message::PaletteRun(at) => self.palette_run(at),
+            Message::CaptureOpen => {
+                self.palette = None;
+                self.templates_open = false;
+                self.capture = Some(String::new());
+                focus_named("capture-input")
+            }
+            Message::CaptureText(text) => {
+                self.capture = Some(text);
+                Task::none()
+            }
+            Message::CaptureMode(task) => {
+                self.capture_task = task;
+                focus_named("capture-input")
+            }
+            Message::CaptureSave => self.capture_save(),
+            Message::TemplatesOpen => {
+                self.palette = None;
+                self.capture = None;
+                self.templates_open = true;
+                Task::none()
+            }
+            Message::FromTemplate(from) => {
+                self.templates_open = false;
+                self.note_from_template(from.as_deref())
+            }
+            Message::CloseOverlays => {
+                self.palette = None;
+                self.capture = None;
+                self.templates_open = false;
+                Task::none()
+            }
             Message::ToggleDeleted => {
                 self.deleted_open = !self.deleted_open;
                 self.graph_open = false;
@@ -2634,6 +2734,15 @@ impl App {
     fn modal(&self) -> Option<(Element<'_, Message>, Message)> {
         if !self.has_screen() {
             return None;
+        }
+        if self.palette.is_some() {
+            return Some((self.palette_card(), Message::CloseOverlays));
+        }
+        if self.capture.is_some() {
+            return Some((self.capture_card(), Message::CloseOverlays));
+        }
+        if self.templates_open {
+            return Some((self.templates_card(), Message::CloseOverlays));
         }
         if self.confirm_delete {
             return Some((self.delete_confirm(), Message::CancelDelete));
@@ -3296,6 +3405,18 @@ impl App {
         }
         if self.query.trim().is_empty() && self.tag.is_none() && self.date_filter == DateFilter::Any
         {
+            let pinned: Vec<&NoteSummary> = self
+                .pinned
+                .iter()
+                .filter_map(|id| self.notes.iter().find(|note| note.id == *id))
+                .collect();
+            if !pinned.is_empty() {
+                list = list.push(text("Pinned").size(12).color(ink.muted));
+                for note in pinned {
+                    list = list.push(self.note_row(note, 0, None));
+                }
+                list = list.push(text("All notes").size(12).color(ink.muted));
+            }
             if !self.catalog.iter().any(|note| !note.tags.is_empty()) && !self.catalog.is_empty() {
                 list = list.push(
                     text("Tags make groups. Novel/Part 1 is a group inside Novel.")
@@ -3375,6 +3496,33 @@ impl App {
         list
     }
 
+    /// What shows on a note's row under the pointer: move, pin, delete.
+    fn row_tools(&self, note: &NoteSummary, movable: Option<&str>) -> Element<'static, Message> {
+        let mut tools = row![].spacing(0).align_y(iced::Alignment::Center);
+        if let Some(key) = movable {
+            tools = tools.push(grip(mini_handle(Mini::Grip, self.is_dark()), key, &note.id));
+        }
+        let held = self.pinned.contains(&note.id);
+        tools = tools.push(hover_label(
+            button(text(if held { "Unpin" } else { "Pin" }).size(12))
+                .padding([4.0, 6.0])
+                .on_press(Message::TogglePin(note.id.clone()))
+                .style(ghost_style),
+            if held {
+                "Take it off the top of the list"
+            } else {
+                "Keep it at the top of the list"
+            },
+        ));
+        tools
+            .push(mini_button(
+                mini_handle(Mini::Trash, self.is_dark()),
+                "Delete this note",
+                Message::AskDeleteNote(note.id.clone()),
+            ))
+            .into()
+    }
+
     /// One note in the list, `depth` groups in. `group` is the key of the group it is listed in,
     /// when it can be moved there.
     fn note_row(
@@ -3446,15 +3594,7 @@ impl App {
         let movable = group.filter(|key| !key.is_empty() && has_exact_tag(&note.tags, key));
         let mut layers = stack![face];
         if over && self.list_drag.is_none() {
-            let mut tools = row![].spacing(0).align_y(iced::Alignment::Center);
-            if let Some(key) = movable {
-                tools = tools.push(grip(mini_handle(Mini::Grip, self.is_dark()), key, &note.id));
-            }
-            tools = tools.push(mini_button(
-                mini_handle(Mini::Trash, self.is_dark()),
-                "Delete this note",
-                Message::AskDeleteNote(note.id.clone()),
-            ));
+            let tools = self.row_tools(note, movable);
             layers = layers.push(
                 container(tools)
                     .width(Fill)
@@ -4708,7 +4848,7 @@ impl App {
     }
 
     fn pick_task(&mut self, down: bool) {
-        if self.screen != Screen::Tasks || self.sheet != Sheet::None {
+        if self.screen != Screen::Tasks || self.sheet != Sheet::None || self.overlay_open() {
             return;
         }
         let rows = self.visible_tasks();
@@ -4728,8 +4868,344 @@ impl App {
         self.task_pick = rows.get(next).cloned();
     }
 
+    /// A card that takes the keyboard is up: the palette, the quick capture box, or the templates.
+    fn overlay_open(&self) -> bool {
+        self.palette.is_some() || self.capture.is_some() || self.templates_open
+    }
+
+    /// What the palette offers for what is typed: the things it can do, then the notes whose
+    /// titles hold every word. Nothing here is a second copy of anything. Each row is a message
+    /// the window already understands.
+    fn palette_rows(&self) -> Vec<PaletteRow> {
+        let query = self.palette.as_deref().unwrap_or("");
+        let mut actions: Vec<(&str, &str, Message)> = vec![
+            ("New note", "Ctrl+N", Message::NewNote),
+            (
+                "New note from a template",
+                "Daily note first",
+                Message::TemplatesOpen,
+            ),
+            ("Quick capture", "Ctrl+J", Message::CaptureOpen),
+            ("Go to Notes", "Tab", Message::ShowNotes),
+            ("Go to Tasks", "Tab", Message::ShowTasks),
+            ("Go to Chat", "Tab", Message::ShowChat),
+            ("Settings", "", Message::ShowSettings),
+            ("Recently deleted", "Notes", Message::ToggleDeleted),
+            ("Graph", "Notes", Message::ToggleGraph),
+            ("Find in this note", "Ctrl+F", Message::FindOpen),
+            ("Find and replace", "Ctrl+H", Message::ReplaceToggle),
+            ("Focus mode", "Ctrl+.", Message::ToggleFocus),
+            ("Switch light and dark", "", Message::ToggleTheme),
+        ];
+        if let Some(id) = &self.selected {
+            let held = self.pinned.contains(id);
+            actions.push((
+                if held {
+                    "Unpin this note"
+                } else {
+                    "Pin this note"
+                },
+                "Top of the list",
+                Message::TogglePin(id.clone()),
+            ));
+            actions.push((
+                "Version history of this note",
+                "Notes",
+                Message::ToggleHistory,
+            ));
+        }
+        let mut rows: Vec<PaletteRow> = actions
+            .into_iter()
+            .filter(|(label, _, _)| palette_matches(query, label))
+            .map(|(label, hint, run)| PaletteRow {
+                label: label.to_owned(),
+                hint: hint.to_owned(),
+                run,
+            })
+            .collect();
+        let room = if query.trim().is_empty() { 5 } else { 8 };
+        rows.extend(
+            self.catalog
+                .iter()
+                .filter(|note| note.title != "Tasks" && palette_matches(query, &note.title))
+                .take(room)
+                .map(|note| PaletteRow {
+                    label: if note.title.is_empty() {
+                        "Untitled note".to_owned()
+                    } else {
+                        note.title.clone()
+                    },
+                    hint: "Open".to_owned(),
+                    run: Message::Select(note.id.clone()),
+                }),
+        );
+        rows.truncate(14);
+        rows
+    }
+
+    fn palette_run(&mut self, at: usize) -> Task<Message> {
+        let Some(row) = self.palette_rows().into_iter().nth(at) else {
+            return Task::none();
+        };
+        self.palette = None;
+        let from_notes = matches!(
+            row.run,
+            Message::NewNote
+                | Message::ToggleDeleted
+                | Message::ToggleGraph
+                | Message::ToggleHistory
+                | Message::FindOpen
+                | Message::ReplaceToggle
+                | Message::Select(_)
+        );
+        let first = if from_notes && self.screen != Screen::Notes {
+            self.update(Message::ShowNotes)
+        } else {
+            Task::none()
+        };
+        let then = self.update(row.run);
+        Task::batch([first, then])
+    }
+
+    fn palette_card(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let query = self.palette.as_deref().unwrap_or("");
+        let rows = self.palette_rows();
+        let mut list = column![].spacing(2).width(Fill);
+        for (at, row) in rows.iter().enumerate() {
+            list = list.push(
+                button(
+                    iced::widget::row![
+                        text(row.label.clone()).size(14).width(Fill),
+                        text(row.hint.clone()).size(12).color(ink.muted),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center),
+                )
+                .width(Fill)
+                .padding([6.0, 10.0])
+                .on_press(Message::PaletteRun(at))
+                .style(list_row(at == self.palette_pick)),
+            );
+        }
+        if rows.is_empty() {
+            list = list.push(text("Nothing matches.").size(13).color(ink.muted));
+        }
+        container(
+            column![
+                text_input("Jump to a note, or do something", query)
+                    .id(iced::widget::Id::new("palette-input"))
+                    .on_input(Message::PaletteQuery)
+                    .on_submit(Message::PaletteEnter)
+                    .padding(10)
+                    .width(Fill)
+                    .style(field_style),
+                container(vscroll(list)).max_height(340),
+            ]
+            .spacing(10),
+        )
+        .width(Fill)
+        .max_width(480)
+        .padding(14)
+        .style(card_style)
+        .into()
+    }
+
+    /// Write what was typed in the capture box, as a task in the Tasks note or as a note of its
+    /// own, without touching what is open in the editor.
+    fn capture_save(&mut self) -> Task<Message> {
+        let text = self.capture.clone().unwrap_or_default();
+        let text = text.trim().to_owned();
+        if text.is_empty() {
+            self.say("Write something first.");
+            return Task::none();
+        }
+        if self.capture_task {
+            let held_draft = std::mem::replace(&mut self.task_draft, text.clone());
+            let held_due = std::mem::take(&mut self.new_due);
+            let held_cite = self.task_cite.take();
+            let follow = self.add_loose_task();
+            let failed = !self.task_draft.is_empty();
+            self.task_draft = held_draft;
+            self.new_due = held_due;
+            self.task_cite = held_cite;
+            if failed {
+                return follow;
+            }
+            self.capture = None;
+            if self.screen == Screen::Tasks {
+                self.rebuild_tasks();
+            }
+            return follow;
+        }
+        self.capture = None;
+        let title = clip_chars(text.lines().next().unwrap_or("").trim().to_owned(), 80);
+        let rest: Vec<&str> = text.lines().skip(1).collect();
+        let body = rest.join("\n").trim().to_owned();
+        self.say("Saved as a note.");
+        self.apply_note(None, title, body)
+    }
+
+    fn capture_card(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let text_now = self.capture.as_deref().unwrap_or("");
+        container(
+            column![
+                text("Quick capture").font(serif()).size(18),
+                text(if self.capture_task {
+                    "One line, added to your Tasks."
+                } else {
+                    "The first line is the title. Saved as a new note."
+                })
+                .size(12)
+                .color(ink.muted),
+                text_input(
+                    if self.capture_task {
+                        "A task"
+                    } else {
+                        "A thought"
+                    },
+                    text_now,
+                )
+                .id(iced::widget::Id::new("capture-input"))
+                .on_input(Message::CaptureText)
+                .on_submit(Message::CaptureSave)
+                .padding(10)
+                .width(Fill)
+                .style(field_style),
+                row![
+                    segment("Note", !self.capture_task, Message::CaptureMode(false)),
+                    segment("Task", self.capture_task, Message::CaptureMode(true)),
+                ]
+                .spacing(6),
+                row![
+                    ghost_label("Cancel", Message::CloseOverlays),
+                    space().width(Fill),
+                    action_label("Save", Message::CaptureSave),
+                ]
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(10),
+        )
+        .width(Fill)
+        .max_width(420)
+        .padding(18)
+        .style(card_style)
+        .into()
+    }
+
+    /// The notes tagged `Templates`, in title order. A template is a note like any other: this is
+    /// a view of the notes, and not a second kind of thing.
+    fn template_notes(&self) -> Vec<&NoteSummary> {
+        let key = group_key(&tag_path(TEMPLATES));
+        let mut found: Vec<&NoteSummary> = self
+            .catalog
+            .iter()
+            .filter(|note| !note.conflict && has_exact_tag(&note.tags, &key))
+            .collect();
+        found.sort_by(|a, b| natural_cmp(&a.title, &b.title));
+        found
+    }
+
+    fn templates_card(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let pick = |label: String, hint: &'static str, from: Option<String>| {
+            button(
+                row![
+                    text(label).size(14).width(Fill),
+                    text(hint).size(12).color(ink.muted),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Fill)
+            .padding([8.0, 10.0])
+            .on_press(Message::FromTemplate(from))
+            .style(list_row(false))
+        };
+        let mut list = column![pick("Daily note".to_owned(), "Today, by date", None)]
+            .spacing(2)
+            .width(Fill);
+        let own = self.template_notes();
+        for note in &own {
+            list = list.push(pick(
+                if note.title.is_empty() {
+                    "Untitled template".to_owned()
+                } else {
+                    note.title.clone()
+                },
+                "Template",
+                Some(note.id.clone()),
+            ));
+        }
+        if own.is_empty() {
+            list = list.push(
+                text("Tag any note Templates and it is offered here.")
+                    .size(12)
+                    .color(ink.muted),
+            );
+        }
+        container(
+            column![
+                text("New note from").font(serif()).size(18),
+                vscroll(list).height(Fill),
+                row![ghost_label("Cancel", Message::CloseOverlays)],
+            ]
+            .spacing(10),
+        )
+        .width(Fill)
+        .max_width(400)
+        .max_height(380)
+        .padding(18)
+        .style(card_style)
+        .into()
+    }
+
+    /// Start a note from the daily page, or from a note tagged `Templates`. Nothing is made until
+    /// this is chosen. The daily note of a day that already has one is opened, not made twice.
+    fn note_from_template(&mut self, from: Option<&str>) -> Task<Message> {
+        let today = self.clock.today;
+        let (title, sealed) = match from {
+            None => {
+                let title = daily_title(today);
+                if let Some(held) = self
+                    .catalog
+                    .iter()
+                    .find(|note| note.title == title && !note.conflict)
+                    .map(|note| note.id.clone())
+                {
+                    self.screen = Screen::Notes;
+                    self.show_note(&held);
+                    return Task::none();
+                }
+                (title, "## Plan\n\n## Notes\n".to_owned())
+            }
+            Some(id) => {
+                let Some((body, _conflict, title)) = self.task_source(id) else {
+                    self.say("That template is not here.");
+                    return Task::none();
+                };
+                let (prose, mut tags) = ambient_cli::split_note_tags(&body);
+                let key = group_key(&tag_path(TEMPLATES));
+                tags.retain(|tag| group_key(&tag_path(tag)) != key);
+                let prose = prose.replace("{{date}}", &daily_title(today));
+                (title, ambient_cli::join_note_tags(&prose, &tags))
+            }
+        };
+        self.screen = Screen::Notes;
+        self.clear_editor();
+        self.title_text = title;
+        self.load_sealed(&sealed);
+        let follow = self.start_save(true);
+        Task::batch([follow, focus_named("note-body")])
+    }
+
     fn toggle_picked(&mut self) -> Task<Message> {
-        if self.screen != Screen::Tasks || self.sheet != Sheet::None || self.task_rename.is_some() {
+        if self.screen != Screen::Tasks
+            || self.sheet != Sheet::None
+            || self.task_rename.is_some()
+            || self.overlay_open()
+        {
             return Task::none();
         }
         let Some((id, line)) = self.task_pick.clone() else {
@@ -4744,7 +5220,7 @@ impl App {
     }
 
     fn nudge_task(&mut self, up: bool) -> Task<Message> {
-        if self.screen != Screen::Tasks || self.sheet != Sheet::None {
+        if self.screen != Screen::Tasks || self.sheet != Sheet::None || self.overlay_open() {
             return Task::none();
         }
         if self.task_pick.is_none() {
@@ -8468,6 +8944,7 @@ impl App {
     /// those never get here.
     fn type_ignored(&mut self, typed: &Typed) -> Task<Message> {
         let writing = self.notebook.is_some()
+            && !self.overlay_open()
             && self.welcome.is_none()
             && !self.breeze_on()
             && self.editing_note()
@@ -9628,6 +10105,7 @@ impl App {
         self.my_words.clear();
         self.orders.clear();
         self.folded.clear();
+        self.pinned.clear();
         self.drafts.clear();
         self.done_on.clear();
         self.spotlight = false;
@@ -12062,6 +12540,14 @@ fn window_event(
         iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
             if status == iced::event::Status::Ignored
                 && (modifiers.control() || modifiers.command())
+                && !modifiers.shift()
+                && overlay_hotkey(&key).is_some() =>
+        {
+            overlay_hotkey(&key)
+        }
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modifiers, .. })
+            if status == iced::event::Status::Ignored
+                && (modifiers.control() || modifiers.command())
                 && matches!(key.as_ref(), Key::Character(text) if text.eq_ignore_ascii_case("f")) =>
         {
             Some(Message::FindOpen)
@@ -12081,6 +12567,60 @@ fn window_event(
         }) if status == iced::event::Status::Ignored => {
             ignored_key(&key, text.as_deref(), modifiers).map(Message::TypedIgnored)
         }
+        _ => None,
+    }
+}
+
+/// The keys that open the palette (`P`, and `K` where the editor is not using it for a link) and
+/// the quick capture box (`J`), from anywhere in the window.
+/// The tag that makes a note a template.
+const TEMPLATES: &str = "Templates";
+
+/// One line of the command palette.
+struct PaletteRow {
+    label: String,
+    hint: String,
+    run: Message,
+}
+
+/// Every word typed is somewhere in the label, capitals ignored. Nothing typed matches all.
+fn palette_matches(query: &str, label: &str) -> bool {
+    let label = label.to_lowercase();
+    query
+        .split_whitespace()
+        .all(|word| label.contains(&word.to_lowercase()))
+}
+
+/// `2026-11-25 Wednesday`: the title of a day's note. It sorts by date and names the day.
+fn daily_title(day: dates::Date) -> String {
+    format!("{day} {}", day.weekday_full())
+}
+
+fn overlay_hotkey(key: &Key) -> Option<Message> {
+    match key.as_ref() {
+        Key::Character(text)
+            if text.eq_ignore_ascii_case("p") || text.eq_ignore_ascii_case("k") =>
+        {
+            Some(Message::PaletteOpen)
+        }
+        Key::Character(text) if text.eq_ignore_ascii_case("j") => Some(Message::CaptureOpen),
+        _ => None,
+    }
+}
+
+/// While a card is up: Escape closes it, and the arrows move through the palette.
+fn overlay_key(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _id: iced::window::Id,
+) -> Option<Message> {
+    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
+        return None;
+    };
+    match key.as_ref() {
+        Key::Named(iced::keyboard::key::Named::Escape) => Some(Message::CloseOverlays),
+        Key::Named(iced::keyboard::key::Named::ArrowDown) => Some(Message::PaletteMove(1)),
+        Key::Named(iced::keyboard::key::Named::ArrowUp) => Some(Message::PaletteMove(-1)),
         _ => None,
     }
 }
@@ -13401,6 +13941,8 @@ fn binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>
         (Some("h" | "H"), true, false) => {
             Some(text_editor::Binding::Custom(Message::ReplaceToggle))
         }
+        (Some("p" | "P"), true, false) => Some(text_editor::Binding::Custom(Message::PaletteOpen)),
+        (Some("j" | "J"), true, false) => Some(text_editor::Binding::Custom(Message::CaptureOpen)),
         (Some("s"), true, _) => Some(text_editor::Binding::Custom(Message::Save)),
         (Some("n"), true, _) => Some(text_editor::Binding::Custom(Message::NewNote)),
         (Some("c"), true, _) => Some(text_editor::Binding::Custom(Message::CopyNote)),
@@ -15704,6 +16246,162 @@ mod app_tests {
         put(&mut app, 1);
         let _ = app.update(Message::ToggleTaskUnderCaret);
         assert_eq!(app.body.text(), "- [ ] call\n- [ ] plain line\n- [ ] done");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_palette_finds_notes_and_actions_and_runs_the_picked_row() {
+        let _turn = one_at_a_time();
+        let dir = folder("palette");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let (id, _) = write_snapshot(&dir, None, "Market list", "oats").expect("note");
+        let _ = write_snapshot(&dir, None, "Garden", "beans").expect("note");
+        app.adopt_open_book(Notebook::open(&dir).expect("open"));
+        let _ = app.update(Message::PaletteOpen);
+        assert!(app.overlay_open());
+        drop(app.view());
+        // Every word has to be in the title, in any case.
+        let _ = app.update(Message::PaletteQuery("LIST mar".to_owned()));
+        let rows = app.palette_rows();
+        assert_eq!(
+            rows.len(),
+            1,
+            "{:?}",
+            rows.iter().map(|r| &r.label).collect::<Vec<_>>()
+        );
+        assert_eq!(rows[0].label, "Market list");
+        // An action is found by its words too, and the notes come after the actions.
+        let _ = app.update(Message::PaletteQuery("tasks".to_owned()));
+        assert_eq!(app.palette_rows()[0].label, "Go to Tasks");
+        // Enter runs the picked row and closes the palette.
+        let _ = app.update(Message::ShowTasks);
+        let _ = app.update(Message::PaletteQuery("market".to_owned()));
+        let _ = app.update(Message::PaletteEnter);
+        assert!(app.palette.is_none());
+        assert_eq!(app.screen, super::Screen::Notes);
+        assert_eq!(app.selected.as_deref(), Some(id.as_str()));
+        // The arrows stay inside the rows.
+        let _ = app.update(Message::PaletteOpen);
+        let _ = app.update(Message::PaletteMove(-5));
+        assert_eq!(app.palette_pick, 0);
+        let _ = app.update(Message::PaletteMove(500));
+        assert_eq!(app.palette_pick, app.palette_rows().len() - 1);
+        let _ = app.update(Message::CloseOverlays);
+        assert!(!app.overlay_open());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quick_capture_makes_a_note_or_a_task_without_touching_the_open_note() {
+        let _turn = one_at_a_time();
+        let dir = folder("capture");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::TitleChanged("Open one".to_owned()));
+        let _ = tests_support::take_writes();
+        let _ = app.update(Message::CaptureOpen);
+        // Nothing typed: it stays open and writes nothing.
+        let _ = app.update(Message::CaptureSave);
+        assert!(app.capture.is_some());
+        assert!(tests_support::take_writes().is_empty());
+        let _ = app.update(Message::CaptureText(
+            "Call the vet\nabout the cat".to_owned(),
+        ));
+        let _ = app.update(Message::CaptureSave);
+        assert!(app.capture.is_none());
+        let writes = tests_support::take_writes();
+        assert_eq!(
+            writes,
+            vec![(None, "Call the vet".to_owned(), "about the cat".to_owned())]
+        );
+        assert_eq!(app.title_text, "Open one", "the open note was not touched");
+        // As a task it goes to the Tasks note, and a half-typed task in the Tasks field is kept.
+        app.task_draft = "half typed".to_owned();
+        let _ = app.update(Message::CaptureOpen);
+        let _ = app.update(Message::CaptureMode(true));
+        let _ = app.update(Message::CaptureText("Buy stamps".to_owned()));
+        let _ = app.update(Message::CaptureSave);
+        assert!(app.capture.is_none());
+        assert_eq!(app.task_draft, "half typed");
+        let writes = tests_support::take_writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].1, "Tasks");
+        assert!(writes[0].2.contains("- [ ] Buy stamps"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_daily_note_is_the_first_template_and_is_never_made_until_chosen() {
+        let _turn = one_at_a_time();
+        let dir = folder("daily");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = tests_support::take_writes();
+        assert!(
+            app.catalog
+                .iter()
+                .all(|note| note.title != super::daily_title(app.clock.today))
+        );
+        let _ = app.update(Message::TemplatesOpen);
+        assert!(app.templates_open);
+        drop(app.view());
+        let _ = app.update(Message::FromTemplate(None));
+        assert!(!app.templates_open);
+        let title = super::daily_title(app.clock.today);
+        assert_eq!(app.title_text, title);
+        assert!(app.body.text().contains("## Plan"));
+        assert!(app.saving, "it is being written");
+        // Choosing it again on the same day opens the one that is there.
+        let (made, _) = write_snapshot(&dir, None, &title, "kept").expect("note");
+        let _ = app.update(Message::NewNote);
+        app.adopt_open_book(Notebook::open(&dir).expect("open"));
+        let _ = tests_support::take_writes();
+        let _ = app.update(Message::FromTemplate(None));
+        assert_eq!(app.selected.as_deref(), Some(made.as_str()));
+        assert!(tests_support::take_writes().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_tagged_templates_starts_a_new_note_without_the_tag() {
+        let _turn = one_at_a_time();
+        let dir = folder("template");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let sealed = ambient_cli::join_note_tags(
+            "Met on {{date}}\n\n- agenda",
+            &["Templates".to_owned(), "Work".to_owned()],
+        );
+        let (id, _) = write_snapshot(&dir, None, "Meeting", &sealed).expect("note");
+        app.adopt_open_book(Notebook::open(&dir).expect("open"));
+        assert_eq!(app.template_notes().len(), 1);
+        let _ = tests_support::take_writes();
+        let _ = app.update(Message::FromTemplate(Some(id)));
+        assert_eq!(app.title_text, "Meeting");
+        assert!(app.body.text().contains(&app.clock.today.to_string()));
+        assert_eq!(app.tags, vec!["Work".to_owned()]);
+        assert!(app.saving, "it is being written");
+        assert!(!app.stored_body().contains("Templates"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pinned_note_is_listed_first_and_the_pin_is_kept_on_this_computer() {
+        let _turn = one_at_a_time();
+        let dir = folder("pins");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let (id, _) = write_snapshot(&dir, None, "Zebra", "z").expect("note");
+        let _ = write_snapshot(&dir, None, "Apple", "a").expect("note");
+        app.adopt_open_book(Notebook::open(&dir).expect("open"));
+        let _ = app.update(Message::TogglePin(id.clone()));
+        assert_eq!(app.pinned, vec![id.clone()]);
+        drop(app.view());
+        assert_eq!(super::profile::load_pinned(&dir), vec![id.clone()]);
+        let _ = app.update(Message::TogglePin(id.clone()));
+        assert!(app.pinned.is_empty());
+        assert!(super::profile::load_pinned(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

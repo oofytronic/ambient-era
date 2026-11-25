@@ -74,6 +74,13 @@ See [platforms.md](platforms.md).
 - **A device with a wrong clock writes a wrong time into its notes.** The window shows it as written.
 - **Search is still the sealed full-text index plus titles.** It does not search a note's version history, and there is no filter by writer.
 
+## Palette, capture, templates, and pins
+
+- **The palette and quick capture keys work only while the window has focus.** A system-wide hotkey needs a platform service the project does not have yet.
+- **A template fills nothing but `{{date}}`.** There is no time, no ask-for-a-title, no cursor placeholder.
+- **A pin is on this computer only.** A second computer has its own pins. If pins should follow the notebook, that is saved data and needs a decision.
+- **Tasks are meant to grow a lot** (habits, advanced task management). That is a wish, not a plan. Nothing is started.
+
 ## Offered, not built
 
 Small things that would help daily use.
