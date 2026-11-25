@@ -68,7 +68,7 @@ Do not add an object graph of typed things with relations. That is a second mode
 | Later | What it is | Why it waits |
 |:--|:--|:--|
 | Small private groups | The same Space and the same HPKE fanout | The cap and the UI wait until 1:1 is in use |
-| Long-form creations | A Space per book or newsletter, with versions and links | Spec 05 is not written |
+| Long-form creations | A Space per book or newsletter, with versions and links | Spec 05 is drafted, not normative |
 | Weave | A citation from a chat to a creation, already just a copied message in v0.1 | The sidebar is a projection, not a new protocol |
 | Public identity and feed | Signed, unsealed logs. A second persona. | Must not be built by relaxing the private-Space rules |
 | Phone clients | SwiftUI and Compose over the same core. Content-free push. | Desktop first |

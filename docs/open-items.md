@@ -102,7 +102,7 @@ Measured on 2026-11-19 and 2026-11-20. See the numbers in the session record.
 
 - **A removal and a note from the removed member** still depend on event-id order when neither refers to the other. A device revocation has `up_to` for this. A member removal has no such marker. See [ADR-0006](adr/0006-wait-for-enrollment.md).
 - **There is no vector format for a projection.** The merge rule has tests and no conformance vector, so a second implementation could not check itself against it.
-- **Spec 05** (long-form creations) is intentionally unwritten.
+- **Spec 05** (long-form creations) is drafted in [spec/05-creations.md](spec/05-creations.md). It is not normative until the owner confirms it. No vector and no client code.
 - The relay is cleartext on `127.0.0.1`. TLS to a relay is built. The introduction list is empty, and the replacement test, step 7 of [the network track](network/README.md), has not been run. No public relay exists. That test waits at the end of v0.2, with the second computer. A mailbox put limit of 10000 a minute is in the relay, in memory.
 
 ## Not verified
