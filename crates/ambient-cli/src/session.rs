@@ -49,6 +49,8 @@ pub struct NoteSummary {
     pub tags: Vec<String>,
     /// Event id of the first head. This is the current version, not a grant.
     pub version: String,
+    /// When the newest snapshot was written, in advisory unix milliseconds, if its event says.
+    pub modified: Option<u64>,
 }
 
 /// One surviving snapshot.
@@ -157,6 +159,10 @@ struct Projected {
     /// `note.put` event id to its index in the loaded wires.
     /// Built during the verify that loads the log, so opening a version does not scan.
     snaps: HashMap<[u8; 32], usize>,
+    /// The newest advisory time of a snapshot of each note. Built as the log is loaded and kept
+    /// up to date a write at a time, so a list does not parse every snapshot to show when a
+    /// note was last changed.
+    modified: HashMap<[u8; 32], u64>,
 }
 
 /// How many times a write that found its file changed runs again, for a save, a sync, and the
@@ -300,7 +306,7 @@ impl Notebook {
             .notes
             .iter()
             .filter(|(_, heads)| !heads_are_deleted(heads))
-            .map(|(id, heads)| summary(id, heads, &item.projected.names))
+            .map(|(id, heads)| summary(id, heads, &item.projected.names, &item.projected.modified))
             .collect())
     }
 
@@ -515,7 +521,7 @@ impl Notebook {
                 Err(_) => Ok(self.search_cloned(query)),
             };
         }
-        let (view, names) = {
+        let (view, names, modified) = {
             let guard = self.cache.borrow();
             let Some(item) = guard.as_ref() else {
                 return Ok(Vec::new());
@@ -523,7 +529,11 @@ impl Notebook {
             let Some(view) = item.projected.view.clone() else {
                 return Ok(Vec::new());
             };
-            (view, item.projected.names.clone())
+            (
+                view,
+                item.projected.names.clone(),
+                item.projected.modified.clone(),
+            )
         };
         let mut rows = Vec::new();
         for (id, heads) in &view.notes {
@@ -544,10 +554,10 @@ impl Notebook {
                     .notes
                     .iter()
                     .filter(|(id, heads)| wanted.contains(&hex(*id)) && !heads_are_deleted(heads))
-                    .map(|(id, heads)| summary(id, heads, &names))
+                    .map(|(id, heads)| summary(id, heads, &names, &modified))
                     .collect())
             }
-            Err(_) => Ok(search_scan(&view, query, &names)),
+            Err(_) => Ok(search_scan(&view, query, &names, &modified)),
         }
     }
 
@@ -559,7 +569,7 @@ impl Notebook {
         let Some(view) = item.projected.view.as_ref() else {
             return Vec::new();
         };
-        search_scan(view, query, &item.projected.names)
+        search_scan(view, query, &item.projected.names, &item.projected.modified)
     }
 
     fn summaries_for(&self, ids: Vec<String>) -> Vec<NoteSummary> {
@@ -574,7 +584,7 @@ impl Notebook {
         view.notes
             .iter()
             .filter(|(id, heads)| wanted.contains(&hex(*id)) && !heads_are_deleted(heads))
-            .map(|(id, heads)| summary(id, heads, &item.projected.names))
+            .map(|(id, heads)| summary(id, heads, &item.projected.names, &item.projected.modified))
             .collect()
     }
 
@@ -797,13 +807,16 @@ impl Notebook {
             return;
         };
         let mut snaps = std::mem::take(&mut next.projected.snaps);
+        let mut modified = std::mem::take(&mut next.projected.modified);
         if event.event_type == "note.put" {
             snaps.insert(event.id.0, index);
+            note_modified(&event, &mut modified);
         }
         next.events.push(event);
-        let Ok(projected) = project_events(&self.local, &next.events, snaps) else {
+        let Ok(mut projected) = project_events(&self.local, &next.events, snaps) else {
             return;
         };
+        projected.modified = modified;
         next.projected = projected;
         let item = Arc::new(next);
         shared_put(self.share_key(), &item);
@@ -1098,6 +1111,7 @@ fn search_scan(
     view: &ambient_spaces::Projection,
     query: &str,
     names: &std::collections::BTreeMap<[u8; 32], String>,
+    modified: &HashMap<[u8; 32], u64>,
 ) -> Vec<NoteSummary> {
     let mut found = Vec::new();
     for (id, heads) in &view.notes {
@@ -1108,7 +1122,7 @@ fn search_scan(
             .iter()
             .any(|head| head.title.contains(query) || head.body.contains(query))
         {
-            found.push(summary(id, heads, names));
+            found.push(summary(id, heads, names, modified));
         }
     }
     found
@@ -1122,6 +1136,7 @@ fn summary(
     id: &[u8; 32],
     heads: &[ambient_spaces::NoteHead],
     names: &std::collections::BTreeMap<[u8; 32], String>,
+    modified: &HashMap<[u8; 32], u64>,
 ) -> NoteSummary {
     let writer = heads.first().map_or(String::new(), |head| {
         names
@@ -1141,6 +1156,7 @@ fn summary(
             .first()
             .map(|head| head.event_id.to_string())
             .unwrap_or_default(),
+        modified: modified.get(id).copied(),
     }
 }
 
@@ -1260,25 +1276,43 @@ fn open_projected(
                 names: BTreeMap::new(),
                 devices: Vec::new(),
                 snaps: HashMap::new(),
+                modified: HashMap::new(),
             },
         ));
     }
     let mut events = Vec::with_capacity(wires.len());
     let mut snaps = HashMap::new();
+    let mut modified = HashMap::new();
     for (index, wire) in wires.iter().enumerate() {
         let Ok(event) = verify(wire) else {
             continue;
         };
         if event.event_type == "note.put" {
             snaps.insert(event.id.0, index);
+            note_modified(&event, &mut modified);
         }
         events.push(event);
     }
-    let projected = project_events(local, &events, snaps)?;
+    let mut projected = project_events(local, &events, snaps)?;
+    projected.modified = modified;
     Ok((events, projected))
 }
 
 /// Project verified events. No signature is checked here.
+/// Note when a `note.put` was written, if its event says, keeping the newest for each note.
+fn note_modified(event: &VerifiedEvent, modified: &mut HashMap<[u8; 32], u64>) {
+    let Some(at) = event.unix_ms else {
+        return;
+    };
+    let Ok((id, _, _, _)) = ambient_spaces::note_put_parts(&event.payload) else {
+        return;
+    };
+    let newest = modified.entry(id).or_insert(at);
+    if at > *newest {
+        *newest = at;
+    }
+}
+
 fn project_events(
     local: &Local,
     events: &[VerifiedEvent],
@@ -1328,6 +1362,7 @@ fn project_events(
         names,
         devices,
         snaps,
+        modified: HashMap::new(),
     })
 }
 
@@ -1346,10 +1381,14 @@ fn sign_device(
     event_type: &str,
     payload: &[u8],
 ) -> Result<Vec<u8>, CliError> {
+    // The advisory time field, which an event may carry and a conversation line already does.
+    // It is not an order and nothing is merged by it. It lets a note say when it was last
+    // changed, and a list of versions say when each was written. It is inside the sealed event,
+    // so only the members can read it.
     let unsigned = encode_unsigned(
         &local.device.signing_key,
         prev.map(|id| id.0),
-        None,
+        unix_now(),
         space.map(|id| id.0),
         event_type,
         payload,
@@ -1357,6 +1396,14 @@ fn sign_device(
     .map_err(|_| CliError::message("could not encode event"))?;
     sign_wire(&unsigned, local.device.signing_seed())
         .map_err(|_| CliError::message("could not sign event"))
+}
+
+/// Milliseconds since 1970 by this computer's clock, or none if it says it is before then.
+fn unix_now() -> Option<u64> {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    u64::try_from(elapsed.as_millis()).ok()
 }
 
 fn random_note() -> Result<[u8; 32], CliError> {
@@ -1536,6 +1583,40 @@ mod tests {
                 .is_empty()
         );
         assert!(book.versions_held("not hex").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_knows_when_it_was_last_changed_without_parsing_every_snapshot() {
+        let dir = scratch("modified");
+        let book = Notebook::create(&dir).expect("create");
+        let first = book.add("First", "one").expect("add");
+        let second = book.add("Second", "two").expect("add");
+        let at = |book: &Notebook, id: &str| {
+            book.list_held()
+                .expect("list")
+                .into_iter()
+                .find(|note| note.id == id)
+                .and_then(|note| note.modified)
+        };
+        let (a, b) = (at(&book, &first), at(&book, &second));
+        assert!(a.is_some() && b.is_some(), "a write carries a time");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        book.edit(&first, "First", "one again").expect("edit");
+        let (a2, b2) = (at(&book, &first), at(&book, &second));
+        assert!(a2 > a, "the edit is newer: {a:?} {a2:?}");
+        assert_eq!(b2, b, "and the other note did not move");
+        // The same after a fresh load, and in a search result.
+        let fresh = Notebook::open(&dir).expect("reopen");
+        assert_eq!(at(&fresh, &first), a2);
+        assert_eq!(
+            fresh
+                .search("again")
+                .expect("search")
+                .first()
+                .and_then(|note| note.modified),
+            a2
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

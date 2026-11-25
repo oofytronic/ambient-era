@@ -508,10 +508,17 @@ fn an_invite_link_carries_a_signed_name() -> Result<(), String> {
     if face.key != key {
         return Err("the name was not signed by the contact key".to_owned());
     }
-    let mut bad = link.clone();
-    let flipped = if bad.ends_with('A') { 'B' } else { 'A' };
-    bad.pop();
-    bad.push(flipped);
+    // Change the second to last character of the signature, not the last one: the last
+    // character of base64 can carry bits that are not part of the bytes, so changing it
+    // sometimes changes nothing.
+    let mut bad: Vec<char> = link.chars().collect();
+    let at = bad.len().checked_sub(2).ok_or("link too short")?;
+    let old = *bad.get(at).ok_or("no character to change")?;
+    let swapped = if old == 'A' { 'B' } else { 'A' };
+    if let Some(slot) = bad.get_mut(at) {
+        *slot = swapped;
+    }
+    let bad: String = bad.into_iter().collect();
     if ambient_cli::offered_card(&bad).is_some() {
         return Err("a changed link still offered a name".to_owned());
     }

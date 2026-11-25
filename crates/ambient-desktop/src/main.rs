@@ -241,6 +241,11 @@ struct App {
     pinned_clock: Option<clock::Clock>,
     find_open: bool,
     find_query: String,
+    /// The replace field of the find bar is showing.
+    replace_open: bool,
+    replace_text: String,
+    /// Only notes changed within this long are listed.
+    date_filter: DateFilter,
     /// Index of the current find hit. `usize::MAX` means the next jump starts at the first.
     find_at: usize,
     command_down: bool,
@@ -673,6 +678,15 @@ enum Message {
     },
     ChatQuery(String),
     FindOpen,
+    /// Show or hide the replace field of the find bar.
+    ReplaceToggle,
+    ReplaceText(String),
+    /// Replace the match the find bar is on, and go to the next.
+    ReplaceOne,
+    /// Replace every match in the note.
+    ReplaceAll,
+    /// List only the notes changed within this long.
+    PickDateFilter(DateFilter),
     FindQuery(String),
     FindNext,
     FindPrev,
@@ -747,6 +761,42 @@ impl DueDraft {
 
     fn clear(&mut self) {
         *self = Self::default();
+    }
+}
+
+/// How recently a note must have been changed to be listed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DateFilter {
+    Any,
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+impl DateFilter {
+    const ALL: [Self; 5] = [Self::Any, Self::Day, Self::Week, Self::Month, Self::Year];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Any => "Any time",
+            Self::Day => "Past day",
+            Self::Week => "Past week",
+            Self::Month => "Past month",
+            Self::Year => "Past year",
+        }
+    }
+
+    /// How far back it reaches, in milliseconds, or none for any time.
+    fn reach(self) -> Option<u64> {
+        let days: u64 = match self {
+            Self::Any => return None,
+            Self::Day => 1,
+            Self::Week => 7,
+            Self::Month => 30,
+            Self::Year => 365,
+        };
+        Some(days * 86_400_000)
     }
 }
 
@@ -1115,6 +1165,9 @@ impl App {
             trip_dismissed: None,
             find_open: false,
             find_query: String::new(),
+            replace_open: false,
+            replace_text: String::new(),
+            date_filter: DateFilter::Any,
             find_at: usize::MAX,
             command_down: false,
             shift_down: false,
@@ -2465,6 +2518,34 @@ impl App {
                 }
                 Task::none()
             }
+            Message::ReplaceToggle => {
+                self.replace_open = !self.replace_open;
+                if self.replace_open && !self.find_open {
+                    self.find_open = true;
+                    self.find_at = usize::MAX;
+                    self.screen = Screen::Notes;
+                    self.sheet = Sheet::None;
+                    self.detail = true;
+                }
+                Task::none()
+            }
+            Message::ReplaceText(text) => {
+                self.replace_text = text;
+                Task::none()
+            }
+            Message::ReplaceOne => {
+                self.replace_one();
+                self.note_reveal()
+            }
+            Message::ReplaceAll => {
+                self.replace_all();
+                self.note_follow(true)
+            }
+            Message::PickDateFilter(filter) => {
+                self.date_filter = filter;
+                self.refresh_shown();
+                Task::none()
+            }
             Message::FindQuery(query) => {
                 self.find_query = query;
                 self.find_at = usize::MAX;
@@ -3049,6 +3130,7 @@ impl App {
         if self.note_search || !self.query.trim().is_empty() {
             self.note_search = false;
             self.query.clear();
+            self.date_filter = DateFilter::Any;
             self.refresh_shown();
             Task::none()
         } else {
@@ -3112,6 +3194,15 @@ impl App {
         .width(Fill)
         .height(Fill);
         if searching {
+            let mut when = row![].spacing(4);
+            for filter in DateFilter::ALL {
+                when = when.push(
+                    button(text(filter.label()).size(12))
+                        .padding([4, 8])
+                        .on_press(Message::PickDateFilter(filter))
+                        .style(list_row(self.date_filter == filter)),
+                );
+            }
             block = block.push(
                 text_input("Search notes", &self.query)
                     .id(iced::widget::Id::new("note-search"))
@@ -3121,6 +3212,7 @@ impl App {
                     .size(14)
                     .style(field_style),
             );
+            block = block.push(when.wrap().vertical_spacing(4));
         }
         if self.notes.is_empty() {
             let empty = if self.catalog.is_empty() {
@@ -3202,7 +3294,8 @@ impl App {
                     .color(ink.muted),
             );
         }
-        if self.query.trim().is_empty() && self.tag.is_none() {
+        if self.query.trim().is_empty() && self.tag.is_none() && self.date_filter == DateFilter::Any
+        {
             if !self.catalog.iter().any(|note| !note.tags.is_empty()) && !self.catalog.is_empty() {
                 list = list.push(
                     text("Tags make groups. Novel/Part 1 is a group inside Novel.")
@@ -5669,6 +5762,15 @@ impl App {
         };
         // The Tasks note is the Tasks tab's. It is not in the list of notes.
         let base = base.into_iter().filter(|note| !is_tasks_note(note));
+        // Only the notes changed within the time asked for. One written before notes carried a
+        // time has no date, and is left out when a time is asked for.
+        let cutoff = self
+            .date_filter
+            .reach()
+            .map(|reach| clock::now_ms().saturating_sub(reach));
+        let base = base.filter(|note| {
+            cutoff.is_none_or(|cutoff| note.modified.is_some_and(|at| at >= cutoff))
+        });
         self.notes = match &self.tag {
             Some(tag) => base.filter(|note| in_group(&note.tags, tag)).collect(),
             None => base.collect(),
@@ -7515,13 +7617,88 @@ impl App {
                 .style(field_style),
             ghost_label("Previous", Message::FindPrev),
             ghost_label("Next", Message::FindNext),
+            ghost_label(
+                if self.replace_open {
+                    "Hide replace"
+                } else {
+                    "Replace"
+                },
+                Message::ReplaceToggle,
+            ),
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
         if !place.is_empty() {
             bar = bar.push(text(place).size(13).color(ink.muted));
         }
-        bar.into()
+        if !self.replace_open {
+            return bar.wrap().vertical_spacing(4).into();
+        }
+        column![
+            bar.wrap().vertical_spacing(4),
+            row![
+                text_input("Replace with", &self.replace_text)
+                    .on_input(Message::ReplaceText)
+                    .on_submit(Message::ReplaceOne)
+                    .padding(8)
+                    .width(Fill)
+                    .style(field_style),
+                ghost_label("Replace", Message::ReplaceOne),
+                ghost_label("Replace all", Message::ReplaceAll),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(6)
+        .into()
+    }
+
+    /// Replace the match the find bar is on, or the first one after the caret, and go to the next.
+    fn replace_one(&mut self) {
+        let query = self.find_query.trim().to_owned();
+        if query.is_empty() {
+            self.say("Type what to find.");
+            return;
+        }
+        let text = self.body.text();
+        let hits = markdown::find_bytes(&text, &query);
+        let caret = self.body.caret_byte();
+        let pick = if self.find_at < hits.len() {
+            Some(self.find_at)
+        } else {
+            hits.iter()
+                .position(|hit| *hit >= caret)
+                .or(if hits.is_empty() { None } else { Some(0) })
+        };
+        let Some(start) = pick.and_then(|at| hits.get(at).copied()) else {
+            self.say("Not in this note.");
+            return;
+        };
+        let change = markdown::replace_change(&text, start, query.len(), &self.replace_text);
+        self.apply_change(change);
+        // What was next is at this place now.
+        self.find_at = usize::MAX;
+        self.seek_find(true);
+    }
+
+    fn replace_all(&mut self) {
+        let query = self.find_query.trim().to_owned();
+        if query.is_empty() {
+            self.say("Type what to find.");
+            return;
+        }
+        let text = self.body.text();
+        let hits = markdown::find_bytes(&text, &query);
+        let Some(change) =
+            markdown::replace_all_change(&text, &hits, query.len(), &self.replace_text)
+        else {
+            self.say("Not in this note.");
+            return;
+        };
+        self.apply_change(change);
+        self.find_at = usize::MAX;
+        let word = if hits.len() == 1 { "match" } else { "matches" };
+        self.say(&format!("Replaced {} {word}.", hits.len()));
     }
 
     fn seek_find(&mut self, forward: bool) {
@@ -13221,6 +13398,9 @@ fn binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>
         (Some("d" | "D"), true, true) => Some(text_editor::Binding::Custom(Message::AddWord)),
         (Some("z" | "Z"), true, false) => Some(text_editor::Binding::Custom(Message::Undo)),
         (Some("f" | "F"), true, _) => Some(text_editor::Binding::Custom(Message::FindOpen)),
+        (Some("h" | "H"), true, false) => {
+            Some(text_editor::Binding::Custom(Message::ReplaceToggle))
+        }
         (Some("s"), true, _) => Some(text_editor::Binding::Custom(Message::Save)),
         (Some("n"), true, _) => Some(text_editor::Binding::Custom(Message::NewNote)),
         (Some("c"), true, _) => Some(text_editor::Binding::Custom(Message::CopyNote)),
@@ -14238,6 +14418,7 @@ mod app_tests {
             conflict: false,
             tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
             version: String::new(),
+            modified: None,
         };
         app.catalog = vec![
             note("a", &["project", "reading"]),
@@ -14317,6 +14498,7 @@ mod app_tests {
             conflict: false,
             tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
             version: String::new(),
+            modified: None,
         }
     }
 
@@ -15625,6 +15807,101 @@ mod app_tests {
         let _ = app.update(Message::RestoreVersion(second));
         assert!(!app.saving, "refused while there is unsaved typing");
         assert!(app.message.contains("saving"), "{}", app.message);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_and_replace_work_on_the_open_note_and_undo_in_one_step() {
+        use iced::widget::text_editor;
+        let _turn = one_at_a_time();
+        let dir = folder("replace");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::TitleChanged("Cats".to_owned()));
+        let _ = app.update(Message::BodyEdited(text_editor::Action::Edit(
+            text_editor::Edit::Paste(std::sync::Arc::new(
+                "the cat sat\nThe CAT ran\nno dog".to_owned(),
+            )),
+        )));
+        let _ = app.update(Message::FindOpen);
+        let _ = app.update(Message::FindQuery("cat".to_owned()));
+        let _ = app.update(Message::ReplaceToggle);
+        assert!(app.replace_open);
+        let _ = app.update(Message::ReplaceText("dog".to_owned()));
+        drop(app.view());
+        // One at a time: the first, then the next.
+        app.body.place(text_editor::Cursor {
+            position: text_editor::Position { line: 0, column: 0 },
+            selection: None,
+        });
+        let _ = app.update(Message::ReplaceOne);
+        assert_eq!(app.body.text(), "the dog sat\nThe CAT ran\nno dog");
+        let _ = app.update(Message::ReplaceOne);
+        assert_eq!(app.body.text(), "the dog sat\nThe dog ran\nno dog");
+        let _ = app.update(Message::ReplaceOne);
+        assert!(app.message.contains("Not in"), "{}", app.message);
+        // All of them at once, and one undo takes them all back.
+        let _ = app.update(Message::FindQuery("dog".to_owned()));
+        let _ = app.update(Message::ReplaceText("cow".to_owned()));
+        let _ = app.update(Message::ReplaceAll);
+        assert_eq!(app.body.text(), "the cow sat\nThe cow ran\nno cow");
+        assert!(
+            app.message.contains("Replaced 3 matches"),
+            "{}",
+            app.message
+        );
+        let _ = app.update(Message::Undo);
+        assert_eq!(app.body.text(), "the dog sat\nThe dog ran\nno dog");
+        // Nothing typed, nothing replaced.
+        let _ = app.update(Message::FindQuery(String::new()));
+        let _ = app.update(Message::ReplaceAll);
+        assert_eq!(app.body.text(), "the dog sat\nThe dog ran\nno dog");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_list_can_be_limited_to_notes_changed_recently() {
+        let _turn = one_at_a_time();
+        let dir = folder("date-filter");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let now = super::clock::now_ms();
+        let day = 86_400_000;
+        let note = |id: &str, ago: Option<u64>| {
+            let mut item = summary(id, &[]);
+            item.modified = ago.map(|ago| now - ago);
+            item
+        };
+        app.catalog = vec![
+            note("today", Some(1_000)),
+            note("lastweek", Some(5 * day)),
+            note("lastyear", Some(300 * day)),
+            note("ancient", Some(900 * day)),
+            note("undated", None),
+        ];
+        app.refresh_shown();
+        assert_eq!(app.notes.len(), 5);
+        let shown = |app: &App| -> Vec<String> { app.notes.iter().map(|n| n.id.clone()).collect() };
+        let _ = app.update(Message::PickDateFilter(super::DateFilter::Day));
+        assert_eq!(shown(&app), ["today"]);
+        let _ = app.update(Message::PickDateFilter(super::DateFilter::Week));
+        assert_eq!(shown(&app), ["today", "lastweek"]);
+        let _ = app.update(Message::PickDateFilter(super::DateFilter::Month));
+        assert_eq!(shown(&app), ["today", "lastweek"]);
+        let _ = app.update(Message::PickDateFilter(super::DateFilter::Year));
+        assert_eq!(
+            shown(&app),
+            ["today", "lastweek", "lastyear"],
+            "no date is out when a date is asked for"
+        );
+        let _ = app.update(Message::ToggleNoteSearch);
+        drop(app.view());
+        let _ = app.update(Message::PickDateFilter(super::DateFilter::Week));
+        drop(app.view());
+        // Closing the search puts every note back, so nothing is hidden by a filter nobody sees.
+        let _ = app.update(Message::ToggleNoteSearch);
+        assert_eq!(app.date_filter, super::DateFilter::Any);
+        assert_eq!(app.notes.len(), 5);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

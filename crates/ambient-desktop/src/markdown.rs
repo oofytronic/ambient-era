@@ -3073,6 +3073,33 @@ fn renumbered(text: &str, change: Change) -> Change {
     }
 }
 
+/// The match of `len` bytes at `at` replaced with `with`, and the caret after it.
+pub(super) fn replace_change(text: &str, at: usize, len: usize, with: &str) -> Change {
+    let end = at.saturating_add(len).min(text.len());
+    rewrite(text, at, end, with, with.len(), None)
+}
+
+/// Every match replaced, as one change from the first to the last, so it is one step to undo.
+pub(super) fn replace_all_change(
+    text: &str,
+    hits: &[usize],
+    len: usize,
+    with: &str,
+) -> Option<Change> {
+    let first = *hits.first()?;
+    let last = hits.last().copied()?.saturating_add(len).min(text.len());
+    let mut region = String::new();
+    let mut from = first;
+    for hit in hits {
+        region.push_str(text.get(from..*hit)?);
+        region.push_str(with);
+        from = hit.saturating_add(len);
+    }
+    region.push_str(text.get(from..last).unwrap_or(""));
+    let caret = region.len();
+    Some(rewrite(text, first, last, &region, caret, None))
+}
+
 /// A mark typed on a selection wraps it, and a backtick typed alone makes a pair with the caret
 /// between, so the closing one is not forgotten. Typing the closing one steps over it. Anything
 /// else typed is the editor's own.
@@ -7455,6 +7482,31 @@ mod tests {
         assert_eq!(go("a `x`", 3), None);
         assert_eq!(go("a `` b", 4), None);
         assert_eq!(go("``", 0), None);
+    }
+
+    #[test]
+    fn replacing_one_or_every_match_changes_only_the_matches() {
+        let text = "the cat sat; The CAT sat";
+        let hits = super::find_bytes(text, "cat");
+        assert_eq!(hits, [4, 17], "case is ignored in what is found");
+        let one = super::replace_change(text, hits[0], 3, "dog");
+        let (next, caret, _) = after(text, &one);
+        assert_eq!((next.as_str(), caret), ("the dog sat; The CAT sat", 7));
+        let all = super::replace_all_change(text, &hits, 3, "dog").expect("change");
+        let (next, caret, _) = after(text, &all);
+        assert_eq!(next, "the dog sat; The dog sat");
+        assert_eq!(caret, 20, "after the last one");
+        // A longer and a shorter word, and the empty word, which takes the matches out.
+        let all = super::replace_all_change(text, &hits, 3, "lion").expect("change");
+        assert_eq!(after(text, &all).0, "the lion sat; The lion sat");
+        let all = super::replace_all_change(text, &hits, 3, "").expect("change");
+        assert_eq!(after(text, &all).0, "the  sat; The  sat");
+        // Nothing to replace is no change, and the text outside the matches is untouched.
+        assert!(super::replace_all_change(text, &[], 3, "x").is_none());
+        let multi = "a\nfoo\nb foo c\nd";
+        let hits = super::find_bytes(multi, "foo");
+        let all = super::replace_all_change(multi, &hits, 3, "x\ny").expect("change");
+        assert_eq!(after(multi, &all).0, "a\nx\ny\nb x\ny c\nd");
     }
 
     #[test]

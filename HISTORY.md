@@ -539,3 +539,11 @@ A bold or italic key inside code does nothing, and the address of a link is left
 ## 2026-11-25 — Recently deleted, and a note's version history
 
 The trash button at the top of the notes list shows the notes that were deleted, each as it read before, with Bring back. A note's panel has Version history, which lists every snapshot the note has had with Read and Restore. Both restore by writing the old words as a new snapshot after the others. Nothing in the log is changed or removed, and no event or format is new. A restore is refused while the open note has typing that is not saved yet. Neither is a way to erase anything: a deleted note's text stays in the log, as the threat model says.
+
+## 2026-11-25 — Find and replace, notes carry a time, and a date filter
+
+Find in the note has Replace and Replace all, and Replace all is one undo. The notes list can be limited to what changed in the past day, week, month, or year.
+
+That needed a note to know when it was changed, and note events carried no time. They now carry the advisory time field of the envelope, as a conversation line always did. It is inside the sealed event, it is not an order, nothing merges by it, and no format changed: the field was always optional. A note written before has no date. A device with a wrong clock writes a wrong time, and the version history and the date filter would show it. The same time gives the version list and the recently deleted list their dates. [THREAT_MODEL.md](THREAT_MODEL.md) says so.
+
+`an_invite_link_carries_a_signed_name` failed about one run in three on the branch as it was. It changed the last character of a base64 string, which can carry bits that are not part of the bytes, so the change sometimes altered nothing. It changes the one before it now, and passed ten runs in ten. The test was wrong, not the code.

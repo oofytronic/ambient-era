@@ -67,6 +67,13 @@ See [platforms.md](platforms.md).
 - **A card taller than a short window** is cut, not scrolled, except the task views and the chat chooser, which scroll.
 - **Settings, the invite page, and the chat list** were looked at only as far as the widths above. They have not been combed for spacing.
 
+## Notes and time
+
+- **A note written before 2026-11-25 has no date.** It is left out of the date filter and has no time in its history. Nothing can add one to an old event.
+- **The date filter looks back a fixed time from now,** not by calendar day, so "past day" is the last 24 hours.
+- **A device with a wrong clock writes a wrong time into its notes.** The window shows it as written.
+- **Search is still the sealed full-text index plus titles.** It does not search a note's version history, and there is no filter by writer.
+
 ## Offered, not built
 
 Small things that would help daily use.
