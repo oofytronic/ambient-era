@@ -2526,7 +2526,144 @@ pub(super) struct Change {
     pub after: text_editor::Cursor,
 }
 
+/// A change that does nothing and leaves the caret and the selection where they were.
+fn nothing(cursor: &text_editor::Cursor) -> Change {
+    Change {
+        anchor: cursor.position,
+        end: cursor.position,
+        insert: String::new(),
+        after: text_editor::Cursor {
+            position: cursor.position,
+            selection: cursor.selection,
+        },
+    }
+}
+
+/// Whether bytes `from..to` are inside code: a fenced block, a fence line, or one span of
+/// backticks on a line. A mark there is part of the code and means nothing.
+fn range_in_code(text: &str, from: usize, to: usize) -> bool {
+    let first = byte_pos(text, from);
+    let last = byte_pos(text, to);
+    if first.line != last.line {
+        return false;
+    }
+    if skipped_block(text, first.line) {
+        return true;
+    }
+    let start = line_start(text, first.line);
+    let line = text.get(start..line_end(text, first.line)).unwrap_or("");
+    if fence_open(line).is_some() {
+        return true;
+    }
+    let (from, to) = (from.saturating_sub(start), to.saturating_sub(start));
+    let bytes = line.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes.get(at) != Some(&b'`') {
+            at = at.saturating_add(1);
+            continue;
+        }
+        let run = bytes.get(at..).map_or(0, |rest| {
+            rest.iter().take_while(|byte| **byte == b'`').count()
+        });
+        // The span closes at the next run of exactly as many backticks.
+        let mut close = at.saturating_add(run);
+        let mut found = None;
+        while close < bytes.len() {
+            if bytes.get(close) == Some(&b'`') {
+                let there = bytes.get(close..).map_or(0, |rest| {
+                    rest.iter().take_while(|byte| **byte == b'`').count()
+                });
+                if there == run {
+                    found = Some(close.saturating_add(there));
+                    break;
+                }
+                close = close.saturating_add(there);
+            } else {
+                close = close.saturating_add(1);
+            }
+        }
+        match found {
+            Some(end) => {
+                // Strictly inside. A selection of the whole span, marks and all, may be marked.
+                if at <= from && to <= end && (from > at || to < end) {
+                    return true;
+                }
+                at = end;
+            }
+            None => break,
+        }
+    }
+    false
+}
+
+/// The whole address when `at` is in one, such as `https://example.com/a?b=1`, without the
+/// full stop or comma that ends a sentence. A word is not a URL, and neither is a link's text.
+fn url_bounds(text: &str, at: usize) -> Option<(usize, usize)> {
+    let line = byte_pos(text, at).line;
+    let (lo, hi) = (line_start(text, line), line_end(text, line));
+    let stop = |char: char| char.is_whitespace() || "<>()[]\"".contains(char);
+    let mut start = at.min(hi);
+    while start > lo {
+        let char = text.get(..start)?.chars().next_back()?;
+        if stop(char) {
+            break;
+        }
+        start = start.saturating_sub(char.len_utf8());
+    }
+    let mut end = at.min(hi);
+    while end < hi {
+        let char = text.get(end..)?.chars().next()?;
+        if stop(char) {
+            break;
+        }
+        end = end.saturating_add(char.len_utf8());
+    }
+    // Marks already round it are not part of it.
+    let marks = ['*', '_', '~', '=', '`'];
+    let token = text.get(start..end)?;
+    let bare = token.trim_start_matches(marks);
+    start = start.saturating_add(token.len() - bare.len());
+    let bare =
+        bare.trim_end_matches(|char: char| marks.contains(&char) || ".,;:!?'".contains(char));
+    if !(bare.starts_with("https://") || bare.starts_with("http://")) {
+        return None;
+    }
+    let end = start.saturating_add(bare.len());
+    (at >= start && at <= end).then_some((start, end))
+}
+
+/// Whether the address at `start` is the target of a link, `[text](address)`.
+fn is_link_target(text: &str, start: usize) -> bool {
+    text.get(..start)
+        .is_some_and(|before| before.ends_with("]("))
+}
+
 pub(super) fn format_change(text: &str, cursor: text_editor::Cursor, kind: FormatKind) -> Change {
+    let marks = matches!(
+        kind,
+        FormatKind::Bold
+            | FormatKind::Italic
+            | FormatKind::Strike
+            | FormatKind::Highlight
+            | FormatKind::Code
+    );
+    if marks {
+        let (from, to) = range_bytes(text, &cursor);
+        // Inside code the marks are just characters, so a bold key there does nothing. The code
+        // key itself still takes a span off.
+        if range_in_code(text, from, to)
+            && (kind != FormatKind::Code || skipped_block(text, byte_pos(text, from).line))
+        {
+            return nothing(&cursor);
+        }
+        if from == to
+            && let Some((start, _)) = url_bounds(text, from)
+            && is_link_target(text, start)
+        {
+            return nothing(&cursor);
+        }
+    }
     match kind {
         FormatKind::Bold => wrap(text, &cursor, "**", "**"),
         FormatKind::Italic => wrap(text, &cursor, "*", "*"),
@@ -2551,6 +2688,10 @@ pub(super) fn format_change(text: &str, cursor: text_editor::Cursor, kind: Forma
 /// item it ends the list instead, or steps out one level if the item is nested, so pressing
 /// Enter twice finishes a list. A fence, math block, or frontmatter is left alone.
 pub(super) fn continue_enter(text: &str, cursor: text_editor::Cursor) -> Option<Change> {
+    continue_enter_inner(text, cursor).map(|change| renumbered(text, change))
+}
+
+fn continue_enter_inner(text: &str, cursor: text_editor::Cursor) -> Option<Change> {
     let Some((start, line, parts)) = list_at_cursor(text, &cursor) else {
         return quote_enter(text, &cursor);
     };
@@ -2561,7 +2702,21 @@ pub(super) fn continue_enter(text: &str, cursor: text_editor::Cursor) -> Option<
     let at = start.saturating_add(column.max(parts.end));
     let mut insert = String::from("\n");
     insert.push_str(&next_prefix(line, &parts));
-    Some(rewrite(text, at, at, &insert, insert.len(), None))
+    // What follows the caret goes to the new item, without the spaces that were between.
+    let spaces = text
+        .get(at..line_end(text, cursor.position.line))
+        .unwrap_or("")
+        .bytes()
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+        .count();
+    Some(rewrite(
+        text,
+        at,
+        at.saturating_add(spaces),
+        &insert,
+        insert.len(),
+        None,
+    ))
 }
 
 /// An empty item: out one level if it is nested, otherwise the marker goes.
@@ -2649,6 +2804,10 @@ struct Row {
 /// level, or bring them out one. `None` when none of those lines is a list item, so the key does
 /// nothing in a paragraph.
 pub(super) fn shift_items(text: &str, cursor: &text_editor::Cursor, back: bool) -> Option<Change> {
+    shift_items_inner(text, cursor, back).map(|change| renumbered(text, change))
+}
+
+fn shift_items_inner(text: &str, cursor: &text_editor::Cursor, back: bool) -> Option<Change> {
     let (from, to) = range_bytes(text, cursor);
     let first = byte_pos(text, from).line;
     let mut last = byte_pos(text, to).line;
@@ -2732,16 +2891,252 @@ fn shift_line(line: &str, back: bool) -> (String, usize, bool) {
 /// `list_parts` does not read an item indented further than this.
 const MAX_INDENT: usize = 24;
 
-/// Backspace on an empty list or task removes that marker.
+/// Backspace in a list. On an empty item it removes the item. With the caret at the very start of
+/// an item's words it takes the item out one level, or, at the top level, takes the marker off and
+/// leaves the words. Anywhere else it is an ordinary Backspace and this is `None`.
 pub(super) fn exit_empty_item(text: &str, cursor: text_editor::Cursor) -> Option<Change> {
-    let (start, line, parts) = list_at_cursor(text, &cursor)?;
+    exit_item_inner(text, &cursor).map(|change| renumbered(text, change))
+}
+
+fn exit_item_inner(text: &str, cursor: &text_editor::Cursor) -> Option<Change> {
+    let (start, line, parts) = list_at_cursor(text, cursor)?;
     let end = line_end(text, cursor.position.line);
     let body = line.get(parts.end..).unwrap_or("");
     let column = cursor_column(line, cursor.position.column);
-    if !body.trim().is_empty() || column < parts.end {
+    if body.trim().is_empty() {
+        if column < parts.end {
+            return None;
+        }
+        return Some(rewrite(text, start, end, "", 0, None));
+    }
+    if column != parts.end {
         return None;
     }
-    Some(rewrite(text, start, end, "", 0, None))
+    let indent = leading_indent(line);
+    let prefix = line.get(..column).unwrap_or("");
+    let kept = if indent > 0 {
+        let step = if line.starts_with('\t') {
+            1
+        } else {
+            leading_spaces(line).min(ITEM_INDENT)
+        };
+        prefix.get(step..).unwrap_or(prefix)
+    } else {
+        ""
+    };
+    Some(rewrite(
+        text,
+        start,
+        start.saturating_add(column),
+        kept,
+        kept.len(),
+        None,
+    ))
+}
+
+/// Ordered items counted one, two, three at each level of nesting, from the number the first of
+/// them has. A bullet, a blank line, or a paragraph starts the count again. Returns each line of
+/// `lines` as it should be, and for those that changed where their number ended and by how many
+/// bytes the line grew.
+fn renumber(lines: &[&str]) -> Vec<(String, usize, isize)> {
+    let mut counters: Vec<(usize, u32)> = Vec::new();
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        let Some(_) = list_parts(line) else {
+            if line.trim().is_empty() || leading_indent(line) == 0 {
+                counters.clear();
+            }
+            out.push(((*line).to_owned(), 0, 0));
+            continue;
+        };
+        let indent = leading_indent(line);
+        while counters.last().is_some_and(|counter| counter.0 > indent) {
+            counters.pop();
+        }
+        let rest = line.get(indent..).unwrap_or("");
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            while counters.last().is_some_and(|counter| counter.0 >= indent) {
+                counters.pop();
+            }
+            out.push(((*line).to_owned(), 0, 0));
+            continue;
+        }
+        let current: u32 = rest.get(..digits).and_then(|n| n.parse().ok()).unwrap_or(1);
+        let number = match counters.last_mut() {
+            Some(counter) if counter.0 == indent => {
+                let number = counter.1;
+                counter.1 = counter.1.saturating_add(1);
+                number
+            }
+            _ => {
+                // A list that starts the region keeps the number it has. One that starts under
+                // another item is a new list and starts at one.
+                let start = if counters.is_empty() { current } else { 1 };
+                counters.push((indent, start.saturating_add(1)));
+                start
+            }
+        };
+        if number == current {
+            out.push(((*line).to_owned(), 0, 0));
+            continue;
+        }
+        let shown = number.to_string();
+        let grew = isize::try_from(shown.len()).unwrap_or(0) - isize::try_from(digits).unwrap_or(0);
+        let end = indent.saturating_add(digits);
+        out.push((
+            format!(
+                "{}{shown}{}",
+                line.get(..indent).unwrap_or(""),
+                line.get(end..).unwrap_or("")
+            ),
+            end,
+            grew,
+        ));
+    }
+    out
+}
+
+/// A line that can be part of a list: an item, or text indented under one.
+fn in_list(line: &str) -> bool {
+    list_parts(line).is_some() || (!line.trim().is_empty() && leading_indent(line) > 0)
+}
+
+/// `change`, and the renumbering of the list it leaves behind: an ordered item moved in, out, or
+/// added in the middle leaves the numbers after it right.
+fn renumbered(text: &str, change: Change) -> Change {
+    let from = pos_byte(text, change.anchor);
+    let to = pos_byte(text, change.end);
+    let mut next = String::with_capacity(text.len().saturating_add(change.insert.len()));
+    next.push_str(text.get(..from).unwrap_or(""));
+    next.push_str(&change.insert);
+    next.push_str(text.get(to..).unwrap_or(""));
+    let lines: Vec<&str> = next.split('\n').collect();
+    let old_count = text.split('\n').count();
+    let first_changed = change.anchor.line;
+    let last_changed = first_changed.saturating_add(change.insert.matches('\n').count());
+    let mut first = first_changed.min(lines.len().saturating_sub(1));
+    let mut last = last_changed.min(lines.len().saturating_sub(1));
+    if (first..=last).any(|line_no| skipped_block(&next, line_no)) {
+        return change;
+    }
+    while first > 0 && lines.get(first - 1).is_some_and(|line| in_list(line)) {
+        first -= 1;
+    }
+    while lines.get(last + 1).is_some_and(|line| in_list(line)) {
+        last += 1;
+    }
+    let region = lines.get(first..=last).unwrap_or(&[]);
+    let fixed = renumber(region);
+    if fixed.iter().all(|(_, _, grew)| *grew == 0)
+        && fixed
+            .iter()
+            .zip(region)
+            .all(|((line, _, _), old)| line == old)
+    {
+        return change;
+    }
+    // The same lines in the old text: the ones before the change are the same lines, and the
+    // ones after it are as far from the end as they were.
+    let old_last = last.saturating_sub(lines.len().saturating_sub(old_count));
+    let start = line_start(text, first);
+    let end = line_end(text, old_last);
+    let insert = fixed
+        .iter()
+        .map(|(line, _, _)| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let adjust = |position: text_editor::Position| {
+        let Some((_, digits_end, grew)) = position
+            .line
+            .checked_sub(first)
+            .and_then(|row| fixed.get(row))
+        else {
+            return position;
+        };
+        if *grew == 0 || position.column < *digits_end {
+            return position;
+        }
+        text_editor::Position {
+            line: position.line,
+            column: position.column.saturating_add_signed(*grew),
+        }
+    };
+    Change {
+        anchor: byte_pos(text, start),
+        end: byte_pos(text, end),
+        insert,
+        after: text_editor::Cursor {
+            position: adjust(change.after.position),
+            selection: change.after.selection.map(adjust),
+        },
+    }
+}
+
+/// A mark typed on a selection wraps it, and a backtick typed alone makes a pair with the caret
+/// between, so the closing one is not forgotten. Typing the closing one steps over it. Anything
+/// else typed is the editor's own.
+pub(super) fn typed_char(text: &str, cursor: &text_editor::Cursor, char: char) -> Option<Change> {
+    let (from, to) = range_bytes(text, cursor);
+    if cursor.selection.is_some() && from != to {
+        let kind = match char {
+            '*' | '_' => FormatKind::Italic,
+            '~' => FormatKind::Strike,
+            '`' => FormatKind::Code,
+            _ => return None,
+        };
+        return Some(format_change(
+            text,
+            text_editor::Cursor {
+                position: cursor.position,
+                selection: cursor.selection,
+            },
+            kind,
+        ));
+    }
+    if char != '`' || skipped_block(text, cursor.position.line) {
+        return None;
+    }
+    let before = text.get(..from)?.chars().next_back();
+    let after = text.get(from..)?.chars().next();
+    let line_end_at = line_end(text, cursor.position.line);
+    let after = after.filter(|_| from < line_end_at);
+    if after == Some('`') {
+        // Over the one that is already there.
+        let there = byte_pos(text, from.saturating_add(1));
+        return Some(Change {
+            anchor: cursor.position,
+            end: cursor.position,
+            insert: String::new(),
+            after: text_editor::Cursor {
+                position: there,
+                selection: None,
+            },
+        });
+    }
+    let room = after.is_none_or(|char| char.is_whitespace() || ")]},.;:!?".contains(char));
+    let apart = before.is_none_or(|char| !char.is_alphanumeric() && char != '`');
+    if room && apart {
+        return Some(rewrite(text, from, to, "``", 1, None));
+    }
+    None
+}
+
+/// Backspace between an empty pair of backticks takes both.
+pub(super) fn backspace_pair(text: &str, cursor: &text_editor::Cursor) -> Option<Change> {
+    if cursor.selection.is_some() {
+        return None;
+    }
+    let at = pos_byte(text, cursor.position);
+    let line = line_start(text, cursor.position.line);
+    if at <= line
+        || text.get(at - 1..at) != Some("`")
+        || text.get(at..at.saturating_add(1)) != Some("`")
+        || skipped_block(text, cursor.position.line)
+    {
+        return None;
+    }
+    Some(rewrite(text, at - 1, at + 1, "", 0, None))
 }
 
 fn list_at_cursor<'a>(
@@ -2851,7 +3246,8 @@ fn skipped_block(text: &str, line_no: usize) -> bool {
 fn wrap(text: &str, cursor: &text_editor::Cursor, left: &str, right: &str) -> Change {
     let (mut from, mut to) = range_bytes(text, cursor);
     if from == to {
-        let (word_from, word_to) = word_bounds(text, from);
+        let (word_from, word_to) =
+            url_bounds(text, from).unwrap_or_else(|| word_bounds(text, from));
         if word_from != word_to {
             from = word_from;
             to = word_to;
@@ -6817,10 +7213,248 @@ mod tests {
         // An empty item that is nested comes out one level first.
         assert_eq!(enter("- a\n  - ", 8), Some(("- a\n- ".to_owned(), 6)));
         // Text after the caret moves to the new item.
-        assert_eq!(enter("- one two", 5), Some(("- one\n-  two".to_owned(), 8)));
+        assert_eq!(enter("- one two", 5), Some(("- one\n- two".to_owned(), 8)));
         // A paragraph, and code, are left to the editor.
         assert_eq!(enter("plain", 5), None);
         assert_eq!(enter("```\n- x\n```", 9), None);
+    }
+
+    fn shifted(text: &str, byte: usize, back: bool) -> Option<(String, usize)> {
+        let change = super::shift_items(text, &cursor_at(text, byte), back)?;
+        let (next, caret, _) = after(text, &change);
+        Some((next, caret))
+    }
+
+    fn backspaced(text: &str, byte: usize) -> Option<(String, usize)> {
+        let change = super::exit_empty_item(text, cursor_at(text, byte))?;
+        let (next, caret, _) = after(text, &change);
+        Some((next, caret))
+    }
+
+    #[test]
+    fn a_mark_in_code_means_nothing_and_a_key_there_does_nothing() {
+        use super::FormatKind::{Bold, Code, Highlight, Italic, Strike};
+        for kind in [Bold, Italic, Strike, Highlight] {
+            assert_eq!(apply("a `x y` b", 4, 4, kind), "a `x y` b", "{kind:?}");
+            assert_eq!(
+                apply("a `x y` b", 3, 6, kind),
+                "a `x y` b",
+                "a selection inside it"
+            );
+            assert_eq!(
+                apply("a `x y` b", 2, 2, kind),
+                "a `x y` b",
+                "on its opening mark"
+            );
+            assert_eq!(apply("``a ` b``", 4, 4, kind), "``a ` b``", "a longer pair");
+            assert_eq!(
+                apply("```\nfoo\n```", 5, 5, kind),
+                "```\nfoo\n```",
+                "in a fence"
+            );
+        }
+        // Bold round a span is fine, and a span outside code takes its mark as before.
+        assert_eq!(apply("a `x` b", 2, 5, Bold), "a **`x`** b");
+        assert_eq!(apply("`x` and word", 9, 9, Bold), "`x` and **word**");
+        // The code key still takes a span off, and puts one on.
+        assert_eq!(apply("a `x` b", 4, 4, Code), "a x b");
+        assert_eq!(apply("a word b", 3, 3, Code), "a `word` b");
+        // An unclosed backtick is not a span.
+        assert_eq!(apply("a ` word b", 6, 6, Bold), "a ` **word** b");
+    }
+
+    #[test]
+    fn a_web_address_is_one_word_when_it_is_marked() {
+        use super::FormatKind::{Bold, Italic};
+        assert_eq!(
+            apply("see https://example.com/a?b=1 now", 14, 14, Bold),
+            "see **https://example.com/a?b=1** now"
+        );
+        assert_eq!(
+            apply("go to https://example.com.", 12, 12, Italic),
+            "go to *https://example.com*."
+        );
+        assert_eq!(
+            apply("http://a.b/c, then", 3, 3, Bold),
+            "**http://a.b/c**, then"
+        );
+        // Taking it off again works from anywhere in it.
+        assert_eq!(
+            apply("see **https://example.com** now", 14, 14, Bold),
+            "see https://example.com now"
+        );
+        // The address of a link is the link's own and is left alone.
+        assert_eq!(
+            apply("[a](https://example.com) b", 12, 12, Bold),
+            "[a](https://example.com) b"
+        );
+        // A plain word is still a word, and so is one that only looks like the start of one.
+        assert_eq!(apply("see http now", 6, 6, Bold), "see **http** now");
+    }
+
+    #[test]
+    fn enter_in_the_middle_of_an_item_leaves_no_space_at_the_start_of_the_next() {
+        assert_eq!(enter("- one two", 5), Some(("- one\n- two".to_owned(), 8)));
+        assert_eq!(enter("- onetwo", 5), Some(("- one\n- two".to_owned(), 8)));
+        assert_eq!(
+            enter("- one   two", 5),
+            Some(("- one\n- two".to_owned(), 8))
+        );
+        assert_eq!(
+            enter("1. one two", 6),
+            Some(("1. one\n2. two".to_owned(), 10))
+        );
+        assert_eq!(
+            enter("- [ ] one two", 9),
+            Some(("- [ ] one\n- [ ] two".to_owned(), 16))
+        );
+        assert_eq!(enter("  - a b", 5), Some(("  - a\n  - b".to_owned(), 10)));
+        // At the very end there is nothing to carry.
+        assert_eq!(enter("- one", 5), Some(("- one\n- ".to_owned(), 8)));
+    }
+
+    #[test]
+    fn an_ordered_list_is_counted_again_when_an_item_moves_comes_or_goes() {
+        // Nesting one: the one under it starts at one, and the ones after it follow on.
+        assert_eq!(
+            shifted("1. a\n2. b\n3. c", 7, false),
+            Some(("1. a\n  1. b\n2. c".to_owned(), 9))
+        );
+        // And back out.
+        assert_eq!(
+            shifted("1. a\n  1. b\n2. c", 11, true),
+            Some(("1. a\n2. b\n3. c".to_owned(), 9))
+        );
+        // A selection of two, nested together.
+        let text = "1. a\n2. b\n3. c\n4. d";
+        let change = super::shift_items(text, &selecting(text, 5, 15), false).expect("shift");
+        let (next, _, _) = after(text, &change);
+        assert_eq!(next, "1. a\n  1. b\n  2. c\n2. d");
+        // An item added in the middle of a list shifts the rest down.
+        assert_eq!(
+            enter("1. a\n2. b\n3. c", 4),
+            Some(("1. a\n2. \n3. b\n4. c".to_owned(), 8))
+        );
+        // Ten and nine: the numbers get longer, and the caret stays where it was in the words.
+        let nine = "1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n10. j";
+        let at = nine.len();
+        let (next, caret) = enter(nine, 4).expect("enter");
+        assert!(next.ends_with("10. i\n11. j"), "{next}");
+        assert!(caret <= at + 3);
+        // A bullet in between starts the count again, and a different level counts alone.
+        assert_eq!(
+            shifted("1. a\n- x\n3. c", 9, false),
+            Some(("1. a\n- x\n  3. c".to_owned(), 11)),
+            "nesting under a bullet keeps the number it has until another comes"
+        );
+        // A list that starts at three keeps its start.
+        assert_eq!(
+            shifted("3. a\n4. b\n5. c", 7, false),
+            Some(("3. a\n  1. b\n4. c".to_owned(), 9))
+        );
+        // A list inside a fence is code.
+        assert_eq!(shifted("```\n1. a\n```", 7, false), None);
+    }
+
+    #[test]
+    fn backspace_at_the_start_of_an_item_takes_it_out_a_level_or_the_marker_off() {
+        // Nested: out one level, the caret with its words.
+        assert_eq!(
+            backspaced("- a\n  - b", 8),
+            Some(("- a\n- b".to_owned(), 6))
+        );
+        assert_eq!(
+            backspaced("1. a\n  1. b", 10),
+            Some(("1. a\n2. b".to_owned(), 8)),
+            "and it is the second, not another first"
+        );
+        // Top level: the marker goes and the words stay.
+        assert_eq!(backspaced("- one", 2), Some(("one".to_owned(), 0)));
+        assert_eq!(backspaced("1. one", 3), Some(("one".to_owned(), 0)));
+        assert_eq!(backspaced("- [ ] one", 6), Some(("one".to_owned(), 0)));
+        assert_eq!(backspaced("x\n- one", 4), Some(("x\none".to_owned(), 2)));
+        // A tab is one level.
+        assert_eq!(
+            backspaced("- a\n\t- b", 7),
+            Some(("- a\n- b".to_owned(), 6))
+        );
+        // Anywhere else is an ordinary Backspace, and so is the start of a paragraph.
+        assert_eq!(backspaced("- one", 4), None);
+        assert_eq!(backspaced("- one", 1), None);
+        assert_eq!(backspaced("one", 0), None);
+        assert_eq!(backspaced("```\n- one\n```", 6), None);
+        // The empty item still goes whole.
+        assert_eq!(backspaced("- one\n- ", 8), Some(("- one\n".to_owned(), 6)));
+    }
+
+    fn typed(text: &str, anchor: usize, caret: usize, char: char) -> Option<(String, usize)> {
+        let cursor = if anchor == caret {
+            cursor_at(text, caret)
+        } else {
+            selecting(text, anchor, caret)
+        };
+        let change = super::typed_char(text, &cursor, char)?;
+        let (next, caret, _) = after(text, &change);
+        Some((next, caret))
+    }
+
+    #[test]
+    fn a_mark_typed_on_a_selection_wraps_it_and_a_backtick_comes_in_a_pair() {
+        assert_eq!(
+            typed("a word b", 2, 6, '*'),
+            Some(("a *word* b".to_owned(), 8))
+        );
+        assert_eq!(
+            typed("a word b", 2, 6, '_'),
+            Some(("a *word* b".to_owned(), 8))
+        );
+        assert_eq!(
+            typed("a word b", 2, 6, '~'),
+            Some(("a ~~word~~ b".to_owned(), 10))
+        );
+        assert_eq!(
+            typed("a word b", 2, 6, '`'),
+            Some(("a `word` b".to_owned(), 8))
+        );
+        // Not on a letter, and not on a selection of nothing.
+        assert_eq!(typed("a word b", 2, 6, 'x'), None);
+        assert_eq!(typed("a word b", 3, 3, '*'), None);
+        // A backtick alone makes a pair with the caret between.
+        assert_eq!(typed("a ", 2, 2, '`'), Some(("a ``".to_owned(), 3)));
+        assert_eq!(typed("", 0, 0, '`'), Some(("``".to_owned(), 1)));
+        assert_eq!(typed("a  b", 2, 2, '`'), Some(("a `` b".to_owned(), 3)));
+        // Typing the closing one steps over it.
+        assert_eq!(
+            typed("a `code`", 7, 7, '`'),
+            Some(("a `code`".to_owned(), 8))
+        );
+        // Not inside a word, and not before one.
+        assert_eq!(typed("a word", 3, 3, '`'), None);
+        assert_eq!(typed("a word", 2, 2, '`'), None);
+        // Three in a row are a fence, not three pairs.
+        let (one, caret) = typed("", 0, 0, '`').expect("first");
+        let (two, caret) = typed(&one, caret, caret, '`').expect("second");
+        assert_eq!((two.as_str(), caret), ("``", 2));
+        assert_eq!(
+            typed(&two, caret, caret, '`'),
+            None,
+            "the third is the editor's own, and makes three"
+        );
+        // In a fenced block a backtick is a backtick.
+        assert_eq!(typed("```\nx \n```", 6, 6, '`'), None);
+    }
+
+    #[test]
+    fn backspace_between_an_empty_pair_of_backticks_takes_both() {
+        let go = |text: &str, byte: usize| {
+            let change = super::backspace_pair(text, &cursor_at(text, byte))?;
+            let (next, caret, _) = after(text, &change);
+            Some((next, caret))
+        };
+        assert_eq!(go("a ``", 3), Some(("a ".to_owned(), 2)));
+        assert_eq!(go("a `x`", 3), None);
+        assert_eq!(go("a `` b", 4), None);
+        assert_eq!(go("``", 0), None);
     }
 
     #[test]

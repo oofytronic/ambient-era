@@ -77,17 +77,13 @@ Small things that would help daily use.
 - A way to see and remove the words in the personal dictionary. There is only an add.
 - Spelling for other languages, and for words with an accent. A word with a non-ASCII letter is never checked.
 
-## Editing gaps found while testing
+## Editing gaps
 
-None is a regression. They were found, and left.
+None is a regression.
 
-- Bold or italic inside a code span adds literal marks. It should do nothing.
-- Bolding a URL splits it at the colon, `**https**://example.com`.
-- Pressing Enter in the middle of a list item leaves a space at the start of the new item.
-- Nesting an ordered item does not renumber the list.
-- Backspace at the start of a list item's text does not take the item out a level.
-- There is no key for a task's checkbox, and no auto-closing of marks.
 - A capitalized word the dictionary does not know is taken for a name unless it starts a sentence. A capitalized typo in the middle of a sentence is not underlined.
+- Auto-closing is only for the backtick, which comes in a pair, and a mark typed on a selection (`*`, `_`, `~`, and the backtick) wraps it. A bold or italic mark typed with nothing selected is not closed for you, and `[[` is not closed.
+- A list is renumbered when Tab, Shift+Tab, Enter, or Backspace changes it. A list pasted in, or edited with the mouse or the cut key, is not, and renders as it is written.
 
 ## Performance headroom
 

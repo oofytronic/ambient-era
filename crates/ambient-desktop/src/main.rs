@@ -599,6 +599,8 @@ enum Message {
     SetHomeHere,
     /// Put the notice that this computer is away from home away until the zone changes.
     DismissTrip,
+    /// Ctrl or Cmd with Enter: check the task the caret is on, or clear it, or make the line a task.
+    ToggleTaskUnderCaret,
     /// Time has passed, or the window was brought back. Read the clock again.
     ClockTick,
     /// Look at the tasks this way.
@@ -1332,8 +1334,16 @@ impl App {
                         markdown::continue_enter(&self.body.text(), self.body.cursor())
                     }
                     text_editor::Action::Edit(text_editor::Edit::Backspace) => {
-                        markdown::exit_empty_item(&self.body.text(), self.body.cursor())
+                        let text = self.body.text();
+                        let cursor = self.body.cursor();
+                        markdown::exit_empty_item(&text, cursor)
+                            .or_else(|| markdown::backspace_pair(&text, &cursor))
                     }
+                    // Only the few characters that mean something look at the page, so an
+                    // ordinary letter costs nothing.
+                    text_editor::Action::Edit(text_editor::Edit::Insert(
+                        char @ ('*' | '_' | '`' | '~'),
+                    )) => markdown::typed_char(&self.body.text(), &self.body.cursor(), *char),
                     _ => None,
                 };
                 if let Some(change) = structured {
@@ -2191,6 +2201,19 @@ impl App {
             Message::ClockTick => {
                 self.refresh_clock();
                 Task::none()
+            }
+            Message::ToggleTaskUnderCaret => {
+                let line = self.body.cursor().position.line;
+                let state = markdown::task_lines(&self.body.text())
+                    .into_iter()
+                    .find(|task| task.line == line)
+                    .map(|task| task.done);
+                if let Some(done) = state {
+                    self.update(Message::SetOpenTask { line, done: !done })
+                } else {
+                    self.insert_mark(FormatKind::Task);
+                    self.note_follow(true)
+                }
             }
             Message::PickHour12(on) => {
                 self.hour12 = on;
@@ -12807,6 +12830,15 @@ fn binding(press: text_editor::KeyPress) -> Option<text_editor::Binding<Message>
             back: shift,
         }));
     }
+    if command
+        && !shift
+        && matches!(
+            press.key.as_ref(),
+            Key::Named(iced::keyboard::key::Named::Enter)
+        )
+    {
+        return Some(text_editor::Binding::Custom(Message::ToggleTaskUnderCaret));
+    }
     match (character.as_deref(), command, shift) {
         (Some("z" | "Z"), true, true) | (Some("y" | "Y"), true, _) => {
             Some(text_editor::Binding::Custom(Message::Redo))
@@ -15091,6 +15123,42 @@ mod app_tests {
     }
 
     #[test]
+    fn a_key_checks_the_task_the_caret_is_on_and_makes_a_task_of_a_plain_line() {
+        use iced::widget::text_editor;
+        let _turn = one_at_a_time();
+        let dir = folder("task-key");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::TitleChanged("List".to_owned()));
+        for text in ["- [ ] call", "\nplain line", "\n- [x] done"] {
+            let _ = app.update(Message::BodyEdited(text_editor::Action::Edit(
+                text_editor::Edit::Paste(std::sync::Arc::new(text.to_owned())),
+            )));
+        }
+        let put = |app: &mut App, line: usize| {
+            app.body.place(text_editor::Cursor {
+                position: text_editor::Position { line, column: 3 },
+                selection: None,
+            });
+        };
+        // Checked, then cleared.
+        put(&mut app, 0);
+        let _ = app.update(Message::ToggleTaskUnderCaret);
+        assert_eq!(app.body.text().lines().next(), Some("- [x] call"));
+        let _ = app.update(Message::ToggleTaskUnderCaret);
+        assert_eq!(app.body.text().lines().next(), Some("- [ ] call"));
+        // A checked one is cleared.
+        put(&mut app, 2);
+        let _ = app.update(Message::ToggleTaskUnderCaret);
+        assert_eq!(app.body.text().lines().nth(2), Some("- [ ] done"));
+        // A plain line becomes a task, and the other lines are as they were.
+        put(&mut app, 1);
+        let _ = app.update(Message::ToggleTaskUnderCaret);
+        assert_eq!(app.body.text(), "- [ ] call\n- [ ] plain line\n- [ ] done");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_settings_icon_switches_the_right_panel_and_back() {
         let _turn = one_at_a_time();
         let dir = folder("note-settings");
@@ -15393,7 +15461,7 @@ mod app_tests {
         let _ = app.update(Message::NewNote);
         let passage = "The **quick** brown fox jumpd over ==the== lazy dog, and ~~then~~ it did not.\n\
 A second paragraph with a [link](https://example.com/a) in it, and a # that is not a heading.\n\
-Some `code` and *an em* and __strong__ words. Done.\n- last, a list item with no Enter after it";
+Some code and *an em* and __strong__ words. Done.\n- last, a list item with no Enter after it";
         type_through(&mut app, passage, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
