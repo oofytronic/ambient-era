@@ -55,3 +55,13 @@ A template is a note tagged `Templates`. The picker is a view of those notes. Th
 
 While a card is up (`App::overlay_open`), the Tasks arrow and Enter keys and the type-into-the-page fallback stand down. Add a card to `modal()` and to the headless draw test, so it is checked at every width.
 
+## Link, rename, graph, and the note panel
+
+A note's link is a hidden line, `%%ambient-link: https://...%%`, at the end of its body beside the tags line, either order, each at most once. It is part of the sealed body and changes no wire format. `ambient_cli::split_note_meta` and `join_note_meta` read and write both lines. `split_note_tags` still returns prose and strips both, so a reader that only wants prose never sees a hidden line. Only an address `files::link_ok` would open is kept.
+
+Renaming or merging a group rewrites the tag line of every note in it, as a new snapshot each, through `apply_notes`. The open note is changed in the editor and saved as an edit, so it never races a second write. A note with two versions is left alone and counted. The order, folds, and group in view that this computer keeps by group key follow the new name. Older versions of a note keep the old tag. That is how the log works, and it is not a bug.
+
+The graph draws the second part of a tag as a circle inside its group (`settle_nested`), limits itself to one group (`graph_group`), and is panned and zoomed by `GraphCam`, which `GraphView::fit` applies to every dot the same way.
+
+The settings panel lists facts about the open note (`NOTE_FACTS`). Which are hidden is a local `props` file and applies to every note. It is not saved on a note.
+

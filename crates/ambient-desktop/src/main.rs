@@ -279,6 +279,14 @@ struct App {
     capture_task: bool,
     /// The list of templates a new note can start from.
     templates_open: bool,
+    /// Renaming or merging a group: its key, and the new name as typed.
+    rename: Option<(String, String)>,
+    /// The graph limited to one group, by its key, and how it is panned and zoomed.
+    graph_group: Option<String>,
+    /// Facts about a note the settings panel leaves out, and whether the list of them is open.
+    hidden_props: BTreeSet<String>,
+    props_open: bool,
+    graph_cam: GraphCam,
     /// The paragraph under the caret is the only one at full strength. Focus mode only.
     spotlight: bool,
     /// Insert stays behind one button until it is opened.
@@ -331,6 +339,9 @@ struct App {
     context_shut: bool,
     /// Tags on the open note. Not words in the writing.
     tags: Vec<String>,
+    /// The one address the open note points at, kept in a hidden line beside the tags.
+    link: String,
+    link_draft: String,
     tag_draft: String,
     /// The notes the open note links to, as id and title.
     links_to: Vec<(String, String)>,
@@ -593,6 +604,10 @@ enum Message {
     /// Show the notes that were deleted, with a way to bring each back, or go back.
     ToggleDeleted,
     TogglePin(String),
+    LinkDraft(String),
+    SetLink,
+    RemoveLink,
+    OpenNoteLink,
     PaletteOpen,
     PaletteQuery(String),
     PaletteMove(i32),
@@ -606,6 +621,13 @@ enum Message {
     FromTemplate(Option<String>),
     /// Escape, or a press beside a card: close the palette, the capture box, or the templates.
     CloseOverlays,
+    RenameGroupOpen(String),
+    RenameText(String),
+    RenameSave,
+    GraphGroup(Option<String>),
+    GraphCamera(GraphCam),
+    ToggleProp(&'static str),
+    ToggleProps,
     /// Bring a deleted note back, as it read before.
     RestoreNote(String),
     /// Show the versions the open note has had, or go back to it.
@@ -1217,6 +1239,11 @@ impl App {
             capture: None,
             capture_task: false,
             templates_open: false,
+            rename: None,
+            graph_group: None,
+            hidden_props: BTreeSet::new(),
+            props_open: false,
+            graph_cam: GraphCam::default(),
             spotlight: false,
             insert_open: false,
             done_on: BTreeMap::new(),
@@ -1240,6 +1267,8 @@ impl App {
             show_context: false,
             context_shut: false,
             tags: Vec::new(),
+            link: String::new(),
+            link_draft: String::new(),
             tag_draft: String::new(),
             links_to: Vec::new(),
             graph_edges: Vec::new(),
@@ -1291,6 +1320,7 @@ impl App {
         }
         app.folded = profile::load_folds(&app.dir);
         app.pinned = profile::load_pinned(&app.dir);
+        app.hidden_props = profile::load_hidden_props(&app.dir);
         app.done_on = profile::load_done_on(&app.dir);
         app.drafts = profile::load_drafts(&app.dir);
         app.orders = profile::load_order(&app.dir);
@@ -1644,6 +1674,27 @@ impl App {
                 self.tag_draft = tag;
                 self.add_tag();
                 focus_named("note-tag")
+            }
+            Message::LinkDraft(text) => {
+                self.link_draft = text;
+                Task::none()
+            }
+            Message::SetLink => {
+                self.set_link();
+                Task::none()
+            }
+            Message::RemoveLink => {
+                if !self.link.is_empty() {
+                    self.link.clear();
+                    self.arm_pause();
+                }
+                Task::none()
+            }
+            Message::OpenNoteLink => {
+                if let Err(err) = files::open_url(&self.link) {
+                    self.say(&err);
+                }
+                Task::none()
             }
             Message::AddTag => {
                 self.add_tag();
@@ -2233,7 +2284,46 @@ impl App {
                 self.templates_open = false;
                 self.note_from_template(from.as_deref())
             }
+            Message::GraphGroup(group) => {
+                self.graph_group = group;
+                self.graph_cam = GraphCam::default();
+                self.refresh_graph();
+                Task::none()
+            }
+            Message::ToggleProp(key) => {
+                if !self.hidden_props.remove(key) {
+                    self.hidden_props.insert(key.to_owned());
+                }
+                if let Err(err) = profile::store_hidden_props(&self.dir, &self.hidden_props) {
+                    self.say(&err);
+                }
+                Task::none()
+            }
+            Message::ToggleProps => {
+                self.props_open = !self.props_open;
+                Task::none()
+            }
+            Message::GraphCamera(cam) => {
+                self.graph_cam = cam;
+                Task::none()
+            }
+            Message::RenameGroupOpen(key) => {
+                self.palette = None;
+                self.capture = None;
+                self.templates_open = false;
+                let shown = self.group_display(&key);
+                self.rename = Some((key, shown));
+                focus_named("rename-input")
+            }
+            Message::RenameText(text) => {
+                if let Some(held) = self.rename.as_mut() {
+                    held.1 = text;
+                }
+                Task::none()
+            }
+            Message::RenameSave => self.rename_save(),
             Message::CloseOverlays => {
+                self.rename = None;
                 self.palette = None;
                 self.capture = None;
                 self.templates_open = false;
@@ -2303,6 +2393,7 @@ impl App {
             Message::ToggleGraph => {
                 self.deleted_open = false;
                 self.graph_open = !self.graph_open;
+                self.graph_cam = GraphCam::default();
                 // On a narrow window the graph is the thing opened from the list, and closing it
                 // goes back to the list.
                 if self.compact() {
@@ -2740,6 +2831,9 @@ impl App {
         }
         if self.capture.is_some() {
             return Some((self.capture_card(), Message::CloseOverlays));
+        }
+        if self.rename.is_some() {
+            return Some((self.rename_card(), Message::CloseOverlays));
         }
         if self.templates_open {
             return Some((self.templates_card(), Message::CloseOverlays));
@@ -3380,8 +3474,17 @@ impl App {
             .list_drag
             .as_ref()
             .is_some_and(|drag| drag.group == path && drag.over.as_deref() == Some(top.as_str()));
+        let over = self.hover_row.as_deref() == Some(top.as_str());
+        let mut face = row![name_row].align_y(iced::Alignment::Center);
+        if over && self.list_drag.is_none() {
+            face = face.push(mini_button(
+                mini_handle(Mini::Pencil, self.is_dark()),
+                "Rename or merge this group",
+                Message::RenameGroupOpen(group_key(&tag_path(path))),
+            ));
+        }
         let line = line.push(
-            mouse_area(name_row)
+            mouse_area(face)
                 .on_enter(Message::RowHover(top.clone(), true))
                 .on_exit(Message::RowHover(top, false)),
         );
@@ -4893,7 +4996,10 @@ impl App {
 
     /// A card that takes the keyboard is up: the palette, the quick capture box, or the templates.
     fn overlay_open(&self) -> bool {
-        self.palette.is_some() || self.capture.is_some() || self.templates_open
+        self.palette.is_some()
+            || self.capture.is_some()
+            || self.templates_open
+            || self.rename.is_some()
     }
 
     /// What the palette offers for what is typed: the things it can do, then the notes whose
@@ -4920,6 +5026,13 @@ impl App {
             ("Focus mode", "Ctrl+.", Message::ToggleFocus),
             ("Switch light and dark", "", Message::ToggleTheme),
         ];
+        if let Some(group) = &self.tag {
+            actions.push((
+                "Rename or merge this group",
+                "Every note in it",
+                Message::RenameGroupOpen(group_key(&tag_path(group))),
+            ));
+        }
         if let Some(id) = &self.selected {
             let held = self.pinned.contains(id);
             actions.push((
@@ -5208,11 +5321,14 @@ impl App {
                     self.say("That template is not here.");
                     return Task::none();
                 };
-                let (prose, mut tags) = ambient_cli::split_note_tags(&body);
+                let (prose, mut meta) = ambient_cli::split_note_meta(&body);
                 let key = group_key(&tag_path(TEMPLATES));
-                tags.retain(|tag| group_key(&tag_path(tag)) != key);
+                meta.tags.retain(|tag| group_key(&tag_path(tag)) != key);
                 let prose = prose.replace("{{date}}", &daily_title(today));
-                (title, ambient_cli::join_note_tags(&prose, &tags))
+                (
+                    title,
+                    ambient_cli::join_note_meta(&prose, &meta.tags, &meta.link),
+                )
             }
         };
         self.screen = Screen::Notes;
@@ -6554,10 +6670,43 @@ impl App {
             .align_y(iced::Alignment::Center)
             .into()
         };
+        // One chip for each group, to look at it alone, and a way back to the whole.
+        let mut tops: BTreeMap<String, String> = BTreeMap::new();
+        for note in self.catalog.iter().filter(|note| !is_tasks_note(note)) {
+            if let Some((key, shown)) = graph_top(note) {
+                tops.entry(key).or_insert(shown);
+            }
+        }
+        let chip = |label: String, key: Option<String>| {
+            let on = self.graph_group == key;
+            button(text(label).size(12))
+                .padding([4.0, 8.0])
+                .on_press(Message::GraphGroup(key))
+                .style(list_row(on))
+        };
+        let mut chips = row![chip("All".to_owned(), None)]
+            .spacing(6)
+            .align_y(iced::Alignment::Center);
+        for (key, shown) in tops {
+            chips = chips.push(chip(shown, Some(key)));
+        }
+        let fit = (self.graph_cam != GraphCam::default())
+            .then(|| ghost_label("Fit", Message::GraphCamera(GraphCam::default())));
+        let mut bar = row![container(chips.wrap().vertical_spacing(4)).width(Fill)]
+            .spacing(8)
+            .align_y(iced::Alignment::Center);
+        if let Some(fit) = fit {
+            bar = bar.push(fit);
+        }
         column![
             head,
+            bar,
+            text("Scroll to zoom. Drag the page to move it.")
+                .size(11)
+                .color(ink.muted),
             container(
                 canvas::Canvas::new(GraphView {
+                    cam: self.graph_cam,
                     data,
                     selected: self.selected.clone(),
                 })
@@ -6741,6 +6890,8 @@ impl App {
         }
         self.title_text.clear();
         self.tags.clear();
+        self.link.clear();
+        self.link_draft.clear();
         self.tag_draft.clear();
         self.body.load("");
         self.disarm_pause();
@@ -6761,12 +6912,14 @@ impl App {
     }
 
     fn stored_body(&self) -> String {
-        ambient_cli::join_note_tags(&self.body.text(), &self.tags)
+        ambient_cli::join_note_meta(&self.body.text(), &self.tags, &self.link)
     }
 
     fn load_sealed(&mut self, sealed: &str) {
-        let (prose, tags) = ambient_cli::split_note_tags(sealed);
-        self.tags = tags;
+        let (prose, meta) = ambient_cli::split_note_meta(sealed);
+        self.tags = meta.tags;
+        self.link = meta.link;
+        self.link_draft.clear();
         self.tag_draft.clear();
         self.body.load(&prose);
     }
@@ -6785,6 +6938,28 @@ impl App {
         }
         self.tags.push(tag);
         self.tag_draft.clear();
+        self.arm_pause();
+    }
+
+    /// Keep what was typed in the link field, as the note's one link. A bare address gets
+    /// `https://`, and one this window would not open is not kept.
+    fn set_link(&mut self) {
+        let typed = self.link_draft.trim().to_owned();
+        if typed.is_empty() {
+            return;
+        }
+        // Only an address with no scheme at all is given one. `javascript:` and its kind are not.
+        let address = if typed.contains(':') {
+            typed
+        } else {
+            format!("https://{typed}")
+        };
+        let Some(address) = ambient_cli::clean_link(&address).filter(|a| files::link_ok(a)) else {
+            self.say("That is not a link this window can keep. Use an https:// address.");
+            return;
+        };
+        self.link = address;
+        self.link_draft.clear();
         self.arm_pause();
     }
 
@@ -6839,6 +7014,33 @@ impl App {
                 .width(140)
                 .style(field_style),
         );
+        if self.link.is_empty() {
+            chips = chips.push(
+                text_input("Add a link", &self.link_draft)
+                    .id(iced::widget::Id::new("note-link"))
+                    .on_input(Message::LinkDraft)
+                    .on_submit(Message::SetLink)
+                    .padding([4, 8])
+                    .size(13)
+                    .width(140)
+                    .style(field_style),
+            );
+        } else {
+            chips = chips.push(hover_label(
+                button(text(format!("↗ {}", link_host(&self.link))).size(12))
+                    .padding([4, 8])
+                    .on_press(Message::OpenNoteLink)
+                    .style(ghost_style),
+                "Open this note's link",
+            ));
+            chips = chips.push(hover_label(
+                button(text("×").size(12))
+                    .padding([4, 6])
+                    .on_press(Message::RemoveLink)
+                    .style(ghost_style),
+                "Remove the link",
+            ));
+        }
         // The same two rows whether or not there is anything to offer. The field is in the first,
         // and if the shape of what holds it changed on the first key, the field would be built
         // again, lose the caret, and the next keys would go to the page.
@@ -6925,9 +7127,31 @@ impl App {
     }
 
     fn refresh_graph(&mut self) {
-        self.graph = self
-            .graph_open
-            .then(|| Arc::new(build_graph(&self.catalog, &self.graph_edges)));
+        if !self.graph_open {
+            self.graph = None;
+            return;
+        }
+        let one: Vec<NoteSummary> = self
+            .graph_group
+            .as_ref()
+            .map(|key| {
+                self.catalog
+                    .iter()
+                    .filter(|note| graph_top(note).is_some_and(|(have, _)| have == *key))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        // A group that is gone, because it was renamed or emptied, is no longer the one in view.
+        if one.is_empty() {
+            self.graph_group = None;
+        }
+        let shown: &[NoteSummary] = if self.graph_group.is_some() {
+            &one
+        } else {
+            &self.catalog
+        };
+        self.graph = Some(Arc::new(build_graph(shown, &self.graph_edges)));
     }
 
     fn install_latest(&mut self) -> bool {
@@ -8554,39 +8778,31 @@ impl App {
     ) -> iced::widget::Column<'a, Message> {
         let ink = self.ink();
         let saved = self.selected.is_some();
-        let home = if !saved {
-            "Not saved yet.".to_owned()
-        } else if self.note_writer.is_empty() {
-            "This computer.".to_owned()
-        } else {
-            self.note_writer.clone()
-        };
-        block = block.push(
-            column![
-                text("HOME DEVICE").size(11).color(ink.muted),
-                text(home).size(15),
-            ]
-            .spacing(4)
-            .padding([0, 8]),
-        );
-        if saved || !self.tags.is_empty() {
-            let tags = if self.tags.is_empty() {
-                "No tags.".to_owned()
-            } else {
-                self.tags.join(", ")
+        let mut facts = column![].spacing(10).padding([0, 8]);
+        let mut shown_any = false;
+        for (key, label) in NOTE_FACTS {
+            if self.hidden_props.contains(*key) {
+                continue;
+            }
+            let Some(value) = self.note_fact(key) else {
+                continue;
             };
-            let id = self.selected.clone().unwrap_or_default();
-            block = block.push(
+            shown_any = true;
+            let small = *key == "id";
+            facts = facts.push(
                 column![
-                    text("TAGS").size(11).color(ink.muted),
-                    text(tags).size(15),
-                    text("ID").size(11).color(ink.muted),
-                    text(id).size(13).color(ink.muted),
+                    text(label.to_uppercase()).size(11).color(ink.muted),
+                    text(value)
+                        .size(if small { 13 } else { 15 })
+                        .color(if small { ink.muted } else { ink.text }),
                 ]
-                .spacing(4)
-                .padding([0, 8]),
+                .spacing(4),
             );
         }
+        if shown_any {
+            block = block.push(facts);
+        }
+        block = block.push(self.props_picker());
         let has_words = saved || !self.body.text().is_empty() || !self.title_text.is_empty();
         if has_words || saved || self.editor_dirty() {
             block = block.push(hairline());
@@ -8604,6 +8820,82 @@ impl App {
             ));
         }
         block
+    }
+
+    /// The value of one fact about the open note, as the panel shows it, or none when there is
+    /// nothing to say: a note with no link has no Link line.
+    fn note_fact(&self, key: &str) -> Option<String> {
+        let saved = self.selected.is_some();
+        match key {
+            "home" => Some(if !saved {
+                "Not saved yet.".to_owned()
+            } else if self.note_writer.is_empty() {
+                "This computer.".to_owned()
+            } else {
+                self.note_writer.clone()
+            }),
+            "tags" => (saved || !self.tags.is_empty()).then(|| {
+                if self.tags.is_empty() {
+                    "No tags.".to_owned()
+                } else {
+                    self.tags.join(", ")
+                }
+            }),
+            "link" => (!self.link.is_empty()).then(|| self.link.clone()),
+            "changed" => {
+                let at = self
+                    .catalog
+                    .iter()
+                    .find(|note| Some(&note.id) == self.selected.as_ref())?
+                    .modified?;
+                let found = clock::when(Some(at), &self.zone, clock::now_ms());
+                Some(format!("{} {}", found.day, found.time))
+            }
+            "words" => {
+                let count = self.body.text().split_whitespace().count();
+                Some(format!(
+                    "{count} {}",
+                    if count == 1 { "word" } else { "words" }
+                ))
+            }
+            "id" => self.selected.clone(),
+            _ => None,
+        }
+    }
+
+    /// A line that opens the list of facts, and the list, one box each, to show or hide them.
+    fn props_picker(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let mut picker = column![
+            button(
+                text(if self.props_open {
+                    "Hide this list"
+                } else {
+                    "Choose what shows here"
+                })
+                .size(12)
+                .color(ink.muted),
+            )
+            .padding([2, 8])
+            .on_press(Message::ToggleProps)
+            .style(ghost_style)
+        ]
+        .spacing(6);
+        if self.props_open {
+            for (key, label) in NOTE_FACTS {
+                picker = picker.push(
+                    container(
+                        checkbox(!self.hidden_props.contains(*key))
+                            .label(*label)
+                            .size(16)
+                            .text_size(13)
+                            .on_toggle(|_| Message::ToggleProp(key)),
+                    )
+                    .padding([0, 8]),
+                );
+            }
+        }
+        picker.into()
     }
 
     fn edge_toggle(&self, list: bool) -> Element<'_, Message> {
@@ -9555,6 +9847,8 @@ impl App {
         self.selected = None;
         self.title_text.clear();
         self.tags.clear();
+        self.link.clear();
+        self.link_draft.clear();
         self.tag_draft.clear();
         self.body.load("");
         self.disk_title.clear();
@@ -9613,6 +9907,8 @@ impl App {
         self.unsaved.retain(|(key, _, _)| key.is_some());
         self.title_text.clear();
         self.tags.clear();
+        self.link.clear();
+        self.link_draft.clear();
         self.tag_draft.clear();
         self.body.load("");
         self.disk_title.clear();
@@ -9876,6 +10172,228 @@ impl App {
         }
     }
 
+    /// A group as it is written in the tags, with the capitals the person gave it, from its key.
+    fn group_display(&self, key: &str) -> String {
+        let count = tag_path(key).len();
+        for note in &self.catalog {
+            for tag in &note.tags {
+                let parts = tag_path(tag);
+                if parts.len() >= count && group_key(parts.get(..count).unwrap_or(&[])) == key {
+                    return parts.get(..count).unwrap_or(&[]).join("/");
+                }
+            }
+        }
+        key.to_owned()
+    }
+
+    /// The tags of a note with the group `from` (a key) put at `to` instead. A tag in the group
+    /// keeps what follows the group's name. A tag that lands on one the note already has is kept
+    /// once. `None` when nothing changed.
+    fn moved_tags(tags: &[String], from: &str, to: &str) -> Option<Vec<String>> {
+        let count = tag_path(from).len();
+        let mut changed = false;
+        let mut out: Vec<String> = Vec::new();
+        for tag in tags {
+            let parts = tag_path(tag);
+            let head = parts.get(..count).unwrap_or(&[]);
+            let next = if parts.len() >= count && group_key(head) == from {
+                changed = true;
+                let mut joined = vec![to];
+                joined.extend(parts.get(count..).unwrap_or(&[]).iter().copied());
+                joined.join("/")
+            } else {
+                tag.clone()
+            };
+            if !out.iter().any(|have| have.eq_ignore_ascii_case(&next)) {
+                out.push(next);
+            }
+        }
+        changed.then_some(out)
+    }
+
+    /// How many notes have a tag in the group `key`.
+    fn group_size(&self, key: &str) -> usize {
+        self.catalog
+            .iter()
+            .filter(|note| in_group(&note.tags, key))
+            .count()
+    }
+
+    fn rename_save(&mut self) -> Task<Message> {
+        let Some((from, typed)) = self.rename.clone() else {
+            return Task::none();
+        };
+        let Some(to) = clean_tag(&typed) else {
+            self.say("Write the new name of the group.");
+            return Task::none();
+        };
+        if group_key(&tag_path(&to)) == from && to == self.group_display(&from) {
+            self.rename = None;
+            return Task::none();
+        }
+        let mut writes: Vec<(String, String, String)> = Vec::new();
+        let mut skipped = 0_usize;
+        let ids: Vec<String> = self
+            .catalog
+            .iter()
+            .filter(|note| in_group(&note.tags, &from))
+            .map(|note| note.id.clone())
+            .collect();
+        for id in ids {
+            if self.selected.as_deref() == Some(id.as_str()) {
+                // The note in the editor changes in the editor, and saves as any edit does.
+                if let Some(tags) = Self::moved_tags(&self.tags, &from, &to) {
+                    self.tags = tags;
+                    self.arm_pause();
+                }
+                continue;
+            }
+            let Some((body, conflict, title)) = self.task_source(&id) else {
+                continue;
+            };
+            if conflict {
+                skipped += 1;
+                continue;
+            }
+            let (prose, meta) = ambient_cli::split_note_meta(&body);
+            if let Some(tags) = Self::moved_tags(&meta.tags, &from, &to) {
+                let sealed = ambient_cli::join_note_meta(&prose, &tags, &meta.link);
+                writes.push((id, title, sealed));
+            }
+        }
+        self.move_local_group(&from, &to);
+        self.rename = None;
+        self.say(&if skipped == 0 {
+            format!("Renamed to {to}.")
+        } else {
+            format!("Renamed to {to}. {skipped} note(s) with two versions were left as they are.")
+        });
+        if writes.is_empty() {
+            return Task::none();
+        }
+        for (id, title, body) in &writes {
+            if let Some(slot) = self
+                .unsaved
+                .iter_mut()
+                .find(|(key, _, _)| key.as_deref() == Some(id.as_str()))
+            {
+                title.clone_into(&mut slot.1);
+                body.clone_into(&mut slot.2);
+            }
+        }
+        self.apply_notes(writes)
+    }
+
+    /// The things this computer keeps about a group by its key follow it to the new name: the
+    /// order set by hand, which groups are folded, and the group in view.
+    fn move_local_group(&mut self, from: &str, to: &str) {
+        let target = group_key(&tag_path(to));
+        let rekey = |key: &str| -> Option<String> {
+            if key == from {
+                Some(target.clone())
+            } else {
+                key.strip_prefix(from)
+                    .filter(|rest| rest.starts_with('/'))
+                    .map(|rest| format!("{target}{rest}"))
+            }
+        };
+        let mut orders: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (key, ids) in std::mem::take(&mut self.orders) {
+            let key = rekey(&key).unwrap_or(key);
+            let slot = orders.entry(key).or_default();
+            for id in ids {
+                if !slot.contains(&id) {
+                    slot.push(id);
+                }
+            }
+        }
+        self.orders = orders;
+        self.folded = std::mem::take(&mut self.folded)
+            .into_iter()
+            .map(|key| rekey(&key).unwrap_or(key))
+            .collect();
+        if let Some(tag) = self.tag.clone()
+            && let Some(key) = rekey(&group_key(&tag_path(&tag)))
+        {
+            self.tag = Some(key);
+        }
+        if let Err(err) = profile::store_order(&self.dir, &self.orders) {
+            self.say(&err);
+        }
+        if let Err(err) = profile::store_folds(&self.dir, &self.folded) {
+            self.say(&err);
+        }
+    }
+
+    fn rename_card(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let (from, typed) = self.rename.clone().unwrap_or_default();
+        let target = clean_tag(&typed).map(|name| group_key(&tag_path(&name)));
+        let size = self.group_size(&from);
+        let note = match target {
+            Some(key) if key != from && self.group_size(&key) > 0 => {
+                "A group with that name is here. The notes are joined into it.".to_owned()
+            }
+            _ => format!(
+                "{size} {} change. Groups inside it keep their names under the new one.",
+                if size == 1 { "note" } else { "notes" }
+            ),
+        };
+        container(
+            column![
+                text("Rename or merge a group").font(serif()).size(18),
+                text(note).size(12).color(ink.muted),
+                text_input("New name", &typed)
+                    .id(iced::widget::Id::new("rename-input"))
+                    .on_input(Message::RenameText)
+                    .on_submit(Message::RenameSave)
+                    .padding(10)
+                    .width(Fill)
+                    .style(field_style),
+                row![
+                    ghost_label("Cancel", Message::CloseOverlays),
+                    space().width(Fill),
+                    action_label("Rename", Message::RenameSave),
+                ]
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(10),
+        )
+        .width(Fill)
+        .max_width(420)
+        .padding(18)
+        .style(card_style)
+        .into()
+    }
+
+    /// Write several notes in one go, in the background.
+    fn apply_notes(&self, writes: Vec<(String, String, String)>) -> Task<Message> {
+        #[cfg(test)]
+        for (id, title, body) in &writes {
+            tests_support::record_write(Some(id), title, body);
+        }
+        let dir = self.dir.clone();
+        Task::perform(
+            async move {
+                let (sender, receiver) = iced::futures::channel::oneshot::channel();
+                std::thread::spawn(move || {
+                    let mut last = Err("Nothing to write.".to_owned());
+                    for (id, title, body) in &writes {
+                        last = write_snapshot(&dir, Some(id), title, body).map(|(_, notes)| notes);
+                        if last.is_err() {
+                            break;
+                        }
+                    }
+                    let _ = sender.send(last);
+                });
+                receiver
+                    .await
+                    .unwrap_or_else(|_| Err("Save stopped before it finished.".to_owned()))
+            },
+            Message::Applied,
+        )
+    }
+
     fn apply_note(&self, id: Option<String>, title: String, body: String) -> Task<Message> {
         #[cfg(test)]
         tests_support::record_write(id.as_deref(), &title, &body);
@@ -10122,15 +10640,22 @@ impl App {
         Task::none()
     }
 
-    fn reset_after_wipe(&mut self) {
-        // The words in the personal dictionary are from the notes that were just erased. They
-        // must not be written back into the next notebook's file.
+    /// What this computer kept beside the notes, which belonged to the notebook that was erased.
+    fn forget_local_choices(&mut self) {
         self.my_words.clear();
         self.orders.clear();
         self.folded.clear();
         self.pinned.clear();
+        self.hidden_props.clear();
+        self.graph_group = None;
         self.drafts.clear();
         self.done_on.clear();
+    }
+
+    fn reset_after_wipe(&mut self) {
+        // The words in the personal dictionary are from the notes that were just erased. They
+        // must not be written back into the next notebook's file.
+        self.forget_local_choices();
         self.spotlight = false;
         self.held_repeat = None;
         self.task_pick = None;
@@ -10148,6 +10673,8 @@ impl App {
         self.selected = None;
         self.title_text.clear();
         self.tags.clear();
+        self.link.clear();
+        self.link_draft.clear();
         self.tag_draft.clear();
         self.body.load("");
         self.disk_title.clear();
@@ -11481,6 +12008,8 @@ struct GraphNode {
 #[derive(Debug)]
 struct GraphGroup {
     name: String,
+    /// 0 for a group of its own, 1 for a circle inside one, made by the second part of a tag.
+    depth: usize,
     shade: Option<usize>,
     x: f32,
     y: f32,
@@ -11508,12 +12037,16 @@ const GROUP_GAP: f32 = 60.0;
 /// notes give the same picture.
 fn build_graph(catalog: &[NoteSummary], links: &[(String, String)]) -> GraphData {
     let notes: Vec<&NoteSummary> = catalog.iter().filter(|note| !is_tasks_note(note)).collect();
-    let tops: Vec<Option<(String, String)>> = notes
+    let tops: Vec<Option<(String, String)>> = notes.iter().map(|note| graph_top(note)).collect();
+    // The second part of the same tag, which is a circle inside the group's circle.
+    let subs: Vec<Option<(String, String)>> = notes
         .iter()
         .map(|note| {
             note.tags.iter().find_map(|tag| {
-                let top = *tag_path(tag).first()?;
-                Some((top.to_lowercase(), top.to_owned()))
+                let parts = tag_path(tag);
+                parts.first()?;
+                let sub = *parts.get(1)?;
+                Some((sub.to_lowercase(), sub.to_owned()))
             })
         })
         .collect();
@@ -11541,33 +12074,17 @@ fn build_graph(catalog: &[NoteSummary], links: &[(String, String)]) -> GraphData
         .collect();
 
     // Each group on its own: dots in a sunflower, then a few rounds to bring linked dots close.
-    let mut local = vec![(0.0_f32, 0.0_f32); notes.len()];
-    let mut radius = vec![0.0_f32; count];
-    for group in 0..count {
-        let members: Vec<usize> = (0..notes.len())
-            .filter(|&index| group_of.get(index) == Some(&group))
-            .collect();
-        let spots = settle_group(&members, &edges);
-        let mut far = 0.0_f32;
-        for (&index, &(x, y)) in members.iter().zip(&spots) {
-            if let Some(spot) = local.get_mut(index) {
-                *spot = (x, y);
-            }
-            far = far.max(x.hypot(y));
-        }
-        if let Some(r) = radius.get_mut(group) {
-            *r = far + GROUP_PAD;
-        }
-    }
+    let (local, radius, inner) = settle_all(&group_of, count, &subs, &edges);
 
     // The groups apart from each other, nearest where they link most.
     let between = links_between(&edges, &group_of, count);
-    let centers = place_groups(&radius, &between);
+    let centers = place_groups(&radius, &between, GROUP_GAP);
 
-    let groups: Vec<GraphGroup> = (0..count)
+    let mut groups: Vec<GraphGroup> = (0..count)
         .map(|group| {
             let (x, y) = centers.get(group).copied().unwrap_or((0.0, 0.0));
             GraphGroup {
+                depth: 0,
                 name: keys
                     .get(group)
                     .and_then(|key| names.get(key))
@@ -11580,6 +12097,17 @@ fn build_graph(catalog: &[NoteSummary], links: &[(String, String)]) -> GraphData
             }
         })
         .collect();
+    for (group, circle) in inner {
+        let (cx, cy) = centers.get(group).copied().unwrap_or((0.0, 0.0));
+        groups.push(GraphGroup {
+            name: circle.name,
+            depth: 1,
+            shade: (group < keys.len()).then_some(group),
+            x: cx + circle.x,
+            y: cy + circle.y,
+            r: circle.r,
+        });
+    }
     let dots: Vec<GraphNode> = notes
         .iter()
         .enumerate()
@@ -11641,6 +12169,170 @@ fn links_between(edges: &[(usize, usize)], group_of: &[usize], count: usize) -> 
         }
     }
     between
+}
+
+/// Spots, radii, and inner circles with the group each is in: see `settle_all`.
+type Settled = (Vec<(f32, f32)>, Vec<f32>, Vec<(usize, SubCircle)>);
+
+/// Every group laid out on its own: where each note sits in its group, how far each group's
+/// circle reaches, and the circles inside the groups, with the group each is in.
+fn settle_all(
+    group_of: &[usize],
+    count: usize,
+    subs: &[Option<(String, String)>],
+    edges: &[(usize, usize)],
+) -> Settled {
+    let total = group_of.len();
+    let mut local = vec![(0.0_f32, 0.0_f32); total];
+    let mut radius = vec![0.0_f32; count];
+    let mut inner: Vec<(usize, SubCircle)> = Vec::new();
+    for group in 0..count {
+        let members: Vec<usize> = (0..total)
+            .filter(|&index| group_of.get(index) == Some(&group))
+            .collect();
+        let nested = settle_nested(&members, subs, edges, total);
+        for (&index, &spot) in members.iter().zip(&nested.spots) {
+            if let Some(held) = local.get_mut(index) {
+                *held = spot;
+            }
+        }
+        if let Some(r) = radius.get_mut(group) {
+            *r = nested.radius;
+        }
+        inner.extend(nested.circles.into_iter().map(|circle| (group, circle)));
+    }
+    (local, radius, inner)
+}
+
+/// The top of a note's first tag: the group its dot is in.
+fn graph_top(note: &NoteSummary) -> Option<(String, String)> {
+    note.tags.iter().find_map(|tag| {
+        let top = *tag_path(tag).first()?;
+        Some((top.to_lowercase(), top.to_owned()))
+    })
+}
+
+/// A circle inside a group's circle, in the group's own coordinates.
+struct SubCircle {
+    name: String,
+    x: f32,
+    y: f32,
+    r: f32,
+}
+
+/// Where a group's notes sit in it, how far its circle reaches, and the circles inside it.
+struct Nested {
+    spots: Vec<(f32, f32)>,
+    radius: f32,
+    circles: Vec<SubCircle>,
+}
+
+/// A group's notes laid out. Notes with the same second part of their tag are a circle of their
+/// own inside the group, the circles are set apart like groups are, and the notes with no second
+/// part are loose among them. With no second parts it is the plain group.
+#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+fn settle_nested(
+    members: &[usize],
+    subs: &[Option<(String, String)>],
+    edges: &[(usize, usize)],
+    total: usize,
+) -> Nested {
+    let mut named: BTreeMap<String, (String, Vec<usize>)> = BTreeMap::new();
+    let mut loose: Vec<usize> = Vec::new();
+    for &note in members {
+        match subs.get(note).and_then(Option::as_ref) {
+            Some((key, shown)) => named
+                .entry(key.clone())
+                .or_insert_with(|| (shown.clone(), Vec::new()))
+                .1
+                .push(note),
+            None => loose.push(note),
+        }
+    }
+    if named.is_empty() {
+        let spots = settle_group(members, edges);
+        let far = spots
+            .iter()
+            .fold(0.0_f32, |far, &(x, y)| far.max(x.hypot(y)));
+        return Nested {
+            spots,
+            radius: far + GROUP_PAD,
+            circles: Vec::new(),
+        };
+    }
+    let mut parts: Vec<(Option<String>, Vec<usize>)> = named
+        .into_values()
+        .map(|(shown, notes)| (Some(shown), notes))
+        .collect();
+    if !loose.is_empty() {
+        parts.push((None, loose));
+    }
+    let mut part_of = vec![usize::MAX; total];
+    let mut inside: Vec<Vec<(f32, f32)>> = Vec::new();
+    let mut radii: Vec<f32> = Vec::new();
+    for (at, (shown, notes)) in parts.iter().enumerate() {
+        for &note in notes {
+            if let Some(slot) = part_of.get_mut(note) {
+                *slot = at;
+            }
+        }
+        let spots = settle_group(notes, edges);
+        let far = spots
+            .iter()
+            .fold(0.0_f32, |far, &(x, y)| far.max(x.hypot(y)));
+        radii.push(
+            far + if shown.is_some() {
+                GROUP_PAD * 0.6
+            } else {
+                DOT_ROOM * 0.4
+            },
+        );
+        inside.push(spots);
+    }
+    let between = links_between(edges, &part_of, parts.len());
+    let mut centers = place_groups(&radii, &between, GROUP_GAP * 0.35);
+    // The middle of the circles is the middle of the group.
+    let share = centers.len().max(1) as f32;
+    let mean = centers
+        .iter()
+        .fold((0.0_f32, 0.0_f32), |sum, c| (sum.0 + c.0, sum.1 + c.1));
+    for c in &mut centers {
+        c.0 -= mean.0 / share;
+        c.1 -= mean.1 / share;
+    }
+    let mut spots = vec![(0.0_f32, 0.0_f32); members.len()];
+    let mut circles = Vec::new();
+    let mut reach = 0.0_f32;
+    for (at, (shown, notes)) in parts.iter().enumerate() {
+        let (cx, cy) = centers.get(at).copied().unwrap_or((0.0, 0.0));
+        let r = radii.get(at).copied().unwrap_or(0.0);
+        reach = reach.max(cx.hypot(cy) + r);
+        for (&note, &(x, y)) in notes
+            .iter()
+            .zip(inside.get(at).map_or(&[][..], Vec::as_slice))
+        {
+            if let Some(slot) = members
+                .iter()
+                .position(|&member| member == note)
+                .and_then(|place| spots.get_mut(place))
+            {
+                *slot = (cx + x, cy + y);
+            }
+        }
+        if let Some(name) = shown {
+            circles.push(SubCircle {
+                name: name.clone(),
+                x: cx,
+                y: cy,
+                r,
+            });
+        }
+    }
+    Nested {
+        spots,
+        radius: reach + GROUP_PAD * 0.6,
+        circles,
+    }
 }
 
 /// Spots, round the group's middle, for these notes: a sunflower, then linked pairs pulled
@@ -11717,13 +12409,13 @@ fn settle_group(members: &[usize], edges: &[(usize, usize)]) -> Vec<(f32, f32)> 
 /// Centers for circles of these radii, none touching another, with the pairs that have the most
 /// links between them kept nearest. `between[a][b]` is how many links join group `a` and `b`.
 #[allow(clippy::cast_precision_loss)]
-fn place_groups(radius: &[f32], between: &[Vec<u32>]) -> Vec<(f32, f32)> {
+fn place_groups(radius: &[f32], between: &[Vec<u32>], gap: f32) -> Vec<(f32, f32)> {
     let n = radius.len();
     let mut at: Vec<(f32, f32)> = Vec::with_capacity(n);
     let mut reach = 0.0_f32;
     for (k, r) in radius.iter().enumerate() {
         let turn = k as f32 * 2.399_963;
-        reach += r + GROUP_GAP * 0.5;
+        reach += r + gap * 0.5;
         at.push((reach * 0.6 * turn.cos(), reach * 0.6 * turn.sin()));
     }
     for _ in 0..300 {
@@ -11739,7 +12431,7 @@ fn place_groups(radius: &[f32], between: &[Vec<u32>]) -> Vec<(f32, f32)> {
                     radius.get(a).copied().unwrap_or(0.0),
                     radius.get(b).copied().unwrap_or(0.0),
                 );
-                let want = ra + rb + GROUP_GAP;
+                let want = ra + rb + gap;
                 let linked = between
                     .get(a)
                     .and_then(|row| row.get(b))
@@ -11773,8 +12465,25 @@ fn place_groups(radius: &[f32], between: &[Vec<u32>]) -> Vec<(f32, f32)> {
     at
 }
 
+/// How the graph is looked at: a zoom about the middle of the canvas, and a slide on top of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GraphCam {
+    zoom: f32,
+    pan: (f32, f32),
+}
+
+impl Default for GraphCam {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            pan: (0.0, 0.0),
+        }
+    }
+}
+
 /// What the graph canvas draws and answers.
 struct GraphView {
+    cam: GraphCam,
     data: Arc<GraphData>,
     selected: Option<String>,
 }
@@ -11782,10 +12491,32 @@ struct GraphView {
 #[derive(Default)]
 struct GraphHover {
     over: Option<usize>,
+    /// Where a drag of the empty page began, and the pan it began from.
+    drag: Option<(iced::Point, (f32, f32))>,
 }
 
 /// Room kept clear round the graph, in pixels, so nothing is drawn to the edge.
 const GRAPH_MARGIN: f32 = 56.0;
+
+impl GraphCam {
+    /// The look after `lines` of wheel at `at`, with the dot under the pointer staying where it
+    /// is. `None` when it would not change, at the ends of the zoom.
+    fn zoomed(self, lines: f32, at: iced::Point, size: Size) -> Option<Self> {
+        let zoom = (self.zoom * 1.12_f32.powf(lines)).clamp(0.4, 8.0);
+        if (zoom - self.zoom).abs() < 1e-4 {
+            return None;
+        }
+        let (mid_x, mid_y) = (size.width / 2.0, size.height / 2.0);
+        let ratio = zoom / self.zoom;
+        Some(Self {
+            zoom,
+            pan: (
+                at.x - mid_x - (at.x - mid_x - self.pan.0) * ratio,
+                at.y - mid_y - (at.y - mid_y - self.pan.1) * ratio,
+            ),
+        })
+    }
+}
 
 impl GraphView {
     /// How the world fits the canvas: the scale, and where the world's left and top land. The
@@ -11799,7 +12530,14 @@ impl GraphView {
         let scale = (room_w / world_w).min(room_h / world_h).min(1.3);
         let x = GRAPH_MARGIN + (room_w - world_w * scale) / 2.0 - left * scale;
         let y = GRAPH_MARGIN + (room_h - world_h * scale) / 2.0 - top * scale;
-        (scale, x, y)
+        // The look is a zoom about the middle, then a slide. It is the same line for every dot.
+        let (zoom, (slide_x, slide_y)) = (self.cam.zoom, self.cam.pan);
+        let (mid_x, mid_y) = (bounds.width / 2.0, bounds.height / 2.0);
+        (
+            scale * zoom,
+            mid_x * (1.0 - zoom) + x * zoom + slide_x,
+            mid_y * (1.0 - zoom) + y * zoom + slide_y,
+        )
     }
 
     fn spot(&self, x: f32, y: f32, bounds: iced::Rectangle) -> iced::Point {
@@ -11820,12 +12558,18 @@ impl GraphView {
             let color = shade_of(index);
             let middle = self.spot(group.x, group.y, area);
             let circle = canvas::Path::circle(middle, group.r * scale);
-            frame.fill(&circle, Color { a: 0.13, ..color });
+            // A circle inside a circle is a little paler, with a thinner line and smaller name.
+            let (wash, line, size) = if group.depth == 0 {
+                (0.13, 0.4, 13.0)
+            } else {
+                (0.10, 0.5, 11.0)
+            };
+            frame.fill(&circle, Color { a: wash, ..color });
             frame.stroke(
                 &circle,
                 canvas::Stroke::default()
-                    .with_width(1.2)
-                    .with_color(Color { a: 0.4, ..color }),
+                    .with_width(if group.depth == 0 { 1.2 } else { 0.9 })
+                    .with_color(Color { a: line, ..color }),
             );
             frame.fill_text(canvas::Text {
                 content: group.name.clone(),
@@ -11835,7 +12579,7 @@ impl GraphView {
                     a: 0.85,
                     ..ink.text
                 },
-                size: iced::Pixels(13.0),
+                size: iced::Pixels(size),
                 font: sans(),
                 align_x: iced::alignment::Horizontal::Center.into(),
                 align_y: iced::alignment::Vertical::Top,
@@ -11916,17 +12660,45 @@ impl canvas::Program<Message> for GraphView {
         bounds: iced::Rectangle,
         cursor: iced::mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
-        let over = cursor
-            .position_in(bounds)
-            .and_then(|at| self.nearest(at, bounds));
+        let here = cursor.position_in(bounds);
+        let over = here.and_then(|at| self.nearest(at, bounds));
         match event {
             iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
-                let node = self.data.nodes.get(over?)?;
-                Some(canvas::Action::publish(Message::GraphPick(node.id.clone())).and_capture())
+                if let Some(node) = over.and_then(|found| self.data.nodes.get(found)) {
+                    return Some(
+                        canvas::Action::publish(Message::GraphPick(node.id.clone())).and_capture(),
+                    );
+                }
+                state.drag = here.map(|at| (at, self.cam.pan));
+                state
+                    .drag
+                    .map(|_| canvas::Action::request_redraw().and_capture())
             }
-            iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) if over != state.over => {
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                state.drag.take().map(|_| canvas::Action::request_redraw())
+            }
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => {
+                if let (Some((start, base)), Some(at)) = (state.drag, here) {
+                    let cam = GraphCam {
+                        zoom: self.cam.zoom,
+                        pan: (base.0 + at.x - start.x, base.1 + at.y - start.y),
+                    };
+                    return Some(canvas::Action::publish(Message::GraphCamera(cam)).and_capture());
+                }
+                if over == state.over {
+                    return None;
+                }
                 state.over = over;
                 Some(canvas::Action::request_redraw())
+            }
+            iced::Event::Mouse(iced::mouse::Event::WheelScrolled { delta }) => {
+                let at = here?;
+                let lines = match delta {
+                    iced::mouse::ScrollDelta::Lines { y, .. } => *y,
+                    iced::mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
+                };
+                let cam = self.cam.zoomed(lines, at, bounds.size())?;
+                Some(canvas::Action::publish(Message::GraphCamera(cam)).and_capture())
             }
             _ => None,
         }
@@ -12596,6 +13368,17 @@ fn window_event(
 
 /// The keys that open the palette (`P`, and `K` where the editor is not using it for a link) and
 /// the quick capture box (`J`), from anywhere in the window.
+/// The facts about a note the settings panel can show, by the key that is kept when one is
+/// hidden, and in the order they are shown.
+const NOTE_FACTS: &[(&str, &str)] = &[
+    ("home", "Home device"),
+    ("tags", "Tags"),
+    ("link", "Link"),
+    ("changed", "Changed"),
+    ("words", "Words"),
+    ("id", "Note ID"),
+];
+
 /// The tag that makes a note a template.
 const TEMPLATES: &str = "Templates";
 
@@ -12617,6 +13400,14 @@ fn palette_matches(query: &str, label: &str) -> bool {
 /// `2026-11-25 Wednesday`: the title of a day's note. It sorts by date and names the day.
 fn daily_title(day: dates::Date) -> String {
     format!("{day} {}", day.weekday_full())
+}
+
+/// `example.org` out of `https://example.org/path?x`, for the chip.
+fn link_host(link: &str) -> String {
+    let rest = link.split_once("://").map_or(link, |(_, rest)| rest);
+    let rest = rest.strip_prefix("mailto:").unwrap_or(rest);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    clip_chars(host.to_owned(), 28)
 }
 
 fn overlay_hotkey(key: &Key) -> Option<Message> {
@@ -15206,10 +15997,15 @@ mod app_tests {
         catalog.push(summary("solo", &[]));
         let links = vec![("n0".to_owned(), "r0".to_owned())];
         let graph = super::build_graph(&catalog, &links);
-        assert_eq!(graph.groups.len(), 3, "novel, research, and no group");
+        assert_eq!(
+            graph.groups.len(),
+            4,
+            "novel, research, no group, and Part 1 as a circle inside novel"
+        );
         let names: Vec<_> = graph
             .groups
             .iter()
+            .take(3)
             .map(|group| group.name.as_str())
             .collect();
         assert_eq!(names, ["Novel", "research", "No group"]);
@@ -15225,6 +16021,9 @@ mod app_tests {
         // No two circles overlap, with room between.
         for (a, first) in graph.groups.iter().enumerate() {
             for second in &graph.groups[a + 1..] {
+                if first.depth != second.depth {
+                    continue;
+                }
                 let far = (first.x - second.x).hypot(first.y - second.y);
                 assert!(far >= first.r + second.r, "{first:?} {second:?}");
             }
@@ -15498,8 +16297,8 @@ mod app_tests {
             assert_eq!(tree.children.len(), 2, "two rows for {draft:?}");
             assert_eq!(
                 tree.children.first().map(|first| first.children.len()),
-                Some(1),
-                "the field is alone in the first row, for {draft:?}"
+                Some(2),
+                "the tag field and the link field are the first row, for {draft:?}"
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -16444,6 +17243,233 @@ mod app_tests {
         let _ = app.update(Message::TogglePin(id.clone()));
         assert!(app.pinned.is_empty());
         assert!(super::profile::load_pinned(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_note_can_keep_one_link_beside_its_tags() {
+        let _turn = one_at_a_time();
+        let dir = folder("notelink");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let _ = app.update(Message::BodyEdited(
+            iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert('x')),
+        ));
+        // A bare address gets a scheme, and what cannot be opened is not kept.
+        let _ = app.update(Message::LinkDraft("example.org/read".to_owned()));
+        let _ = app.update(Message::SetLink);
+        assert_eq!(app.link, "https://example.org/read");
+        assert!(app.link_draft.is_empty());
+        assert!(
+            app.stored_body()
+                .contains("%%ambient-link: https://example.org/read%%")
+        );
+        assert!(app.editor_dirty());
+        drop(app.view());
+        let _ = app.update(Message::RemoveLink);
+        let _ = app.update(Message::LinkDraft("javascript:alert(1)".to_owned()));
+        let _ = app.update(Message::SetLink);
+        assert!(app.link.is_empty(), "not an address this window opens");
+        // It comes back with the note, and a new note starts without one.
+        app.load_sealed("words\n%%ambient-link: https://a.org%%\n%%ambient-tags: t%%");
+        assert_eq!(
+            (app.link.as_str(), app.tags.clone()),
+            ("https://a.org", vec!["t".to_owned()])
+        );
+        assert_eq!(app.body.text(), "words");
+        assert_eq!(super::link_host("https://a.org/x?y"), "a.org");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_group_is_renamed_or_merged_in_every_note_and_in_what_this_computer_kept() {
+        let _turn = one_at_a_time();
+        let dir = folder("rename-group");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let tagged = |words: &str, tags: &[&str]| {
+            let tags: Vec<String> = tags.iter().map(|tag| (*tag).to_owned()).collect();
+            ambient_cli::join_note_tags(words, &tags)
+        };
+        let (a, _) =
+            write_snapshot(&dir, None, "One", &tagged("a", &["Novel", "Keep"])).expect("note");
+        let (b, _) =
+            write_snapshot(&dir, None, "Two", &tagged("b", &["Novel/Part 1"])).expect("note");
+        let (c, _) =
+            write_snapshot(&dir, None, "Three", &tagged("c", &["Book", "Novel"])).expect("note");
+        let _ = write_snapshot(&dir, None, "Four", &tagged("d", &["Novelty"])).expect("note");
+        app.adopt_open_book(Notebook::open(&dir).expect("open"));
+        app.orders
+            .insert("novel".to_owned(), vec![a.clone(), b.clone()]);
+        app.orders
+            .insert("book".to_owned(), vec![c.clone(), a.clone()]);
+        app.folded.insert("novel/part 1".to_owned());
+        app.tag = Some("novel".to_owned());
+        let _ = tests_support::take_writes();
+        // The pencil on a group's row opens the card with the name as it was written.
+        let _ = app.update(Message::RenameGroupOpen("novel".to_owned()));
+        assert_eq!(app.rename, Some(("novel".to_owned(), "Novel".to_owned())));
+        drop(app.view());
+        // Nothing typed is refused. A name that is a group already is a merge.
+        let _ = app.update(Message::RenameText("  ".to_owned()));
+        let _ = app.update(Message::RenameSave);
+        assert!(app.rename.is_some() && tests_support::take_writes().is_empty());
+        let _ = app.update(Message::RenameText("Book".to_owned()));
+        let _ = app.update(Message::RenameSave);
+        assert!(app.rename.is_none());
+        let mut writes = tests_support::take_writes();
+        writes.sort_by(|x, y| x.1.cmp(&y.1));
+        let tags_of = |body: &str| ambient_cli::split_note_tags(body).1;
+        // Three has Book and Novel: they become one tag. Four, `Novelty`, is a different word.
+        assert_eq!(writes.len(), 3, "{writes:?}");
+        assert_eq!(writes[0].1, "One");
+        assert_eq!(
+            tags_of(&writes[0].2),
+            vec!["Book".to_owned(), "Keep".to_owned()]
+        );
+        assert_eq!(tags_of(&writes[1].2), vec!["Book".to_owned()]);
+        assert_eq!(tags_of(&writes[2].2), vec!["Book/Part 1".to_owned()]);
+        assert_eq!(ambient_cli::split_note_tags(&writes[0].2).0, "a");
+        // The order, the fold, and the group in view followed the name, and merged.
+        assert!(!app.orders.contains_key("novel"));
+        assert_eq!(app.orders.get("book"), Some(&vec![c, a, b]));
+        assert!(app.folded.contains("book/part 1"));
+        assert_eq!(app.tag.as_deref(), Some("book"));
+        assert_eq!(
+            super::profile::load_order(&dir).get("book").map(Vec::len),
+            Some(3)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_second_part_of_a_tag_is_a_circle_inside_its_group_and_a_group_can_be_viewed_alone() {
+        let _turn = one_at_a_time();
+        let catalog = vec![
+            summary("a", &["Novel/Part 1"]),
+            summary("b", &["Novel/Part 1"]),
+            summary("c", &["Novel/Part 2"]),
+            summary("d", &["Novel"]),
+            summary("e", &["Notes"]),
+        ];
+        let graph = super::build_graph(&catalog, &[("a".to_owned(), "c".to_owned())]);
+        let tops: Vec<_> = graph.groups.iter().filter(|g| g.depth == 0).collect();
+        let subs: Vec<_> = graph.groups.iter().filter(|g| g.depth == 1).collect();
+        assert_eq!(tops.len(), 2, "Notes and Novel");
+        assert_eq!(
+            subs.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(),
+            ["Part 1", "Part 2"]
+        );
+        let novel = graph
+            .groups
+            .iter()
+            .find(|g| g.name == "Novel")
+            .expect("novel");
+        for sub in &subs {
+            // A circle inside a circle: its whole edge is inside the group's.
+            assert!(
+                (sub.x - novel.x).hypot(sub.y - novel.y) + sub.r <= novel.r + 0.01,
+                "{sub:?} is not inside {novel:?}"
+            );
+        }
+        // Each dot is inside its own part, and the two parts do not overlap.
+        let part = |name: &str| subs.iter().find(|g| g.name == name).copied().expect("part");
+        for (id, name) in [("a", "Part 1"), ("b", "Part 1"), ("c", "Part 2")] {
+            let dot = graph.nodes.iter().find(|n| n.id == id).expect("dot");
+            let circle = part(name);
+            assert!(
+                (dot.x - circle.x).hypot(dot.y - circle.y) <= circle.r,
+                "{id}"
+            );
+        }
+        let (one, two) = (part("Part 1"), part("Part 2"));
+        assert!((one.x - two.x).hypot(one.y - two.y) >= one.r + two.r);
+        // With no second parts it is the plain group as before.
+        assert!(
+            super::build_graph(&[summary("x", &["Solo"])], &[])
+                .groups
+                .iter()
+                .all(|g| g.depth == 0)
+        );
+    }
+
+    #[test]
+    fn the_graph_can_show_one_group_and_is_zoomed_about_the_pointer() {
+        let _turn = one_at_a_time();
+        let dir = folder("graph-group");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        app.catalog = vec![
+            summary("a", &["Novel"]),
+            summary("b", &["Notes"]),
+            summary("c", &[]),
+        ];
+        let _ = app.update(Message::ToggleGraph);
+        assert_eq!(app.graph.as_ref().map(|g| g.nodes.len()), Some(3));
+        let _ = app.update(Message::GraphGroup(Some("novel".to_owned())));
+        assert_eq!(app.graph.as_ref().map(|g| g.nodes.len()), Some(1));
+        drop(app.view());
+        // A group that is gone is not the one in view: the whole graph comes back.
+        let _ = app.update(Message::GraphGroup(Some("gone".to_owned())));
+        assert!(app.graph_group.is_none());
+        assert_eq!(app.graph.as_ref().map(|g| g.nodes.len()), Some(3));
+        // Zooming keeps the dot under the pointer where it was.
+        let size = iced::Size::new(600.0, 400.0);
+        let area = iced::Rectangle::new(iced::Point::ORIGIN, size);
+        let view = |cam: super::GraphCam| super::GraphView {
+            cam,
+            data: app.graph.clone().expect("graph"),
+            selected: None,
+        };
+        let before = super::GraphCam::default();
+        let node = app.graph.as_ref().expect("graph").nodes[0].x;
+        let at = view(before).spot(node, app.graph.as_ref().expect("graph").nodes[0].y, area);
+        let after = before.zoomed(3.0, at, size).expect("zooms");
+        assert!(after.zoom > 1.0);
+        let again = view(after).spot(node, app.graph.as_ref().expect("graph").nodes[0].y, area);
+        assert!((again.x - at.x).abs() < 0.01 && (again.y - at.y).abs() < 0.01);
+        // The ends of the zoom stop it.
+        let mut far = before;
+        for _ in 0..80 {
+            if let Some(next) = far.zoomed(5.0, at, size) {
+                far = next;
+            }
+        }
+        assert!(far.zoom <= 8.0 && far.zoomed(5.0, at, size).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_note_panel_shows_the_facts_chosen_and_the_choice_is_kept_on_this_computer() {
+        let _turn = one_at_a_time();
+        let dir = folder("props");
+        let mut app = open_app(&dir);
+        wide(&mut app);
+        let (id, _) = write_snapshot(&dir, None, "Facts", "one two three").expect("note");
+        app.adopt_open_book(Notebook::open(&dir).expect("open"));
+        let _ = app.update(Message::Select(id.clone()));
+        assert_eq!(app.note_fact("words").as_deref(), Some("3 words"));
+        assert_eq!(app.note_fact("id").as_deref(), Some(id.as_str()));
+        assert_eq!(
+            app.note_fact("link"),
+            None,
+            "a note with no link has no line for it"
+        );
+        app.link = "https://a.org".to_owned();
+        assert_eq!(app.note_fact("link").as_deref(), Some("https://a.org"));
+        assert_eq!(app.note_fact("nonsense"), None);
+        let _ = app.update(Message::ToggleContext);
+        let _ = app.update(Message::ToggleNoteSettings);
+        let _ = app.update(Message::ToggleProps);
+        assert!(app.props_open);
+        drop(app.view());
+        let _ = app.update(Message::ToggleProp("id"));
+        let _ = app.update(Message::ToggleProp("words"));
+        assert!(app.hidden_props.contains("id") && app.hidden_props.contains("words"));
+        drop(app.view());
+        assert_eq!(super::profile::load_hidden_props(&dir), app.hidden_props);
+        let _ = app.update(Message::ToggleProp("id"));
+        assert!(!app.hidden_props.contains("id"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

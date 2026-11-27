@@ -256,6 +256,34 @@ pub(super) fn store_pinned(dir: &Path, pinned: &[String]) -> Result<(), String> 
     fs::write(dir.join("pinned"), text).map_err(|_| "could not write the pins".to_owned())
 }
 
+/// The facts about a note the settings panel does not show. Not sealed. Not sent. It is a choice
+/// about this window and applies to every note.
+pub(super) fn load_hidden_props(dir: &Path) -> std::collections::BTreeSet<String> {
+    let mut found = std::collections::BTreeSet::new();
+    let Ok(text) = fs::read_to_string(dir.join("props")) else {
+        return found;
+    };
+    for line in text.lines().skip(1) {
+        let line = line.trim();
+        if !line.is_empty() {
+            found.insert(line.to_owned());
+        }
+    }
+    found
+}
+
+pub(super) fn store_hidden_props(
+    dir: &Path,
+    hidden: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let mut text = String::from("v1\n");
+    for key in hidden {
+        text.push_str(&one_line(key));
+        text.push('\n');
+    }
+    fs::write(dir.join("props"), text).map_err(|_| "could not write the panel choices".to_owned())
+}
+
 /// The note that was open, and the line the caret was on. Not sealed. Not sent.
 pub(super) fn load_place(dir: &Path) -> Option<(String, usize)> {
     let text = fs::read_to_string(dir.join("place")).ok()?;

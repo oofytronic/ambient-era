@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-27 — a link on a note, rename and merge a group, a deeper graph, and a choice of facts
+
+A note can hold one link, kept in a hidden line beside its tags. The line is in the sealed body, so nothing on the wire changes. Renaming a group, or typing the name of another group to merge into it, rewrites the tag line of every note in it, each as a new snapshot. The old text stays in the log. The graph shows the second part of a tag as a circle inside its group, can be limited to one group, and pans and zooms. The note panel lists more facts (link, when it changed, words), and which ones show is a choice kept on this computer. A choice that was "per note" is the panel's, for every note, because a per-note one would be saved data.
+
 ## 2026-11-25 — a palette, quick capture, templates, and pins, all over what was already there
 
 `Ctrl+P` opens a palette: jump to a note, switch tab, run an action. `Ctrl+J` opens a small box that writes a note or a task without leaving the page. A new note can start from a template. A template is a note tagged `Templates`, and the daily note is the first row of the picker and is never made unless chosen. A note can be pinned to the top of the list. The pin is a local file, like the order of a group. No record, no room, no wire change. These keys work inside the window only. A system-wide hotkey is not claimed.

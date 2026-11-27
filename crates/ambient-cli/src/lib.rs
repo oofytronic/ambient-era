@@ -25,8 +25,9 @@ pub use host::{
 };
 pub use notes::{CliError, run};
 pub use session::{
-    DELETED_BODY, DeletedNote, DeviceLine, NoteSnap, NoteSummary, NoteVersion, Notebook, ShownHead,
-    ShownNote, join_note_tags, note_is_deleted, split_note_tags,
+    DELETED_BODY, DeletedNote, DeviceLine, NoteMeta, NoteSnap, NoteSummary, NoteVersion, Notebook,
+    ShownHead, ShownNote, clean_link, join_note_meta, join_note_tags, note_is_deleted,
+    split_note_meta, split_note_tags,
 };
 
 pub use sync::{INTRODUCTION, NetMode, NetSetting, check_relay_url};

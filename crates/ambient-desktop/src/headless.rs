@@ -201,6 +201,7 @@ fn every_screen_lays_out_and_draws_at_every_width() {
             Message::PaletteOpen,
             Message::CaptureOpen,
             Message::TemplatesOpen,
+            Message::RenameGroupOpen("novel".to_owned()),
         ] {
             let _ = app.update(Message::ShowNotes);
             let _ = app.update(open);
@@ -208,6 +209,19 @@ fn every_screen_lays_out_and_draws_at_every_width() {
             screen.draw(&app, size);
             let _ = app.update(Message::CloseOverlays);
         }
+        // The graph, with a group in view and zoomed in, and the panel with its list of facts.
+        let _ = app.update(Message::ShowNotes);
+        let _ = app.update(Message::ToggleGraph);
+        screen.draw(&app, size);
+        let _ = app.update(Message::GraphCamera(super::GraphCam {
+            zoom: 2.5,
+            pan: (40.0, -30.0),
+        }));
+        screen.draw(&app, size);
+        let _ = app.update(Message::ToggleGraph);
+        let _ = app.update(Message::ToggleNoteSettings);
+        let _ = app.update(Message::ToggleProps);
+        screen.draw(&app, size);
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1188,37 +1188,98 @@ fn note_tags(heads: &[ambient_spaces::NoteHead]) -> Vec<String> {
     tags.into_iter().collect()
 }
 
-/// Split the hidden tag line off a note body.
-///
-/// The line is `%%ambient-tags: clinic, follow-up%%` and only at the end.
-/// Anything else, including a `#name` in the writing, stays in the prose.
-#[must_use]
-pub fn split_note_tags(body: &str) -> (String, Vec<String>) {
-    let trimmed_end = body.trim_end_matches(['\n', '\r']);
-    let (head, line) = match trimmed_end.rsplit_once('\n') {
-        Some((head, line)) => (Some(head), line.trim()),
-        None => (None, trimmed_end.trim()),
-    };
-    let Some(tags) = parse_tag_line(line) else {
-        return (body.to_owned(), Vec::new());
-    };
-    (head.unwrap_or("").to_owned(), tags)
+/// What a note keeps in the hidden lines at the end of its body, beside the prose.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NoteMeta {
+    /// The tags, in the order written.
+    pub tags: Vec<String>,
+    /// One address the note points at, or empty.
+    pub link: String,
 }
 
-/// Put `tags` back on the end of `prose`. An empty list leaves the prose alone.
+/// Split the hidden lines off a note body.
+///
+/// The lines are `%%ambient-link: https://example.org%%` and `%%ambient-tags: clinic, follow-up%%`,
+/// each at most once, in either order, and only at the end. Anything else, including a `#name`
+/// in the writing, stays in the prose.
+#[must_use]
+pub fn split_note_meta(body: &str) -> (String, NoteMeta) {
+    let mut rest = body.trim_end_matches(['\n', '\r']);
+    let mut meta = NoteMeta::default();
+    let (mut have_tags, mut have_link) = (false, false);
+    loop {
+        let (head, line) = match rest.rsplit_once('\n') {
+            Some((head, line)) => (Some(head), line.trim()),
+            None => (None, rest.trim()),
+        };
+        if !have_tags && let Some(tags) = parse_tag_line(line) {
+            meta.tags = tags;
+            have_tags = true;
+        } else if !have_link && let Some(link) = parse_link_line(line) {
+            meta.link = link;
+            have_link = true;
+        } else {
+            break;
+        }
+        match head {
+            Some(head) => rest = head.trim_end_matches(['\n', '\r']),
+            None => return (String::new(), meta),
+        }
+    }
+    if !have_tags && !have_link {
+        return (body.to_owned(), meta);
+    }
+    (rest.to_owned(), meta)
+}
+
+/// Put the hidden lines back on the end of `prose`. Empty ones are left out.
+#[must_use]
+pub fn join_note_meta(prose: &str, tags: &[String], link: &str) -> String {
+    let (prose, _) = split_note_meta(prose);
+    let mut out = prose.trim_end_matches(['\n', '\r']).to_owned();
+    let mut add = |line: String| {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&line);
+    };
+    if let Some(link) = clean_link(link) {
+        add(format!("%%ambient-link: {link}%%"));
+    }
+    if !tags.is_empty() {
+        add(format!("%%ambient-tags: {}%%", tags.join(", ")));
+    }
+    out
+}
+
+/// Split the hidden tag line off a note body. The link line goes too, so what is left is prose.
+#[must_use]
+pub fn split_note_tags(body: &str) -> (String, Vec<String>) {
+    let (prose, meta) = split_note_meta(body);
+    (prose, meta.tags)
+}
+
+/// Put `tags` back on the end of `prose`. An empty list leaves the prose alone. A link that was
+/// on the body is not kept: use `join_note_meta` to keep it.
 #[must_use]
 pub fn join_note_tags(prose: &str, tags: &[String]) -> String {
-    let (prose, _) = split_note_tags(prose);
-    let prose = prose.trim_end_matches(['\n', '\r']);
-    if tags.is_empty() {
-        return prose.to_owned();
+    join_note_meta(prose, tags, "")
+}
+
+/// A link as it may be kept: one line, no `%`, no longer than 500 characters.
+#[must_use]
+pub fn clean_link(link: &str) -> Option<String> {
+    let link = link.trim();
+    if link.is_empty() || link.chars().count() > 500 || link.contains(['%', '\n', '\r']) {
+        return None;
     }
-    let line = format!("%%ambient-tags: {}%%", tags.join(", "));
-    if prose.is_empty() {
-        line
-    } else {
-        format!("{prose}\n{line}")
-    }
+    Some(link.to_owned())
+}
+
+fn parse_link_line(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("%%ambient-link:")?;
+    let rest = rest.strip_suffix("%%")?;
+    clean_link(rest)
 }
 
 fn parse_tag_line(line: &str) -> Option<Vec<String>> {
@@ -1442,6 +1503,38 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_note_keeps_a_link_and_tags_in_hidden_lines_at_its_end() {
+        use super::{join_note_meta, split_note_meta, split_note_tags};
+        let tags = vec!["clinic".to_owned(), "Work/Plan".to_owned()];
+        let sealed = join_note_meta("Words here", &tags, " https://example.org/a ");
+        assert_eq!(
+            sealed,
+            "Words here\n%%ambient-link: https://example.org/a%%\n%%ambient-tags: clinic, Work/Plan%%"
+        );
+        let (prose, meta) = split_note_meta(&sealed);
+        assert_eq!(prose, "Words here");
+        assert_eq!(meta.tags, tags);
+        assert_eq!(meta.link, "https://example.org/a");
+        // Either order reads, and the tag reader leaves only prose.
+        let swapped = "Words\n%%ambient-tags: a%%\n%%ambient-link: https://x.org%%";
+        let (prose, meta) = split_note_meta(swapped);
+        assert_eq!(
+            (prose.as_str(), meta.tags, meta.link.as_str()),
+            ("Words", vec!["a".to_owned()], "https://x.org")
+        );
+        assert_eq!(split_note_tags(swapped).0, "Words");
+        // A note that is only hidden lines has no prose, and nothing is made up.
+        let (prose, meta) = split_note_meta("%%ambient-link: https://x.org%%");
+        assert!(prose.is_empty() && meta.tags.is_empty() && meta.link == "https://x.org");
+        // A mark in the middle of the writing is writing. A link with a percent is not kept.
+        let (prose, meta) = split_note_meta("%%ambient-link: https://x.org%%\nthen words");
+        assert_eq!(prose, "%%ambient-link: https://x.org%%\nthen words");
+        assert!(meta.link.is_empty());
+        assert_eq!(join_note_meta("p", &[], "https://x.org/%41"), "p");
+        assert_eq!(join_note_meta("p", &[], ""), "p");
+    }
+
     use std::sync::Arc;
 
     use super::{Notebook, open_projected};

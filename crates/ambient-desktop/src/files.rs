@@ -122,6 +122,11 @@ pub(super) fn open_url(url: &str) -> Result<(), String> {
     ambient_cli::host().open_url(url)
 }
 
+/// Whether this window would open the address, so it is one worth keeping on a note.
+pub(super) fn link_ok(url: &str) -> bool {
+    link_allowed(url)
+}
+
 fn link_allowed(url: &str) -> bool {
     if url.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return false;

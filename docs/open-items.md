@@ -81,6 +81,14 @@ See [platforms.md](platforms.md).
 - **A pin is on this computer only.** A second computer has its own pins. If pins should follow the notebook, that is saved data and needs a decision.
 - **Tasks are meant to grow a lot** (habits, advanced task management). That is a wish, not a plan. Nothing is started.
 
+## Link, rename, graph, and the note panel
+
+- **A rename leaves the old tag in older versions.** Version history and a restored version show the tag as it was.
+- **A note with two versions is skipped by a rename,** and the card says how many. Settle the two versions, then rename again.
+- **Only two levels of the graph are circles.** `Novel/Part 1/Draft` shows `Part 1` as a circle, and its notes are in it.
+- **The graph is not saved:** its group and zoom are forgotten when it is closed.
+- **Which facts the panel shows is one choice for every note.** A choice for each note would have to be saved on the note, which is a format decision.
+
 ## Offered, not built
 
 Small things that would help daily use.
