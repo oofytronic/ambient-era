@@ -3783,7 +3783,7 @@ impl App {
     }
 
     fn task_groups(&self, ink: &Ink) -> Element<'_, Message> {
-        let mut list = column![].spacing(14).width(Fill);
+        let mut list = column![].spacing(6).width(Fill);
         let view = &self.task_view;
         let open: Vec<&TaskRow> = self
             .tasks
@@ -4505,7 +4505,14 @@ impl App {
                 .style(quiet_style)
                 .into()
         };
-        let line_row = row![
+        let key = format!("{}:{}", task.note_id, task.line);
+        let over = self.hover_row.as_deref() == Some(key.as_str());
+        let picked = self.task_pick.as_ref() == Some(&(task.note_id.clone(), task.line));
+        // The tools show under the pointer or on the picked task. A narrow window has no pointer
+        // to hover with, so there they stay.
+        let tools =
+            (editing || over || picked || self.compact()).then(|| self.task_actions(task, editing));
+        let mut line_row = row![
             checkbox(task.done).on_toggle(move |done| Message::SetTask {
                 id: id.clone(),
                 line,
@@ -4516,17 +4523,33 @@ impl App {
         .spacing(12)
         .align_y(iced::Alignment::Center)
         .width(Fill);
+        if let Some(tools) = tools {
+            line_row = line_row.push(tools);
+        }
         let mut block = column![line_row].spacing(4).width(Fill);
         for (target, title) in markdown::task_cites(&task.text) {
             let target = target.clone();
             block = block.push(
-                button(text(title).size(13))
-                    .padding([2, 0])
-                    .on_press(Message::OpenCited(target))
-                    .style(quiet_style),
+                container(
+                    button(text(title).size(13).color(ink.accent))
+                        .padding([2, 0])
+                        .on_press(Message::OpenCited(target))
+                        .style(quiet_style),
+                )
+                .padding(iced::Padding {
+                    left: 32.0,
+                    ..iced::Padding::ZERO
+                }),
             );
         }
-        block.push(self.task_actions(task, editing)).into()
+        column![
+            mouse_area(task_frame(block.into(), over || picked))
+                .on_enter(Message::RowHover(key.clone(), true))
+                .on_exit(Message::RowHover(key, false)),
+            hairline(),
+        ]
+        .width(Fill)
+        .into()
     }
 
     fn task_actions(&self, task: &TaskRow, editing: bool) -> Element<'_, Message> {
@@ -12021,7 +12044,7 @@ impl canvas::Program<Message> for GraphView {
 /// The handle on a note in a group. Pressing it starts moving the note in that group.
 fn grip(handle: iced_image::Handle, group: &str, id: &str) -> Element<'static, Message> {
     let face =
-        mouse_area(container(iced_image::Image::new(handle).width(16).height(16)).padding(6))
+        mouse_area(container(iced_image::Image::new(handle).width(20).height(20)).padding(5))
             .on_press(Message::DragStart {
                 group: group.to_owned(),
                 id: id.to_owned(),
@@ -12623,6 +12646,25 @@ fn overlay_key(
         Key::Named(iced::keyboard::key::Named::ArrowUp) => Some(Message::PaletteMove(-1)),
         _ => None,
     }
+}
+
+/// A task's room: padding, and a soft wash while the pointer is on it or it is the picked one.
+fn task_frame(inside: Element<'_, Message>, wash: bool) -> Element<'_, Message> {
+    container(inside)
+        .width(Fill)
+        .padding([10.0, 6.0])
+        .style(move |theme: &Theme| {
+            let ink = ink_of(theme);
+            container::Style {
+                background: wash.then_some(iced::Background::Color(ink.surface)),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        })
+        .into()
 }
 
 fn task_key(key: &Key, modifiers: iced::keyboard::Modifiers) -> Option<Message> {
@@ -13388,8 +13430,8 @@ fn mini_button(
     hint_text: &'static str,
     message: Message,
 ) -> Element<'static, Message> {
-    let face = button(iced_image::Image::new(handle).width(16).height(16))
-        .padding(6)
+    let face = button(iced_image::Image::new(handle).width(20).height(20))
+        .padding(5)
         .on_press(message)
         .style(icon_style);
     hover_label(face, hint_text)
