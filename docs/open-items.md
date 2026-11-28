@@ -89,6 +89,16 @@ See [platforms.md](platforms.md).
 - **The graph is not saved:** its group and zoom are forgotten when it is closed.
 - **Which facts the panel shows is one choice for every note.** A choice for each note would have to be saved on the note, which is a format decision.
 
+## Tasks: Today, plain-language adding, subtasks, priority, snooze
+
+- **No reminders yet.** A task with a time is not announced. That needs the system's notifications.
+- **Plain-language adding is English only,** and it reads a fixed set of phrases. Anything it does not know stays in the words.
+- **Subtasks are one tab of indent each.** Moving a task with the arrows moves its line and not the lines under it.
+- **Checking a task does not check its subtasks,** and checking the last subtask does not check the task.
+- **A repeating task with subtasks** repeats the task line only. Its done subtasks stay done.
+- **Priority is not a sort order yet.** It shows and can be set. The list is still ordered by day.
+- **Habits are not started.** See the discussion in the session notes: where check-ins live is a decision to make first.
+
 ## Offered, not built
 
 Small things that would help daily use.

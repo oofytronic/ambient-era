@@ -209,6 +209,51 @@ fn every_screen_lays_out_and_draws_at_every_width() {
             screen.draw(&app, size);
             let _ = app.update(Message::CloseOverlays);
         }
+        // The Tasks tab with a late task, a priority, a task with subtasks, and the tools out.
+        let row = |line: usize, depth: usize, parent: Option<usize>, text: &str| super::TaskRow {
+            note_id: "tasks".to_owned(),
+            note_title: "Tasks".to_owned(),
+            line,
+            done: false,
+            due: super::due::Due::of(text),
+            priority: super::markdown::task_priority(text),
+            depth,
+            parent,
+            kids: (0, usize::from(line == 0) * 2),
+            text: text.to_owned(),
+        };
+        app.tasks = vec![
+            row(
+                0,
+                0,
+                None,
+                "plan a trip with a rather long name to wrap !1 2026-01-01",
+            ),
+            row(1, 1, Some(0), "book the hotel"),
+            row(2, 1, Some(0), "pack !2"),
+            row(3, 0, None, "water plants !3 2099-01-01 repeat:weekly"),
+        ];
+        for view in [super::TaskView::Today, super::TaskView::Open] {
+            let _ = app.update(Message::ShowTaskView(view));
+            let _ = app.update(Message::ShowTasks);
+            screen.draw(&app, size);
+            let _ = app.update(Message::RowHover("tasks:0".to_owned(), true));
+            let _ = app.update(Message::SnoozeToggle {
+                id: "tasks".to_owned(),
+                line: 0,
+            });
+            let _ = app.update(Message::SubtaskOpen {
+                id: "tasks".to_owned(),
+                line: 0,
+            });
+            screen.draw(&app, size);
+            let _ = app.update(Message::SubtaskCancel);
+            let _ = app.update(Message::SnoozeToggle {
+                id: "tasks".to_owned(),
+                line: 0,
+            });
+            let _ = app.update(Message::RowHover("tasks:0".to_owned(), false));
+        }
         // The graph, with a group in view and zoomed in, and the panel with its list of facts.
         let _ = app.update(Message::ShowNotes);
         let _ = app.update(Message::ToggleGraph);

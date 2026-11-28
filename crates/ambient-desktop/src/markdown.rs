@@ -1997,27 +1997,82 @@ pub(super) struct TaskLine {
     pub line: usize,
     pub done: bool,
     pub text: String,
+    /// How many tasks it is inside: 0 for one at the left edge, 1 for a subtask.
+    pub depth: usize,
+    /// The line of the task it is a subtask of.
+    pub parent: Option<usize>,
+}
+
+/// The width of a line's leading space, a tab counting as four.
+fn indent_width(line: &str) -> usize {
+    line.chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .map(|c| if c == '\t' { 4 } else { 1 })
+        .sum()
 }
 
 /// Checkbox lines, in the order they appear. A normal list item is not a task.
 pub(super) fn task_lines(body: &str) -> Vec<TaskLine> {
     let mut lines = Vec::new();
+    // The tasks above the line being read that it could be inside: their width and line.
+    let mut open: Vec<(usize, usize)> = Vec::new();
     for (line, text) in body.split('\n').enumerate() {
-        let Some(list) = task_line_parts(text) else {
+        let Some(list) = task_line_parts(text).filter(|list| list.box_at.is_some()) else {
+            // Words at the left edge that are not a list end the tasks above them.
+            if !text.trim().is_empty() && indent_width(text) == 0 && list_parts(text).is_none() {
+                open.clear();
+            }
             continue;
         };
         let Some(at) = list.box_at else {
             continue;
         };
+        let width = indent_width(text);
+        while open.last().is_some_and(|(held, _)| *held >= width) {
+            open.pop();
+        }
+        let parent = open.last().map(|(_, above)| *above);
+        let depth = open.len();
+        open.push((width, line));
         let after = at.saturating_add(3);
         let label = text.get(after..).unwrap_or("").trim();
         lines.push(TaskLine {
             line,
             done: list.done,
             text: label.to_owned(),
+            depth,
+            parent,
         });
     }
     lines
+}
+
+/// Adds a task one level in under the task on `parent_line`, after the last line already in it.
+/// `None` when that line is not a task, or the label is empty.
+pub(super) fn add_subtask(body: &str, parent_line: usize, label: &str) -> Option<String> {
+    let label = label.trim().replace(['\n', '\r'], " ");
+    if label.is_empty() {
+        return None;
+    }
+    let lines: Vec<&str> = body.split('\n').collect();
+    let parent = lines.get(parent_line)?;
+    task_line_parts(parent).and_then(|list| list.box_at)?;
+    let width = indent_width(parent);
+    let mut last = parent_line;
+    for (at, text) in lines.iter().enumerate().skip(parent_line.saturating_add(1)) {
+        if text.trim().is_empty() || indent_width(text) <= width {
+            break;
+        }
+        last = at;
+    }
+    let lead: String = parent
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+    let new_line = format!("{lead}  - [ ] {label}");
+    let mut out: Vec<String> = lines.iter().map(|text| (*text).to_owned()).collect();
+    out.insert(last.saturating_add(1), new_line);
+    Some(out.join("\n"))
 }
 
 /// Removes one checkbox line. `None` when that line is not a task.
@@ -2120,7 +2175,12 @@ pub(super) fn move_task_line(body: &str, line_index: usize, up: bool) -> Option<
 
 /// The label without its due day, time, and repeat, or a note citation.
 pub(super) fn task_words(label: &str) -> String {
-    crate::due::Due::split(&without_cites(label)).0.to_owned()
+    crate::taskmeta::split_priority(crate::due::Due::split(&without_cites(label)).0).0
+}
+
+/// How much the task matters, from a `!1`, `!2`, or `!3` among its words.
+pub(super) fn task_priority(label: &str) -> Option<crate::taskmeta::Priority> {
+    crate::taskmeta::split_priority(crate::due::Due::split(&without_cites(label)).0).1
 }
 
 /// The task label with `[[...]]` citations removed and the gaps collapsed.
@@ -6895,8 +6955,8 @@ impl<'a> From<Fitted<'a>> for Element<'a, Message> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Carry, EM, Face, HIGH, Mark, STRIKE, STRONG, check_mark, code_mark, em, heading_mark,
-        marker, math_mark, paint, set_task_line, strike_mark, strong, task_lines,
+        Carry, EM, Face, HIGH, Mark, STRIKE, STRONG, add_subtask, check_mark, code_mark, em,
+        heading_mark, marker, math_mark, paint, set_task_line, strike_mark, strong, task_lines,
     };
 
     #[test]
@@ -6994,6 +7054,48 @@ mod tests {
         assert_eq!(next, "keep\n- milk\n- [x] call\n- [x] done\n");
         assert!(set_task_line(&next, 2, true).is_none());
         assert!(set_task_line(body, 1, true).is_none());
+    }
+
+    #[test]
+    fn a_task_indented_under_another_is_its_subtask() {
+        let body = "- [ ] trip\n  - [ ] pack\n    - [x] socks\n  - note\n  - [ ] book\n\nwords\n- [ ] other\n  - [ ] under other";
+        let found = task_lines(body);
+        let shape: Vec<(usize, usize, Option<usize>)> =
+            found.iter().map(|t| (t.line, t.depth, t.parent)).collect();
+        assert_eq!(
+            shape,
+            [
+                (0, 0, None),
+                (1, 1, Some(0)),
+                (2, 2, Some(1)),
+                (4, 1, Some(0)),
+                (7, 0, None),
+                (8, 1, Some(7)),
+            ],
+            "words at the left edge end the tasks above them"
+        );
+    }
+
+    #[test]
+    fn a_subtask_goes_after_the_last_line_already_under_its_task() {
+        let body = "- [ ] trip\n  - [ ] pack\n    - [ ] socks\n- [ ] other\n";
+        assert_eq!(
+            add_subtask(body, 0, "book hotel").as_deref(),
+            Some("- [ ] trip\n  - [ ] pack\n    - [ ] socks\n  - [ ] book hotel\n- [ ] other\n")
+        );
+        assert_eq!(
+            add_subtask(body, 1, "shoes").as_deref(),
+            Some("- [ ] trip\n  - [ ] pack\n    - [ ] socks\n    - [ ] shoes\n- [ ] other\n")
+        );
+        assert_eq!(
+            add_subtask("- [ ] last", 0, "one").as_deref(),
+            Some("- [ ] last\n  - [ ] one")
+        );
+        assert!(add_subtask(body, 0, "  ").is_none(), "nothing written");
+        assert!(
+            add_subtask("plain\n- [ ] x", 0, "one").is_none(),
+            "not a task"
+        );
     }
 
     #[test]

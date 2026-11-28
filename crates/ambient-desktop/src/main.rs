@@ -5,7 +5,7 @@
 //! Sync, pairing, and chat call `ambient-cli`. This file does not seal events.
 //! The relay it can start is cleartext on `127.0.0.1` only.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -31,6 +31,7 @@ mod files;
 mod lane;
 mod markdown;
 mod profile;
+mod taskmeta;
 mod zone;
 
 use markdown::FormatKind;
@@ -285,6 +286,12 @@ struct App {
     graph_group: Option<String>,
     /// Facts about a note the settings panel leaves out, and whether the list of them is open.
     hidden_props: BTreeSet<String>,
+    /// The task whose snooze choices are open, and the task a subtask is being typed under.
+    snooze_open: Option<(String, usize)>,
+    subtask_for: Option<(String, usize)>,
+    subtask_text: String,
+    /// Add the task as typed, with no dates or priority read out of the words.
+    quick_literal: bool,
     props_open: bool,
     graph_cam: GraphCam,
     /// The paragraph under the caret is the only one at full strength. Focus mode only.
@@ -628,6 +635,27 @@ enum Message {
     GraphCamera(GraphCam),
     ToggleProp(&'static str),
     ToggleProps,
+    CyclePriority {
+        id: String,
+        line: usize,
+    },
+    SnoozeToggle {
+        id: String,
+        line: usize,
+    },
+    Snooze {
+        id: String,
+        line: usize,
+        to: SnoozeTo,
+    },
+    SubtaskOpen {
+        id: String,
+        line: usize,
+    },
+    SubtaskText(String),
+    SubtaskAdd,
+    SubtaskCancel,
+    QuickKeep,
     /// Bring a deleted note back, as it read before.
     RestoreNote(String),
     /// Show the versions the open note has had, or go back to it.
@@ -769,6 +797,12 @@ struct TaskRow {
     text: String,
     /// When it is due, read once from the end of the line.
     due: Option<due::Due>,
+    priority: Option<taskmeta::Priority>,
+    /// How many tasks it is inside, and the line of the one it is a subtask of.
+    depth: usize,
+    parent: Option<usize>,
+    /// Its subtasks, one level down: how many are done, and how many there are.
+    kids: (usize, usize),
 }
 
 struct OlderNote {
@@ -1200,7 +1234,7 @@ impl App {
             new_due: DueDraft::default(),
             cal: None,
             cal_month: (1970, 1),
-            task_view: TaskView::Open,
+            task_view: TaskView::Today,
             clock: clock::Clock::read(&zone::Zone::utc(), None, clock::now_ms()),
             zone: zone::Zone::utc(),
             zone_name: None,
@@ -1242,6 +1276,10 @@ impl App {
             rename: None,
             graph_group: None,
             hidden_props: BTreeSet::new(),
+            snooze_open: None,
+            subtask_for: None,
+            subtask_text: String::new(),
+            quick_literal: false,
             props_open: false,
             graph_cam: GraphCam::default(),
             spotlight: false,
@@ -2299,6 +2337,46 @@ impl App {
                 }
                 Task::none()
             }
+            Message::CyclePriority { id, line } => self.edit_task_label(&id, line, |parts| {
+                parts.priority = taskmeta::Priority::next(parts.priority);
+            }),
+            Message::SnoozeToggle { id, line } => {
+                let key = Some((id, line));
+                self.snooze_open = if self.snooze_open == key { None } else { key };
+                Task::none()
+            }
+            Message::Snooze { id, line, to } => {
+                self.snooze_open = None;
+                self.refresh_clock();
+                let (today, minutes) = (self.clock.today, self.clock.minutes);
+                self.edit_task_label(&id, line, |parts| {
+                    parts.due = Some(snoozed(parts.due, to, today, minutes));
+                })
+            }
+            Message::SubtaskOpen { id, line } => {
+                let key = Some((id, line));
+                self.subtask_for = if self.subtask_for == key { None } else { key };
+                self.subtask_text.clear();
+                if self.subtask_for.is_some() {
+                    focus_named("subtask-input")
+                } else {
+                    Task::none()
+                }
+            }
+            Message::SubtaskText(text) => {
+                self.subtask_text = text;
+                Task::none()
+            }
+            Message::SubtaskAdd => self.add_subtask_typed(),
+            Message::SubtaskCancel => {
+                self.subtask_for = None;
+                self.subtask_text.clear();
+                Task::none()
+            }
+            Message::QuickKeep => {
+                self.quick_literal = !self.quick_literal;
+                focus_named("task-input")
+            }
             Message::ToggleProps => {
                 self.props_open = !self.props_open;
                 Task::none()
@@ -3201,11 +3279,11 @@ impl App {
             .spacing(2)
             .width(Fill);
         for (name, view) in [
-            ("All open", TaskView::Open),
-            ("Due today", TaskView::Today),
+            ("Today", TaskView::Today),
             ("Overdue", TaskView::Overdue),
             ("Upcoming", TaskView::Upcoming),
             ("No date", TaskView::NoDate),
+            ("All open", TaskView::Open),
             ("Done", TaskView::Done),
         ] {
             let n = count(&view);
@@ -3840,6 +3918,7 @@ impl App {
             page = page.push(Self::detail_header("‹ Tasks", Vec::new()));
         }
         page = page.push(add);
+        page = page.push(self.quick_preview());
         if let Some(banner) = self.trip_banner() {
             page = page.push(banner);
         }
@@ -3885,36 +3964,186 @@ impl App {
         page.into()
     }
 
+    /// The tasks not done that belong in the view and match what is searched for.
+    fn open_tasks(&self) -> Vec<&TaskRow> {
+        let view = &self.task_view;
+        self.tasks
+            .iter()
+            .filter(|task| !task.done && self.task_hit(task) && self.in_view(task, view))
+            .collect()
+    }
+
+    /// The tasks done that the view lists. Today lists what was checked off today.
+    fn done_tasks(&self) -> Vec<&TaskRow> {
+        let view = &self.task_view;
+        let today = self.clock.today.to_string();
+        self.tasks
+            .iter()
+            .filter(|task| {
+                if !task.done || !self.task_hit(task) {
+                    return false;
+                }
+                match view {
+                    TaskView::Today => self.done_on.get(&done_key(task)) == Some(&today),
+                    TaskView::Open | TaskView::Group(_) | TaskView::Note(_) => {
+                        self.in_view(task, view) && !self.hide_done
+                    }
+                    TaskView::Done => self.in_view(task, view),
+                    _ => false,
+                }
+            })
+            .collect()
+    }
+
+    /// Whether any task above this one, through its parents, is one of `set`.
+    fn has_ancestor_in(&self, task: &TaskRow, set: &HashSet<(&str, usize)>) -> bool {
+        let index: HashMap<(&str, usize), &TaskRow> = self
+            .tasks
+            .iter()
+            .map(|held| ((held.note_id.as_str(), held.line), held))
+            .collect();
+        let mut at = task.parent;
+        for _ in 0..64 {
+            let Some(line) = at else {
+                return false;
+            };
+            if set.contains(&(task.note_id.as_str(), line)) {
+                return true;
+            }
+            at = index
+                .get(&(task.note_id.as_str(), line))
+                .and_then(|above| above.parent);
+        }
+        false
+    }
+
+    /// The tasks in the order they are shown, each with how far in it is drawn. A task that has
+    /// subtasks is followed by them, as they are in its note, whether or not they would be in
+    /// the view on their own. A subtask whose parent is also listed is shown only there.
+    fn nested<'a>(&'a self, listed: &[&'a TaskRow]) -> Vec<(&'a TaskRow, usize)> {
+        let shown: HashSet<(&str, usize)> = listed
+            .iter()
+            .map(|task| (task.note_id.as_str(), task.line))
+            .collect();
+        let mut out = Vec::new();
+        for task in listed {
+            if self.has_ancestor_in(task, &shown) {
+                continue;
+            }
+            out.push((*task, 0));
+            let mut below: Vec<&TaskRow> = self
+                .tasks
+                .iter()
+                .filter(|held| {
+                    held.note_id == task.note_id
+                        && held.line > task.line
+                        && held.depth > task.depth
+                        && (!self.hide_done || !held.done)
+                        && self.has_ancestor_in(
+                            held,
+                            &HashSet::from([(task.note_id.as_str(), task.line)]),
+                        )
+                })
+                .collect();
+            below.sort_by_key(|held| held.line);
+            for held in below {
+                out.push((held, held.depth.saturating_sub(task.depth)));
+            }
+        }
+        out
+    }
+
+    fn task_stack<'a>(
+        &'a self,
+        rows: &[(&'a TaskRow, usize)],
+    ) -> iced::widget::Column<'a, Message> {
+        let mut stack = column![].spacing(6).width(Fill);
+        for (task, depth) in rows {
+            stack = stack.push(self.task_row(task, *depth));
+        }
+        stack
+    }
+
+    /// The Today page: what is late, then what is due today, what was checked off today, and a
+    /// word when there is nothing left.
+    fn today_list<'a>(
+        &'a self,
+        ink: &Ink,
+        open: &[&'a TaskRow],
+        done: &[&'a TaskRow],
+    ) -> Element<'a, Message> {
+        let mut list = column![].spacing(6).width(Fill);
+        let (late, now): (Vec<&TaskRow>, Vec<&TaskRow>) = open.iter().partition(|task| {
+            task.due.is_some_and(|due| {
+                due.state(self.clock.today, self.clock.minutes) == due::State::Late
+            })
+        });
+        list = list.push(text("Today").font(serif()).size(32));
+        let summary = if open.is_empty() {
+            "Nothing left to do today.".to_owned()
+        } else if late.is_empty() {
+            format!("{} to do", open.len())
+        } else {
+            format!("{} to do · {} overdue", open.len(), late.len())
+        };
+        list = list.push(text(summary).size(14).color(ink.muted));
+        if open.is_empty() {
+            let tomorrow = self.clock.today.plus_days(1).map_or(0, |day| {
+                self.tasks
+                    .iter()
+                    .filter(|task| !task.done && task.due.is_some_and(|due| due.date == day))
+                    .count()
+            });
+            if tomorrow > 0 {
+                list = list.push(ghost_label_owned(
+                    format!(
+                        "Tomorrow has {tomorrow} {}. Look ahead",
+                        if tomorrow == 1 { "task" } else { "tasks" }
+                    ),
+                    Message::ShowTaskView(TaskView::Upcoming),
+                ));
+            }
+        }
+        if !late.is_empty() {
+            list = list.push(text("Overdue").size(13).color(OVERDUE));
+            list = list.push(self.task_stack(&self.nested(&late)));
+        }
+        if !now.is_empty() {
+            if !late.is_empty() {
+                list = list.push(text("Due today").size(13).color(ink.muted));
+            }
+            list = list.push(self.task_stack(&self.nested(&now)));
+        }
+        if !done.is_empty() {
+            list = list.push(text("Done today").size(13).color(ink.muted));
+            let rows: Vec<(&TaskRow, usize)> = done.iter().map(|task| (*task, 0)).collect();
+            list = list.push(self.task_stack(&rows));
+        }
+        list.into()
+    }
+
     fn task_groups(&self, ink: &Ink) -> Element<'_, Message> {
         let mut list = column![].spacing(6).width(Fill);
         let view = &self.task_view;
-        let open: Vec<&TaskRow> = self
-            .tasks
+        let open = self.open_tasks();
+        // A done task that is under an open one is shown there, and not listed again.
+        let shown: HashSet<(&str, usize)> = open
             .iter()
-            .filter(|task| !task.done && self.task_hit(task) && self.in_view(task, view))
+            .map(|task| (task.note_id.as_str(), task.line))
             .collect();
-        // Done tasks sit under the open ones in the plain list, a group, or a note. In a view
-        // about dates there are none, and in the Done view they are the list.
-        let shows_done = matches!(
-            view,
-            TaskView::Open | TaskView::Done | TaskView::Group(_) | TaskView::Note(_)
-        );
         let done: Vec<&TaskRow> = self
-            .tasks
-            .iter()
-            .filter(|task| {
-                task.done
-                    && shows_done
-                    && self.task_hit(task)
-                    && self.in_view(task, view)
-                    && (!self.hide_done || *view == TaskView::Done)
-            })
+            .done_tasks()
+            .into_iter()
+            .filter(|task| *view == TaskView::Done || !self.has_ancestor_in(task, &shown))
             .collect();
+        if *view == TaskView::Today && !self.tasks.is_empty() {
+            return self.today_list(ink, &open, &done);
+        }
         let heading = self.task_view_name();
         if self.tasks.is_empty() {
             list = list.push(text("Nothing to do yet.").font(serif()).size(32));
             list = list.push(
-                text("Or write a line like - [ ] call the clinic in any note.")
+                text("Type one above, like call the vet tomorrow 3pm. Or write - [ ] in any note.")
                     .size(14)
                     .color(ink.muted),
             );
@@ -3944,15 +4173,12 @@ impl App {
             if let Some(held) = self.held_line(&open) {
                 list = list.push(text(held).size(14).color(ink.muted));
             }
-            for task in open {
-                list = list.push(self.task_row(task));
-            }
+            list = list.push(self.task_stack(&self.nested(&open)));
         }
         if !done.is_empty() && *view != TaskView::Done {
             list = list.push(text("Done").font(serif()).size(22));
-            for task in done {
-                list = list.push(self.task_row(task));
-            }
+            let rows: Vec<(&TaskRow, usize)> = done.iter().map(|task| (*task, 0)).collect();
+            list = list.push(self.task_stack(&rows));
         }
         list.into()
     }
@@ -4010,7 +4236,7 @@ impl App {
             };
             body = body.push(text(label).size(14).color(ink.muted));
             for task in rows {
-                body = body.push(self.task_row(task));
+                body = body.push(self.task_row(task, 0));
             }
         }
         body.into()
@@ -4103,7 +4329,9 @@ impl App {
         match view {
             TaskView::Open => true,
             TaskView::Done => task.done,
-            TaskView::Today => !task.done && state == Some(due::State::Today),
+            TaskView::Today => {
+                !task.done && matches!(state, Some(due::State::Today | due::State::Late))
+            }
             TaskView::Overdue => !task.done && state == Some(due::State::Late),
             TaskView::Upcoming => !task.done && state == Some(due::State::Later),
             TaskView::NoDate => !task.done && state.is_none(),
@@ -4497,7 +4725,7 @@ impl App {
     fn task_view_name(&self) -> String {
         match &self.task_view {
             TaskView::Open => "Open".to_owned(),
-            TaskView::Today => "Due today".to_owned(),
+            TaskView::Today => "Today".to_owned(),
             TaskView::Overdue => "Overdue".to_owned(),
             TaskView::Upcoming => "Upcoming".to_owned(),
             TaskView::NoDate => "No date".to_owned(),
@@ -4550,72 +4778,22 @@ impl App {
         }
     }
 
-    fn task_row(&self, task: &TaskRow) -> Element<'_, Message> {
+    fn task_row(&self, task: &TaskRow, depth: usize) -> Element<'_, Message> {
         let ink = self.ink();
-        let id = task.note_id.clone();
-        let line = task.line;
-        let open_id = task.note_id.clone();
-        let title = if task.note_title.is_empty() {
-            "Untitled".to_owned()
-        } else {
-            task.note_title.clone()
-        };
         let editing = self
             .task_rename
             .as_ref()
             .is_some_and(|(note, row)| note == &task.note_id && *row == task.line);
-        let words = if task.done {
-            ink.muted
-        } else if self.task_pick.as_ref() == Some(&(task.note_id.clone(), task.line)) {
-            ink.accent
-        } else {
-            ink.text
-        };
-        let main: Element<'_, Message> = if editing {
-            row![
-                text_input("Task", &self.task_rename_text)
-                    .on_input(Message::TaskLabel)
-                    .on_submit(Message::CommitTaskRename)
-                    .padding(8)
-                    .width(Fill)
-                    .style(field_style),
-                self.due_button(CalFor::Edit, 8.0),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center)
-            .into()
-        } else {
-            let words_text = markdown::task_words(&task.text);
-            let label = if words_text.is_empty() {
-                "Empty task".to_owned()
-            } else {
-                words_text
-            };
-            let mut lines = column![text(label).size(16).color(words)]
-                .spacing(2)
-                .width(Fill);
-            if let Some(found) = task.due {
-                lines = lines.push(self.due_line(&found, task.done));
-            }
-            lines = lines.push(text(title).size(12).color(ink.muted));
-            button(lines)
-                .width(Fill)
-                .padding([2, 0])
-                .on_press(Message::OpenAt {
-                    id: open_id,
-                    line: task.line,
-                })
-                .style(quiet_style)
-                .into()
-        };
         let key = format!("{}:{}", task.note_id, task.line);
         let over = self.hover_row.as_deref() == Some(key.as_str());
         let picked = self.task_pick.as_ref() == Some(&(task.note_id.clone(), task.line));
-        // The tools show under the pointer or on the picked task. A narrow window has no pointer
-        // to hover with, so there they stay.
-        let tools =
-            (editing || over || picked || self.compact()).then(|| self.task_actions(task, editing));
-        let mut line_row = row![
+        let (id, line) = (task.note_id.clone(), task.line);
+        let main = if editing {
+            self.task_editor()
+        } else {
+            self.task_face(task, depth, picked)
+        };
+        let line_row = row![
             checkbox(task.done).on_toggle(move |done| Message::SetTask {
                 id: id.clone(),
                 line,
@@ -4626,10 +4804,28 @@ impl App {
         .spacing(12)
         .align_y(iced::Alignment::Center)
         .width(Fill);
-        if let Some(tools) = tools {
-            line_row = line_row.push(tools);
+        // The tools float at the right end of the row under the pointer. A narrow window has no
+        // pointer, so there they sit under the task.
+        let tools =
+            (editing || over || picked || self.compact()).then(|| self.task_actions(task, editing));
+        let mut block = column![].spacing(4).width(Fill);
+        if self.compact() || editing {
+            block = block.push(line_row);
+            if let Some(tools) = tools {
+                block = block.push(tools);
+            }
+        } else if let Some(tools) = tools {
+            block = block.push(stack![
+                line_row,
+                container(container(tools).padding(2).style(tool_tray))
+                    .width(Fill)
+                    .height(Fill)
+                    .align_x(iced::alignment::Horizontal::Right)
+                    .align_y(iced::alignment::Vertical::Center),
+            ]);
+        } else {
+            block = block.push(line_row);
         }
-        let mut block = column![line_row].spacing(4).width(Fill);
         for (target, title) in markdown::task_cites(&task.text) {
             let target = target.clone();
             block = block.push(
@@ -4645,13 +4841,165 @@ impl App {
                 }),
             );
         }
+        if self.snooze_open == Some((task.note_id.clone(), task.line)) {
+            block = block.push(Self::snooze_strip(task));
+        }
+        if self.subtask_for == Some((task.note_id.clone(), task.line)) {
+            block = block.push(self.subtask_field());
+        }
+        // Each task has room around it and a thin line under it, and a soft wash under the
+        // pointer, so a long list reads as rows and not as a run of text. A subtask is one step in.
+        let indented = row![
+            space().width(depth_room(depth)),
+            task_frame(block.into(), over || picked)
+        ];
         column![
-            mouse_area(task_frame(block.into(), over || picked))
+            mouse_area(indented)
                 .on_enter(Message::RowHover(key.clone(), true))
                 .on_exit(Message::RowHover(key, false)),
             hairline(),
         ]
         .width(Fill)
+        .into()
+    }
+
+    /// The task's words, with its priority, when it is due, and where it is from.
+    fn task_face(&self, task: &TaskRow, depth: usize, picked: bool) -> Element<'_, Message> {
+        let ink = self.ink();
+        let title = if task.note_title.is_empty() {
+            "Untitled".to_owned()
+        } else {
+            task.note_title.clone()
+        };
+        let words = if task.done {
+            ink.muted
+        } else if picked {
+            ink.accent
+        } else {
+            ink.text
+        };
+        let words_text = markdown::task_words(&task.text);
+        let label = if words_text.is_empty() {
+            "Empty task".to_owned()
+        } else {
+            words_text
+        };
+        let mut head = row![].spacing(6).align_y(iced::Alignment::Center);
+        if let Some(priority) = task.priority.filter(|_| !task.done) {
+            head = head.push(
+                text(priority.token())
+                    .size(12)
+                    .color(priority_color(priority)),
+            );
+        }
+        head = head.push(text(label).size(16).color(words));
+        let mut lines = column![head].spacing(2).width(Fill);
+        if let Some(found) = task.due {
+            lines = lines.push(self.due_line(&found, task.done));
+        }
+        // A task in the list says which note it is from. One of a task's own subtasks does not.
+        let mut meta = if depth == 0 { title } else { String::new() };
+        if task.kids.1 > 0 {
+            if !meta.is_empty() {
+                meta.push_str(" · ");
+            }
+            meta.push_str(&task.kids.0.to_string());
+            meta.push('/');
+            meta.push_str(&task.kids.1.to_string());
+            meta.push_str(" subtasks");
+        }
+        if !meta.is_empty() {
+            lines = lines.push(text(meta).size(12).color(ink.muted));
+        }
+        button(lines)
+            .width(Fill)
+            .padding([2, 0])
+            .on_press(Message::OpenAt {
+                id: task.note_id.clone(),
+                line: task.line,
+            })
+            .style(quiet_style)
+            .into()
+    }
+
+    /// The field a task is renamed in, and its day.
+    fn task_editor(&self) -> Element<'_, Message> {
+        row![
+            text_input("Task", &self.task_rename_text)
+                .on_input(Message::TaskLabel)
+                .on_submit(Message::CommitTaskRename)
+                .padding(8)
+                .width(Fill)
+                .style(field_style),
+            self.due_button(CalFor::Edit, 8.0),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center)
+        .into()
+    }
+
+    /// Put a task off: a few hours, a day, a week, or a day picked on the calendar.
+    fn snooze_strip(task: &TaskRow) -> Element<'static, Message> {
+        let (id, line) = (task.note_id.clone(), task.line);
+        let to = |label: &'static str, to: SnoozeTo| {
+            ghost_label(
+                label,
+                Message::Snooze {
+                    id: id.clone(),
+                    line,
+                    to,
+                },
+            )
+        };
+        container(
+            row![
+                to("Later today", SnoozeTo::Later),
+                to("Tomorrow", SnoozeTo::Tomorrow),
+                to("Next week", SnoozeTo::NextWeek),
+                ghost_label(
+                    "Pick a day",
+                    Message::BeginTaskEdit {
+                        id: task.note_id.clone(),
+                        line,
+                    },
+                ),
+            ]
+            .spacing(2)
+            .wrap()
+            .vertical_spacing(2),
+        )
+        .padding(iced::Padding {
+            left: 32.0,
+            ..iced::Padding::ZERO
+        })
+        .into()
+    }
+
+    /// The field a subtask is typed in, under its task.
+    fn subtask_field(&self) -> Element<'_, Message> {
+        container(
+            row![
+                text_input(
+                    "Add a subtask. A day or !1 in the words counts",
+                    &self.subtask_text
+                )
+                .id(iced::widget::Id::new("subtask-input"))
+                .on_input(Message::SubtaskText)
+                .on_submit(Message::SubtaskAdd)
+                .padding(8)
+                .size(14)
+                .width(Fill)
+                .style(field_style),
+                action_label("Add", Message::SubtaskAdd),
+                ghost_label("Done", Message::SubtaskCancel),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding(iced::Padding {
+            left: 32.0,
+            ..iced::Padding::ZERO
+        })
         .into()
     }
 
@@ -4663,7 +5011,47 @@ impl App {
                 .spacing(8)
                 .into();
         }
-        let mut actions = row![].spacing(4);
+        let mut actions = row![].spacing(2).align_y(iced::Alignment::Center);
+        let words = |label: String, hint: &'static str, color: Color, message: Message| {
+            hover_label(
+                button(text(label).size(12).color(color))
+                    .padding([4.0, 6.0])
+                    .on_press(message)
+                    .style(ghost_style),
+                hint,
+            )
+        };
+        let muted = self.ink().muted;
+        if !task.done {
+            actions = actions.push(words(
+                task.priority
+                    .map_or("!".to_owned(), |p| p.token().to_owned()),
+                "Priority: press to change",
+                task.priority.map_or(muted, priority_color),
+                Message::CyclePriority {
+                    id: task.note_id.clone(),
+                    line,
+                },
+            ));
+            actions = actions.push(words(
+                "Snooze".to_owned(),
+                "Put it off",
+                muted,
+                Message::SnoozeToggle {
+                    id: task.note_id.clone(),
+                    line,
+                },
+            ));
+            actions = actions.push(words(
+                "+ Subtask".to_owned(),
+                "Add a task under this one",
+                muted,
+                Message::SubtaskOpen {
+                    id: task.note_id.clone(),
+                    line,
+                },
+            ));
+        }
         if self.task_neighbor(task, true) {
             actions = actions.push(mini_button(
                 mini_handle(Mini::Up, dark),
@@ -4787,12 +5175,9 @@ impl App {
                 // Read the clock first: "the next one after today" has to mean the real today.
                 self.refresh_clock();
                 if let Some(moved) = current.advanced(self.clock.today) {
-                    let mut label =
-                        due::Due::write(&markdown::task_words(&task.text), Some(&moved));
-                    for mark in markdown::cite_marks(&task.text) {
-                        label.push(' ');
-                        label.push_str(&mark);
-                    }
+                    let mut parts = LabelParts::of(&task.text);
+                    parts.due = Some(moved);
+                    let label = parts.label();
                     return markdown::rename_task_line(body, line, &label)
                         .map(|next| (next, Some(moved)));
                 }
@@ -4837,27 +5222,148 @@ impl App {
         self.put_note_text(id, &title, &next)
     }
 
+    /// The words, priority, and due moment of a task line, changed by `change`, and written back
+    /// as the one line. The box and its done mark stay.
+    fn edit_task_label(
+        &mut self,
+        id: &str,
+        line: usize,
+        change: impl FnOnce(&mut LabelParts),
+    ) -> Task<Message> {
+        let Some((body, conflict, title)) = self.task_source(id) else {
+            self.say("That note is not here.");
+            return Task::none();
+        };
+        if conflict {
+            self.show_note(id);
+            self.say("Two versions. Write the one you want to keep, then save.");
+            return Task::none();
+        }
+        let Some(found) = markdown::task_lines(&body)
+            .into_iter()
+            .find(|task| task.line == line)
+        else {
+            return Task::none();
+        };
+        let mut parts = LabelParts::of(&found.text);
+        change(&mut parts);
+        let Some(next) = markdown::rename_task_line(&body, line, &parts.label()) else {
+            return Task::none();
+        };
+        self.store_task_edit(id, &title, &next)
+    }
+
+    /// What is typed in the Tasks field, read for a day, a time, a repeat, and a priority, unless
+    /// that is turned off for this one. `None` when nothing in it is read.
+    fn quick_reading(&mut self, text: &str) -> Option<taskmeta::Quick> {
+        if self.quick_literal {
+            return None;
+        }
+        self.refresh_clock();
+        Some(taskmeta::parse(text, self.clock.today, self.clock.minutes)).filter(|q| q.found)
+    }
+
+    /// Under the field: what the typed words will be added as, and a way to say no.
+    fn quick_preview(&self) -> Element<'_, Message> {
+        let ink = self.ink();
+        let typed = self.task_draft.trim();
+        let read = (!self.quick_literal && !typed.is_empty())
+            .then(|| taskmeta::parse(typed, self.clock.today, self.clock.minutes))
+            .filter(|q| q.found);
+        let Some(read) = read else {
+            let hint = if self.quick_literal && !typed.is_empty() {
+                "Added as typed."
+            } else {
+                ""
+            };
+            return container(text(hint).size(12).color(ink.muted)).into();
+        };
+        let mut said: Vec<String> = Vec::new();
+        if let Some(found) = &read.due {
+            said.push(self.due_words(found, false));
+        }
+        if let Some(priority) = read.priority {
+            said.push(priority.label().to_owned());
+        }
+        container(
+            row![
+                text(format!("“{}” · {}", read.words, said.join(" · ")))
+                    .size(12)
+                    .color(ink.accent)
+                    .width(Fill),
+                button(text("Keep as typed").size(12).color(ink.muted))
+                    .padding([2, 6])
+                    .on_press(Message::QuickKeep)
+                    .style(ghost_style),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+        )
+        .into()
+    }
+
+    /// The subtask typed under a task, added after the last line already under it.
+    fn add_subtask_typed(&mut self) -> Task<Message> {
+        let Some((id, line)) = self.subtask_for.clone() else {
+            return Task::none();
+        };
+        let typed = self.subtask_text.trim().to_owned();
+        if typed.is_empty() {
+            self.say("Write the subtask first.");
+            return Task::none();
+        }
+        let mut parts = match self.quick_reading(&typed) {
+            Some(read) => LabelParts {
+                words: read.words,
+                priority: read.priority,
+                due: read.due,
+                marks: Vec::new(),
+            },
+            None => LabelParts::of(&typed),
+        };
+        parts.marks.clear();
+        let Some((body, conflict, title)) = self.task_source(&id) else {
+            self.say("That note is not here.");
+            return Task::none();
+        };
+        if conflict {
+            self.show_note(&id);
+            self.say("Two versions. Write the one you want to keep, then save.");
+            return Task::none();
+        }
+        let Some(next) = markdown::add_subtask(&body, line, &parts.label()) else {
+            return Task::none();
+        };
+        self.subtask_text.clear();
+        // The field stays open for the next one, under the same task.
+        let follow = self.store_task_edit(&id, &title, &next);
+        Task::batch([follow, focus_named("subtask-input")])
+    }
+
     fn commit_task_rename(&mut self) -> Task<Message> {
         let Some((id, line)) = self.task_rename.clone() else {
             return Task::none();
         };
-        let label = self.task_rename_text.clone();
-        let marks = self
+        let typed = self.task_rename_text.clone();
+        let before = self
             .tasks
             .iter()
             .find(|task| task.note_id == id && task.line == line)
-            .map(|task| markdown::cite_marks(&task.text))
-            .unwrap_or_default();
+            .map(|task| LabelParts::of(&task.text));
         let due = self.edit_due.due();
-        if label.trim().is_empty() && due.is_none() {
+        if typed.trim().is_empty() && due.is_none() {
             self.say("Write the task first.");
             return Task::none();
         }
-        let mut label = due::Due::write(&label, due.as_ref());
-        for mark in marks {
-            label.push(' ');
-            label.push_str(&mark);
+        // The priority and the citations the task had stay, unless the words now say another.
+        let (words, typed_priority) = taskmeta::split_priority(&typed);
+        let label = LabelParts {
+            words,
+            priority: typed_priority.or(before.as_ref().and_then(|parts| parts.priority)),
+            due,
+            marks: before.map(|parts| parts.marks).unwrap_or_default(),
         }
+        .label();
         let Some((body, conflict, title)) = self.task_source(&id) else {
             self.say("That note is not here.");
             return Task::none();
@@ -5160,7 +5666,9 @@ impl App {
             let held_draft = std::mem::replace(&mut self.task_draft, text.clone());
             let held_due = std::mem::take(&mut self.new_due);
             let held_cite = self.task_cite.take();
+            let held_literal = std::mem::take(&mut self.quick_literal);
             let follow = self.add_loose_task();
+            self.quick_literal = held_literal;
             let failed = !self.task_draft.is_empty();
             self.task_draft = held_draft;
             self.new_due = held_due;
@@ -9767,13 +10275,24 @@ impl App {
     }
 
     fn add_loose_task(&mut self) -> Task<Message> {
-        let mut label = self.task_draft.trim().replace(['\n', '\r'], " ");
-        if label.is_empty() {
+        let typed = self.task_draft.trim().replace(['\n', '\r'], " ");
+        if typed.is_empty() {
             self.say("Write the task first.");
             return Task::none();
         }
+        // A day, a time, a repeat, and a priority in the words are read out of them, unless
+        // that was turned off. A day picked in the calendar wins over one typed.
+        let read = self.quick_reading(&typed);
+        let (words, priority, typed_due) = if let Some(read) = read {
+            (read.words, read.priority, read.due)
+        } else {
+            let (words, priority) = taskmeta::split_priority(&typed);
+            (words, priority, None)
+        };
+        let picked = self.new_due.due().or(typed_due);
         // The date goes last among the words, ahead of a cite, which is where a due day is read.
-        label = due::Due::write(&label, self.new_due.due().as_ref());
+        let mut label =
+            due::Due::write(&taskmeta::with_priority(&words, priority), picked.as_ref());
         if let Some((id, title)) = self.task_cite.clone() {
             let title = title.replace(['|', '[', ']'], "");
             label = format!("{label} [[{id}|{title}]]");
@@ -9790,6 +10309,7 @@ impl App {
             .map(|note| note.id.clone());
         let Some(id) = existing else {
             self.task_draft.clear();
+            self.quick_literal = false;
             self.new_due.clear();
             self.task_cite = None;
             self.task_cite_open = false;
@@ -9817,6 +10337,7 @@ impl App {
         let follow = self.write_note(&id, &title, &next);
         if self.message.is_empty() {
             self.task_draft.clear();
+            self.quick_literal = false;
             self.new_due.clear();
             self.task_cite = None;
             self.task_cite_open = false;
@@ -13125,14 +13646,23 @@ fn chat_words(words: String) -> Element<'static, Message> {
 }
 
 fn push_tasks(rows: &mut Vec<TaskRow>, id: &str, title: &str, body: &str) {
-    for task in markdown::task_lines(body) {
+    let found = markdown::task_lines(body);
+    let kids = |line: usize| {
+        let mine = found.iter().filter(|task| task.parent == Some(line));
+        (mine.clone().filter(|task| task.done).count(), mine.count())
+    };
+    for task in &found {
         rows.push(TaskRow {
             note_id: id.to_owned(),
             note_title: title.to_owned(),
             line: task.line,
             done: task.done,
             due: due::Due::of(&markdown::without_cites(&task.text)),
-            text: task.text,
+            priority: markdown::task_priority(&task.text),
+            depth: task.depth,
+            parent: task.parent,
+            kids: kids(task.line),
+            text: task.text.clone(),
         });
     }
 }
@@ -13379,6 +13909,78 @@ const NOTE_FACTS: &[(&str, &str)] = &[
     ("id", "Note ID"),
 ];
 
+/// A task line's label taken apart, so one part can change and the line be written back in its
+/// one order: the words, the priority token, the due moment, then any note citations.
+struct LabelParts {
+    words: String,
+    priority: Option<taskmeta::Priority>,
+    due: Option<due::Due>,
+    marks: Vec<String>,
+}
+
+impl LabelParts {
+    fn of(label: &str) -> Self {
+        Self {
+            words: markdown::task_words(label),
+            priority: markdown::task_priority(label),
+            due: due::Due::of(&markdown::without_cites(label)),
+            marks: markdown::cite_marks(label),
+        }
+    }
+
+    fn label(&self) -> String {
+        let mut label = due::Due::write(
+            &taskmeta::with_priority(&self.words, self.priority),
+            self.due.as_ref(),
+        );
+        for mark in &self.marks {
+            label.push(' ');
+            label.push_str(mark);
+        }
+        label
+    }
+}
+
+/// How far a task is put off.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SnoozeTo {
+    /// A few hours on, today if there is a day left for it.
+    Later,
+    Tomorrow,
+    /// The Monday after today.
+    NextWeek,
+}
+
+/// The due moment a task has once it is put off. A time and a repeat it had are kept. Putting
+/// off a task with no date gives it one.
+fn snoozed(current: Option<due::Due>, to: SnoozeTo, today: dates::Date, minutes: u32) -> due::Due {
+    let keep = current.map_or((None, None), |due| (due.time, due.repeat));
+    let (date, time) = match to {
+        SnoozeTo::Later => {
+            // Three hours on, to the next half hour. Too late in the day, it is nine tomorrow.
+            let at = (minutes + 180).div_ceil(30) * 30;
+            if at >= 24 * 60 {
+                (today.plus_days(1), due::Time::new(9, 0))
+            } else {
+                (Some(today), due::Time::new(at / 60, at % 60))
+            }
+        }
+        SnoozeTo::Tomorrow => (today.plus_days(1), keep.0),
+        SnoozeTo::NextWeek => {
+            let ahead = (8 - today.weekday()) % 7;
+            (
+                today.plus_days(i64::from(if ahead == 0 { 7 } else { ahead })),
+                keep.0,
+            )
+        }
+    };
+    due::Due {
+        date: date.unwrap_or(today),
+        time,
+        repeat: keep.1,
+    }
+}
+
 /// The tag that makes a note a template.
 const TEMPLATES: &str = "Templates";
 
@@ -13436,6 +14038,35 @@ fn overlay_key(
         Key::Named(iced::keyboard::key::Named::ArrowDown) => Some(Message::PaletteMove(1)),
         Key::Named(iced::keyboard::key::Named::ArrowUp) => Some(Message::PaletteMove(-1)),
         _ => None,
+    }
+}
+
+/// The room a subtask is moved in, by how many tasks it is inside.
+fn depth_room(depth: usize) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    let steps = depth.min(4) as f32;
+    steps * 24.0
+}
+
+fn priority_color(priority: taskmeta::Priority) -> Color {
+    match priority {
+        taskmeta::Priority::One => OVERDUE,
+        taskmeta::Priority::Two => GRAPH_SHADES[1],
+        taskmeta::Priority::Three => GRAPH_SHADES[0],
+    }
+}
+
+/// What the tools of a task are on, so they can be read over the words under them.
+fn tool_tray(theme: &Theme) -> container::Style {
+    let ink = ink_of(theme);
+    container::Style {
+        background: Some(iced::Background::Color(ink.surface)),
+        border: iced::Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: ink.hairline,
+        },
+        ..Default::default()
     }
 }
 
@@ -15577,6 +16208,7 @@ mod app_tests {
         let dir = folder("task-enter");
         let mut app = open_app(&dir);
         let _ = app.update(Message::ShowTasks);
+        let _ = app.update(Message::ShowTaskView(super::TaskView::Open));
         let _ = app.update(Message::TaskDraft("buy milk".to_owned()));
         let _ = app.update(Message::AddTask);
         settle(&mut app);
@@ -16325,6 +16957,10 @@ mod app_tests {
             line,
             done,
             due: super::due::Due::of(&super::markdown::without_cites(text)),
+            priority: super::markdown::task_priority(text),
+            depth: 0,
+            parent: None,
+            kids: (0, 0),
             text: text.to_owned(),
         }
     }
@@ -16355,8 +16991,8 @@ mod app_tests {
         };
         assert_eq!(
             ids(&app, &TaskView::Today),
-            ["plan1", "plan2"],
-            "a cite after the date still counts"
+            ["plan0", "plan1", "plan2"],
+            "late ones are in Today, and a cite after the date still counts"
         );
         assert_eq!(
             ids(&app, &TaskView::Overdue),
@@ -16425,18 +17061,19 @@ mod app_tests {
                 .collect()
         };
         assert_eq!(now(&app, &TaskView::Overdue), [0], "nine is past at ten");
-        assert_eq!(now(&app, &TaskView::Today), [1, 2]);
+        // Today is what is late and what is due today.
+        assert_eq!(now(&app, &TaskView::Today), [0, 1, 2]);
         // Two hours on: the eleven has passed, the day with no time has not.
         pinned(&mut app, 12 * 60);
         assert_eq!(now(&app, &TaskView::Overdue), [0, 1]);
-        assert_eq!(now(&app, &TaskView::Today), [2]);
+        assert_eq!(now(&app, &TaskView::Today), [0, 1, 2]);
         // At the end of the day it is still today, and a minute into the next it is late.
         pinned(&mut app, 23 * 60 + 59);
-        assert_eq!(now(&app, &TaskView::Today), [2]);
+        assert_eq!(now(&app, &TaskView::Overdue), [0, 1]);
         app.clock.today = super::dates::Date::new(2026, 11, 21).expect("a day");
         app.clock.minutes = 1;
         assert_eq!(now(&app, &TaskView::Overdue), [0, 1, 2]);
-        assert!(now(&app, &TaskView::Today).is_empty());
+        assert_eq!(now(&app, &TaskView::Today), [0, 1, 2]);
         // The panel says what day and time it is, and where, and the lines say what is late.
         let _ = app.update(Message::ShowTasks);
         drop(app.view());
@@ -17470,6 +18107,305 @@ mod app_tests {
         assert_eq!(super::profile::load_hidden_props(&dir), app.hidden_props);
         let _ = app.update(Message::ToggleProp("id"));
         assert!(!app.hidden_props.contains("id"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fresh app on the Tasks tab, in the Open view, on Friday 2026-11-20 at ten.
+    fn on_tasks(name: &str) -> (App, PathBuf) {
+        let dir = folder(name);
+        let mut app = open_app(&dir);
+        pinned(&mut app, 10 * 60);
+        let _ = app.update(Message::ShowTasks);
+        let _ = app.update(Message::ShowTaskView(super::TaskView::Open));
+        (app, dir)
+    }
+
+    fn add(app: &mut App, typed: &str) {
+        let _ = app.update(Message::TaskDraft(typed.to_owned()));
+        let _ = app.update(Message::AddTask);
+        settle(app);
+    }
+
+    #[test]
+    fn a_typed_task_is_read_for_its_day_its_repeat_and_its_priority() {
+        let _turn = one_at_a_time();
+        let (mut app, dir) = on_tasks("quick-add");
+        let _ = app.update(Message::TaskDraft("call vet tomorrow 3pm !2".to_owned()));
+        drop(app.view());
+        add(&mut app, "call vet tomorrow 3pm !2");
+        assert_eq!(listed(&app), ["call vet !2 2026-11-21 15:00"]);
+        assert_eq!(app.tasks[0].priority, Some(super::taskmeta::Priority::Two));
+        assert_eq!(
+            app.tasks[0].due.map(|due| due.date.to_string()).as_deref(),
+            Some("2026-11-21")
+        );
+        // A day picked in the calendar wins over the one typed.
+        let _ = app.update(Message::OpenCalendar(super::CalFor::New));
+        let _ = app.update(Message::PickDay("2026-12-01".to_owned()));
+        add(&mut app, "pay rent friday");
+        assert!(
+            listed(&app).contains(&"pay rent 2026-12-01".to_owned()),
+            "{:?}",
+            listed(&app)
+        );
+        // Keeping it as typed leaves every word where it was, and applies to one task only.
+        let _ = app.update(Message::TaskDraft("read daily news tomorrow".to_owned()));
+        let _ = app.update(Message::QuickKeep);
+        assert!(app.quick_literal);
+        drop(app.view());
+        let _ = app.update(Message::AddTask);
+        settle(&mut app);
+        assert!(listed(&app).contains(&"read daily news tomorrow".to_owned()));
+        assert!(!app.quick_literal, "it was for that one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_flag_changes_the_priority_and_a_repeat_and_a_rename_keep_it() {
+        use super::taskmeta::Priority;
+        let _turn = one_at_a_time();
+        let (mut app, dir) = on_tasks("priority");
+        add(&mut app, "water plants 2026-11-20 repeat:weekly");
+        let (id, line) = (app.tasks[0].note_id.clone(), app.tasks[0].line);
+        for want in [
+            Some(Priority::One),
+            Some(Priority::Two),
+            Some(Priority::Three),
+            None,
+        ] {
+            let _ = app.update(Message::CyclePriority {
+                id: id.clone(),
+                line,
+            });
+            settle(&mut app);
+            assert_eq!(app.tasks[0].priority, want);
+        }
+        let _ = app.update(Message::CyclePriority {
+            id: id.clone(),
+            line,
+        });
+        settle(&mut app);
+        assert_eq!(
+            app.tasks[0].text,
+            "water plants !1 2026-11-20 repeat:weekly"
+        );
+        // Checking a task that repeats moves it on, and the priority goes with it.
+        let _ = app.update(Message::SetTask {
+            id: id.clone(),
+            line,
+            done: true,
+        });
+        settle(&mut app);
+        assert_eq!(
+            app.tasks[0].text,
+            "water plants !1 2026-11-27 repeat:weekly"
+        );
+        // Renaming keeps the priority, and a priority typed in the words replaces it.
+        let _ = app.update(Message::BeginTaskEdit {
+            id: id.clone(),
+            line,
+        });
+        let _ = app.update(Message::TaskLabel("water the plants".to_owned()));
+        let _ = app.update(Message::CommitTaskRename);
+        settle(&mut app);
+        assert_eq!(
+            app.tasks[0].text,
+            "water the plants !1 2026-11-27 repeat:weekly"
+        );
+        let _ = app.update(Message::BeginTaskEdit { id, line });
+        let _ = app.update(Message::TaskLabel("water the plants !3".to_owned()));
+        let _ = app.update(Message::CommitTaskRename);
+        settle(&mut app);
+        assert_eq!(app.tasks[0].priority, Some(Priority::Three));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snoozing_puts_a_task_off_and_keeps_its_time_and_repeat() {
+        use super::{SnoozeTo, snoozed};
+        let today = super::dates::Date::new(2026, 11, 20).expect("a day");
+        let timed = super::due::Due::of("x 2026-11-20 09:30 repeat:weekly");
+        let later = snoozed(timed, SnoozeTo::Later, today, 10 * 60);
+        assert_eq!(
+            (later.date, later.time.map(super::due::Time::minutes)),
+            (today, Some(13 * 60))
+        );
+        assert!(later.repeat.is_some());
+        let night = snoozed(timed, SnoozeTo::Later, today, 22 * 60);
+        assert_eq!(night.date.to_string(), "2026-11-21");
+        assert_eq!(night.time.map(super::due::Time::minutes), Some(9 * 60));
+        let tomorrow = snoozed(timed, SnoozeTo::Tomorrow, today, 600);
+        assert_eq!(tomorrow.date.to_string(), "2026-11-21");
+        assert_eq!(
+            tomorrow.time.map(super::due::Time::minutes),
+            Some(9 * 60 + 30),
+            "its time stays"
+        );
+        assert_eq!(
+            snoozed(None, SnoozeTo::NextWeek, today, 600)
+                .date
+                .to_string(),
+            "2026-11-23"
+        );
+        assert!(snoozed(None, SnoozeTo::Tomorrow, today, 600).time.is_none());
+
+        let _turn = one_at_a_time();
+        let (mut app, dir) = on_tasks("snooze");
+        add(&mut app, "stretch");
+        let (id, line) = (app.tasks[0].note_id.clone(), app.tasks[0].line);
+        let _ = app.update(Message::SnoozeToggle {
+            id: id.clone(),
+            line,
+        });
+        assert!(app.snooze_open.is_some());
+        drop(app.view());
+        let _ = app.update(Message::Snooze {
+            id,
+            line,
+            to: SnoozeTo::Tomorrow,
+        });
+        settle(&mut app);
+        assert!(app.snooze_open.is_none());
+        assert_eq!(app.tasks[0].text, "stretch 2026-11-21");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_subtask_is_typed_under_its_task_and_shown_there_once() {
+        let _turn = one_at_a_time();
+        let (mut app, dir) = on_tasks("subtasks");
+        add(&mut app, "plan trip");
+        add(&mut app, "other thing");
+        let parent = app
+            .tasks
+            .iter()
+            .find(|t| t.text == "plan trip")
+            .map(|t| (t.note_id.clone(), t.line))
+            .expect("task");
+        let _ = app.update(Message::SubtaskOpen {
+            id: parent.0.clone(),
+            line: parent.1,
+        });
+        drop(app.view());
+        let _ = app.update(Message::SubtaskAdd);
+        assert!(app.tasks.len() == 2, "nothing typed adds nothing");
+        for typed in ["book hotel tomorrow", "pack !1"] {
+            let _ = app.update(Message::SubtaskText(typed.to_owned()));
+            let _ = app.update(Message::SubtaskAdd);
+            settle(&mut app);
+        }
+        let texts = listed(&app);
+        assert!(
+            texts.contains(&"book hotel 2026-11-21".to_owned()),
+            "{texts:?}"
+        );
+        let mother = app
+            .tasks
+            .iter()
+            .find(|t| t.text == "plan trip")
+            .expect("parent");
+        assert_eq!(mother.kids, (0, 2));
+        let kid = app
+            .tasks
+            .iter()
+            .find(|t| t.text == "book hotel 2026-11-21")
+            .expect("kid");
+        assert_eq!((kid.depth, kid.parent), (1, Some(mother.line)));
+        // In the list the subtasks follow their task, and are not listed again by themselves.
+        let open = app.open_tasks();
+        let rows = app.nested(&open);
+        let names: Vec<(String, usize)> = rows.iter().map(|(t, d)| (t.text.clone(), *d)).collect();
+        assert_eq!(names.len(), 4, "{names:?}");
+        let at = names
+            .iter()
+            .position(|(t, _)| t == "plan trip")
+            .expect("parent shown");
+        assert_eq!(names.get(at + 1).map(|(_, d)| *d), Some(1));
+        assert_eq!(names.get(at + 2).map(|(_, d)| *d), Some(1));
+        drop(app.view());
+        // A subtask done under an open task stays under it, and is not in the Done list.
+        let (id, line) = (kid.note_id.clone(), kid.line);
+        let _ = app.update(Message::SetTask {
+            id,
+            line,
+            done: true,
+        });
+        settle(&mut app);
+        let open = app.open_tasks();
+        assert!(
+            app.nested(&open).iter().any(|(t, _)| t.done),
+            "shown under its task"
+        );
+        let shown: std::collections::HashSet<(&str, usize)> =
+            open.iter().map(|t| (t.note_id.as_str(), t.line)).collect();
+        assert!(
+            app.done_tasks()
+                .iter()
+                .all(|t| app.has_ancestor_in(t, &shown))
+        );
+        drop(app.view());
+        let _ = app.update(Message::BackToList);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_today_page_has_what_is_late_what_is_due_and_what_was_done() {
+        let _turn = one_at_a_time();
+        let dir = folder("today-page");
+        let mut app = open_app(&dir);
+        pinned(&mut app, 10 * 60);
+        let _ = app.update(Message::ShowTasks);
+        assert_eq!(
+            app.task_view,
+            super::TaskView::Today,
+            "Today is where the tab opens"
+        );
+        drop(app.view());
+        add(&mut app, "tomorrow only 2026-11-21");
+        drop(app.view());
+        add(&mut app, "old thing 2026-11-01");
+        add(&mut app, "now thing 2026-11-20 18:00");
+        add(&mut app, "someday thing");
+        let shown: Vec<String> = app.open_tasks().iter().map(|t| t.text.clone()).collect();
+        assert_eq!(
+            shown,
+            ["old thing 2026-11-01", "now thing 2026-11-20 18:00"]
+        );
+        drop(app.view());
+        // Checking one off keeps it on the page, under Done today.
+        let (id, line) = {
+            let t = app
+                .tasks
+                .iter()
+                .find(|t| t.text.starts_with("now thing"))
+                .expect("task");
+            (t.note_id.clone(), t.line)
+        };
+        let _ = app.update(Message::SetTask {
+            id,
+            line,
+            done: true,
+        });
+        settle(&mut app);
+        assert_eq!(app.done_tasks().len(), 1);
+        drop(app.view());
+        // With nothing left, the page says so and points at tomorrow.
+        let (id, line) = {
+            let t = app
+                .tasks
+                .iter()
+                .find(|t| t.text.starts_with("old thing"))
+                .expect("task");
+            (t.note_id.clone(), t.line)
+        };
+        let _ = app.update(Message::SetTask {
+            id,
+            line,
+            done: true,
+        });
+        settle(&mut app);
+        assert!(app.open_tasks().is_empty());
+        drop(app.view());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

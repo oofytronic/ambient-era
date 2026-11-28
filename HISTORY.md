@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-28 — tasks: Today, plain-language adding, subtasks, priority, snooze
+
+The Tasks tab opens on Today: what is late, what is due today, and what was checked off today. Typing `call vet tomorrow 3pm every week !2` in the add field reads the day, time, repeat, and priority out of the words, shows what it read, and can be turned off for that one task. A task can have subtasks, which are tasks indented under it in its note. A task has a priority, `!1` to `!3`, written as a token in its words. A task can be put off to later today, tomorrow, next week, or a picked day. All of it is words in the task's own line. Nothing is a new record, and nothing changes on the wire. Habits are not started.
+
 ## 2026-11-27 — a link on a note, rename and merge a group, a deeper graph, and a choice of facts
 
 A note can hold one link, kept in a hidden line beside its tags. The line is in the sealed body, so nothing on the wire changes. Renaming a group, or typing the name of another group to merge into it, rewrites the tag line of every note in it, each as a new snapshot. The old text stays in the log. The graph shows the second part of a tag as a circle inside its group, can be limited to one group, and pans and zooms. The note panel lists more facts (link, when it changed, words), and which ones show is a choice kept on this computer. A choice that was "per note" is the panel's, for every note, because a per-note one would be saved data.

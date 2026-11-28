@@ -65,3 +65,11 @@ The graph draws the second part of a tag as a circle inside its group (`settle_n
 
 The settings panel lists facts about the open note (`NOTE_FACTS`). Which are hidden is a local `props` file and applies to every note. It is not saved on a note.
 
+## Task words: priority, plain-language days, subtasks, snooze
+
+A task is still one line in a note. A priority is a token, `!1`, `!2`, or `!3`, in the words, ahead of the due moment, so `Due::split` still reads the date from the end of the line. `taskmeta.rs` holds `Priority`, `split_priority`, `with_priority`, and `parse`, which reads a typed line (`call vet tomorrow 3pm every week !2`) and gives back the words that are left and a `Due` and priority. It takes only a phrase it is sure of: `sun`, `mar`, `may`, a bare number, and `daily` anywhere but last are left in the words. The way a due moment is written in a line (`2026-11-20 14:30 repeat:weekly`) reads the same, so copying a line in adds it unchanged. The field shows what it read, and "Keep as typed" turns it off for that one task. A day picked in the calendar wins over a typed one.
+
+A subtask is a task line indented under another. `markdown::task_lines` gives each `depth` and `parent` (the nearest task above with less indent, ended by words at the left edge), and `markdown::add_subtask` writes one after the last line already under the task. `App::nested` shows a task with its subtasks under it, once, whether or not the subtasks would be in the view alone. Checking the last subtask does not check the task, and checking the task does not check its subtasks.
+
+Rewrite a task's label through `LabelParts` (words, priority, due, citations), so the line keeps its one order. Anything that rebuilds a label from `task_words` alone loses the priority. Snooze (`SnoozeTo`) only sets the due moment and keeps its time and repeat. The Today view is what is late and what is due today. It is where the tab opens.
+
