@@ -28,6 +28,8 @@ mod clock;
 mod dates;
 mod due;
 mod files;
+mod habit_view;
+mod habits;
 mod lane;
 mod markdown;
 mod profile;
@@ -288,6 +290,13 @@ struct App {
     hidden_props: BTreeSet<String>,
     /// The task whose snooze choices are open, and the task a subtask is being typed under.
     snooze_open: Option<(String, usize)>,
+    /// The habits in the Habits note, and the check-ins this computer has for them.
+    habits: Vec<habits::Habit>,
+    habit_log: BTreeMap<String, habits::Counts>,
+    /// The habit shown with its month, which month, and what is typed to add one.
+    habit_open: Option<String>,
+    habit_month: (i32, u32),
+    habit_draft: String,
     subtask_for: Option<(String, usize)>,
     subtask_text: String,
     /// Add the task as typed, with no dates or priority read out of the words.
@@ -656,6 +665,17 @@ enum Message {
     SubtaskAdd,
     SubtaskCancel,
     QuickKeep,
+    /// Check a habit on a day, `YYYY-MM-DD`: done, one more time, or cleared.
+    HabitCheck {
+        key: String,
+        day: String,
+    },
+    HabitOpen(String),
+    HabitMonth(i32),
+    HabitDraft(String),
+    HabitAdd,
+    HabitRemove(String),
+    HabitEdit(String),
     /// Bring a deleted note back, as it read before.
     RestoreNote(String),
     /// Show the versions the open note has had, or go back to it.
@@ -903,6 +923,8 @@ enum TaskView {
     Group(String),
     /// The tasks in one note.
     Note(String),
+    /// The habits, and how they are going.
+    Habits,
 }
 
 /// One note in a reading of a group.
@@ -1277,6 +1299,11 @@ impl App {
             graph_group: None,
             hidden_props: BTreeSet::new(),
             snooze_open: None,
+            habits: Vec::new(),
+            habit_log: BTreeMap::new(),
+            habit_open: None,
+            habit_month: (2026, 1),
+            habit_draft: String::new(),
             subtask_for: None,
             subtask_text: String::new(),
             quick_literal: false,
@@ -1359,6 +1386,7 @@ impl App {
         app.folded = profile::load_folds(&app.dir);
         app.pinned = profile::load_pinned(&app.dir);
         app.hidden_props = profile::load_hidden_props(&app.dir);
+        app.habit_log = profile::load_habit_log(&app.dir);
         app.done_on = profile::load_done_on(&app.dir);
         app.drafts = profile::load_drafts(&app.dir);
         app.orders = profile::load_order(&app.dir);
@@ -2373,6 +2401,44 @@ impl App {
                 self.subtask_text.clear();
                 Task::none()
             }
+            Message::HabitCheck { key, day } => {
+                self.check_habit(&key, &day);
+                Task::none()
+            }
+            Message::HabitOpen(key) => {
+                self.refresh_clock();
+                let today = self.clock.today;
+                self.habit_month = (today.year, today.month);
+                self.habit_open = if self.habit_open.as_deref() == Some(key.as_str()) {
+                    None
+                } else {
+                    Some(key)
+                };
+                Task::none()
+            }
+            Message::HabitMonth(delta) => {
+                let (year, month) = self.habit_month;
+                self.habit_month = dates::shift_month(year, month, delta);
+                Task::none()
+            }
+            Message::HabitDraft(text) => {
+                self.habit_draft = text;
+                Task::none()
+            }
+            Message::HabitAdd => self.add_habit(),
+            Message::HabitRemove(key) => self.remove_habit(&key),
+            Message::HabitEdit(key) => {
+                let found = self.habits_note_id().zip(
+                    self.habits
+                        .iter()
+                        .find(|habit| habit.key() == key)
+                        .map(|habit| habit.line),
+                );
+                match found {
+                    Some((id, line)) => self.update(Message::OpenAt { id, line }),
+                    None => Task::none(),
+                }
+            }
             Message::QuickKeep => {
                 self.quick_literal = !self.quick_literal;
                 focus_named("task-input")
@@ -3287,7 +3353,12 @@ impl App {
             ("Done", TaskView::Done),
         ] {
             let n = count(&view);
+            let habits_next = view == TaskView::Today;
             panel = panel.push(self.task_view_row(name, n, 0, view));
+            // Habits come right after Today, since they are what Today is for too.
+            if habits_next {
+                panel = panel.push(self.habits_view_row());
+            }
         }
         // Groups: every group a note with a task is in, and every group that contains it.
         let mut groups: BTreeMap<String, (String, usize, std::collections::BTreeSet<usize>)> =
@@ -3861,6 +3932,9 @@ impl App {
     }
 
     fn tasks_pane(&self) -> Element<'_, Message> {
+        if self.task_view == TaskView::Habits {
+            return self.habits_pane();
+        }
         let ink = self.ink();
         // Up and down are not taken by this field, so they move through the tasks. Enter is.
         // An empty field checks the task those arrows are on, instead of adding a blank one.
@@ -4079,14 +4153,29 @@ impl App {
             })
         });
         list = list.push(text("Today").font(serif()).size(32));
-        let summary = if open.is_empty() {
+        let habits_left = self.habits_left();
+        let mut said: Vec<String> = Vec::new();
+        if !open.is_empty() {
+            said.push(format!("{} to do", open.len()));
+        }
+        if !late.is_empty() {
+            said.push(format!("{} overdue", late.len()));
+        }
+        if habits_left > 0 {
+            said.push(format!(
+                "{habits_left} {} left",
+                if habits_left == 1 { "habit" } else { "habits" }
+            ));
+        }
+        let summary = if said.is_empty() {
             "Nothing left to do today.".to_owned()
-        } else if late.is_empty() {
-            format!("{} to do", open.len())
         } else {
-            format!("{} to do · {} overdue", open.len(), late.len())
+            said.join(" · ")
         };
         list = list.push(text(summary).size(14).color(ink.muted));
+        if let Some(habits) = self.today_habits() {
+            list = list.push(habits);
+        }
         if open.is_empty() {
             let tomorrow = self.clock.today.plus_days(1).map_or(0, |day| {
                 self.tasks
@@ -4136,7 +4225,7 @@ impl App {
             .into_iter()
             .filter(|task| *view == TaskView::Done || !self.has_ancestor_in(task, &shown))
             .collect();
-        if *view == TaskView::Today && !self.tasks.is_empty() {
+        if *view == TaskView::Today && (!self.tasks.is_empty() || !self.habits.is_empty()) {
             return self.today_list(ink, &open, &done);
         }
         let heading = self.task_view_name();
@@ -4190,6 +4279,7 @@ impl App {
             TaskView::Upcoming => "Nothing coming up.".to_owned(),
             TaskView::NoDate => "Nothing without a date.".to_owned(),
             TaskView::Done => "Nothing done.".to_owned(),
+            TaskView::Habits => "No habits yet.".to_owned(),
             TaskView::Open => "Nothing to do.".to_owned(),
             TaskView::Group(name) => format!("Nothing in {name}."),
             TaskView::Note(_) => "Nothing in this note.".to_owned(),
@@ -4329,6 +4419,7 @@ impl App {
         match view {
             TaskView::Open => true,
             TaskView::Done => task.done,
+            TaskView::Habits => false,
             TaskView::Today => {
                 !task.done && matches!(state, Some(due::State::Today | due::State::Late))
             }
@@ -4730,6 +4821,7 @@ impl App {
             TaskView::Upcoming => "Upcoming".to_owned(),
             TaskView::NoDate => "No date".to_owned(),
             TaskView::Done => "Done".to_owned(),
+            TaskView::Habits => "Habits".to_owned(),
             TaskView::Group(key) => self
                 .catalog
                 .iter()
@@ -5132,6 +5224,124 @@ impl App {
                 .then_with(|| left.line.cmp(&right.line))
         });
         self.tasks = rows;
+        self.rebuild_habits();
+    }
+
+    /// The note the habits are written in, if there is one.
+    fn habits_note_id(&self) -> Option<String> {
+        self.catalog
+            .iter()
+            .find(|note| note.title == HABITS_NOTE && !note.conflict)
+            .map(|note| note.id.clone())
+    }
+
+    /// Read the habits again from their note, as it is now, edits not yet saved included.
+    fn rebuild_habits(&mut self) {
+        let body = self
+            .habits_note_id()
+            .and_then(|id| self.task_source(&id))
+            .map(|(body, _, _)| body)
+            .unwrap_or_default();
+        let (prose, _) = ambient_cli::split_note_tags(&body);
+        self.habits = habits::parse_note(&prose);
+    }
+
+    /// One more time for a habit on a day, or done, or cleared, and kept on this computer.
+    fn check_habit(&mut self, key: &str, day: &str) {
+        let Some(habit) = self.habits.iter().find(|habit| habit.key() == key) else {
+            return;
+        };
+        let Some(date) = dates::Date::parse(day) else {
+            return;
+        };
+        let counts = self.habit_log.entry(key.to_owned()).or_default();
+        let next = habits::next_count(habit, habits::count_on(counts, date));
+        if next == 0 {
+            counts.remove(day);
+        } else {
+            counts.insert(day.to_owned(), next);
+        }
+        // A habit with nothing checked has no entry, so the log holds only what was done.
+        self.habit_log.retain(|_, counts| !counts.is_empty());
+        if let Err(err) = profile::store_habit_log(&self.dir, &self.habit_log) {
+            self.say(&err);
+        }
+    }
+
+    /// Write the habit typed in the field as a line of the Habits note, which is made if it is not
+    /// there yet.
+    fn add_habit(&mut self) -> Task<Message> {
+        let typed = self.habit_draft.trim().to_owned();
+        if typed.is_empty() {
+            self.say("Write the habit first.");
+            return Task::none();
+        }
+        let (name, schedule, target) = habits::parse_phrase(&typed);
+        let habit = habits::Habit {
+            name,
+            schedule,
+            target,
+            line: 0,
+        };
+        if self.habits.iter().any(|have| have.key() == habit.key()) {
+            self.say("That habit is already there.");
+            return Task::none();
+        }
+        let line = habit.write();
+        self.habit_draft.clear();
+        let Some(id) = self.habits_note_id() else {
+            return self.apply_note(None, HABITS_NOTE.to_owned(), format!("{line}\n"));
+        };
+        let Some((body, conflict, title)) = self.task_source(&id) else {
+            self.say("That note is not here.");
+            return Task::none();
+        };
+        if conflict {
+            self.show_note(&id);
+            self.say("Two versions. Write the one you want to keep, then save.");
+            return Task::none();
+        }
+        let mut next = body;
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str(&line);
+        next.push('\n');
+        self.write_note(&id, &title, &next)
+    }
+
+    /// Take a habit's line out of its note. Its check-ins stay, so adding it again brings them
+    /// back.
+    fn remove_habit(&mut self, key: &str) -> Task<Message> {
+        let Some(line) = self
+            .habits
+            .iter()
+            .find(|habit| habit.key() == key)
+            .map(|habit| habit.line)
+        else {
+            return Task::none();
+        };
+        let Some(id) = self.habits_note_id() else {
+            return Task::none();
+        };
+        let Some((body, conflict, title)) = self.task_source(&id) else {
+            return Task::none();
+        };
+        if conflict {
+            self.show_note(&id);
+            self.say("Two versions. Write the one you want to keep, then save.");
+            return Task::none();
+        }
+        let mut lines: Vec<&str> = body.split('\n').collect();
+        if line >= lines.len() {
+            return Task::none();
+        }
+        lines.remove(line);
+        if self.habit_open.as_deref() == Some(key) {
+            self.habit_open = None;
+        }
+        self.say("Removed. Its check-ins are kept if you add it again.");
+        self.write_note(&id, &title, &lines.join("\n"))
     }
 
     fn task_source(&self, id: &str) -> Option<(String, bool, String)> {
@@ -11168,6 +11378,9 @@ impl App {
         self.folded.clear();
         self.pinned.clear();
         self.hidden_props.clear();
+        self.habit_log.clear();
+        self.habits.clear();
+        self.habit_open = None;
         self.graph_group = None;
         self.drafts.clear();
         self.done_on.clear();
@@ -13980,6 +14193,9 @@ fn snoozed(current: Option<due::Due>, to: SnoozeTo, today: dates::Date, minutes:
         repeat: keep.1,
     }
 }
+
+/// The note the habits are written in.
+const HABITS_NOTE: &str = "Habits";
 
 /// The tag that makes a note a template.
 const TEMPLATES: &str = "Templates";
@@ -18406,6 +18622,154 @@ mod app_tests {
         settle(&mut app);
         assert!(app.open_tasks().is_empty());
         drop(app.view());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_habit_is_added_from_words_and_written_as_a_line_of_the_habits_note() {
+        let _turn = one_at_a_time();
+        let (mut app, dir) = on_tasks("habit-add");
+        let _ = app.update(Message::ShowTaskView(super::TaskView::Habits));
+        drop(app.view());
+        let _ = app.update(Message::HabitAdd);
+        assert!(app.habits.is_empty(), "nothing typed adds nothing");
+        let _ = app.update(Message::HabitDraft("run 3 times a week".to_owned()));
+        drop(app.view());
+        let _ = app.update(Message::HabitAdd);
+        settle(&mut app);
+        assert_eq!(app.habits.len(), 1);
+        assert_eq!(app.habits[0].name, "run");
+        assert_eq!(app.habits[0].schedule, super::habits::Schedule::PerWeek(3));
+        let id = app.habits_note_id().expect("the note was made");
+        let (body, _, _) = app.task_source(&id).expect("its text");
+        assert_eq!(body, "- run habit:3/week\n");
+        // A second goes on a new line, and the same name is not added twice.
+        let _ = app.update(Message::HabitDraft("read every weekday".to_owned()));
+        let _ = app.update(Message::HabitAdd);
+        settle(&mut app);
+        let _ = app.update(Message::HabitDraft("Run".to_owned()));
+        let _ = app.update(Message::HabitAdd);
+        settle(&mut app);
+        assert_eq!(app.habits.len(), 2);
+        let (body, _, _) = app.task_source(&id).expect("its text");
+        assert_eq!(body, "- run habit:3/week\n- read habit:weekdays\n");
+        drop(app.view());
+        // The note is a note: a line written in it by hand is a habit, and other lines are words.
+        let _ = write_snapshot(
+            &dir,
+            Some(&id),
+            "Habits",
+            "My habits\n- run habit:3/week\n- stretch habit:mon,wed,fri\n- just a thought\n",
+        )
+        .expect("edit");
+        app.adopt_open_book(Notebook::open(&dir).expect("open"));
+        let _ = app.update(Message::ShowTasks);
+        let names: Vec<&str> = app.habits.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, ["run", "stretch"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_habit_is_checked_on_a_day_and_the_check_is_kept_on_this_computer() {
+        let _turn = one_at_a_time();
+        let (mut app, dir) = on_tasks("habit-check");
+        let _ = app.update(Message::ShowTaskView(super::TaskView::Today));
+        for typed in ["meditate", "water 3 times a day", "stretch every saturday"] {
+            let _ = app.update(Message::HabitDraft(typed.to_owned()));
+            let _ = app.update(Message::HabitAdd);
+            settle(&mut app);
+        }
+        let today = app.clock.today.to_string();
+        // Friday: meditate and water are asked for, and stretch (Saturday) is not.
+        let due: Vec<&str> = app
+            .habits_due_today()
+            .iter()
+            .map(|h| h.name.as_str())
+            .collect();
+        assert_eq!(due, ["meditate", "water"]);
+        assert_eq!(app.habits_left(), 2);
+        drop(app.view());
+        let check = |app: &mut App, key: &str, day: &str| {
+            let _ = app.update(Message::HabitCheck {
+                key: key.to_owned(),
+                day: day.to_owned(),
+            });
+        };
+        check(&mut app, "meditate", &today);
+        assert_eq!(app.habits_left(), 1);
+        // Again clears it. A count goes up one at a time and clears after the last.
+        check(&mut app, "meditate", &today);
+        assert_eq!(app.habits_left(), 2);
+        for want in [1, 2, 3, 0] {
+            check(&mut app, "water", &today);
+            let kept = app
+                .habit_log
+                .get("water")
+                .and_then(|c| c.get(&today))
+                .copied()
+                .unwrap_or(0);
+            assert_eq!(kept, want);
+        }
+        check(&mut app, "meditate", &today);
+        check(&mut app, "meditate", "2026-11-18");
+        // A day that is not a day, and a habit that is not there, change nothing.
+        check(&mut app, "meditate", "nonsense");
+        check(&mut app, "nothing", &today);
+        assert_eq!(app.habit_log.len(), 1);
+        // It is on this computer's disk, and comes back.
+        let again = super::profile::load_habit_log(&dir);
+        assert_eq!(
+            again.get("meditate").map(std::collections::BTreeMap::len),
+            Some(2)
+        );
+        assert_eq!(again, app.habit_log);
+        drop(app.view());
+        // The Habits page, with a month open and moved back, and a past day filled in.
+        let _ = app.update(Message::ShowTaskView(super::TaskView::Habits));
+        let _ = app.update(Message::HabitOpen("meditate".to_owned()));
+        assert_eq!(app.habit_month, (2026, 11));
+        let _ = app.update(Message::HabitMonth(-1));
+        assert_eq!(app.habit_month, (2026, 10));
+        drop(app.view());
+        let _ = app.update(Message::HabitOpen("meditate".to_owned()));
+        assert!(app.habit_open.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_habit_is_taken_out_of_its_note_and_its_check_ins_come_back_with_it() {
+        let _turn = one_at_a_time();
+        let (mut app, dir) = on_tasks("habit-remove");
+        for typed in ["read every weekday", "run 3 times a week"] {
+            let _ = app.update(Message::HabitDraft(typed.to_owned()));
+            let _ = app.update(Message::HabitAdd);
+            settle(&mut app);
+        }
+        let today = app.clock.today.to_string();
+        let _ = app.update(Message::HabitCheck {
+            key: "read".to_owned(),
+            day: today,
+        });
+        let _ = app.update(Message::HabitRemove("read".to_owned()));
+        settle(&mut app);
+        assert_eq!(app.habits.len(), 1);
+        let id = app.habits_note_id().expect("note");
+        assert_eq!(
+            app.task_source(&id).expect("text").0,
+            "- run habit:3/week\n"
+        );
+        assert!(app.habit_log.contains_key("read"), "the check-ins are kept");
+        let _ = app.update(Message::HabitDraft("read every weekday".to_owned()));
+        let _ = app.update(Message::HabitAdd);
+        settle(&mut app);
+        assert_eq!(
+            app.habits_left(),
+            1,
+            "read is done today again, run is still asked for"
+        );
+        // Edit in the note opens it on the habit's line.
+        let _ = app.update(Message::HabitEdit("run".to_owned()));
+        assert_eq!(app.selected.as_deref(), Some(id.as_str()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

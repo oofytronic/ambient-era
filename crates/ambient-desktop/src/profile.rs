@@ -284,6 +284,56 @@ pub(super) fn store_hidden_props(
     fs::write(dir.join("props"), text).map_err(|_| "could not write the panel choices".to_owned())
 }
 
+/// The habit check-ins: a habit's name, and for each day it was done how many times. Not sealed.
+/// Not sent. A second computer shows the same habits, from the note, with no history.
+pub(super) fn load_habit_log(
+    dir: &Path,
+) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, u32>> {
+    let mut found = std::collections::BTreeMap::new();
+    let Ok(text) = fs::read_to_string(dir.join("habitlog")) else {
+        return found;
+    };
+    for line in text.lines().skip(1) {
+        let Some((key, days)) = line.split_once('\t') else {
+            continue;
+        };
+        let mut counts = std::collections::BTreeMap::new();
+        for pair in days.split(',') {
+            if let Some((day, count)) = pair.split_once('=')
+                && let Ok(count) = count.trim().parse::<u32>()
+                && count > 0
+            {
+                counts.insert(day.trim().to_owned(), count);
+            }
+        }
+        if !key.is_empty() && !counts.is_empty() {
+            found.insert(key.to_owned(), counts);
+        }
+    }
+    found
+}
+
+pub(super) fn store_habit_log(
+    dir: &Path,
+    log: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, u32>>,
+) -> Result<(), String> {
+    let mut text = String::from("v1\n");
+    for (key, counts) in log {
+        if key.is_empty() || counts.is_empty() {
+            continue;
+        }
+        let days: Vec<String> = counts
+            .iter()
+            .map(|(day, count)| format!("{day}={count}"))
+            .collect();
+        text.push_str(&one_line(key));
+        text.push('\t');
+        text.push_str(&days.join(","));
+        text.push('\n');
+    }
+    fs::write(dir.join("habitlog"), text).map_err(|_| "could not write the check-ins".to_owned())
+}
+
 /// The note that was open, and the line the caret was on. Not sealed. Not sent.
 pub(super) fn load_place(dir: &Path) -> Option<(String, usize)> {
     let text = fs::read_to_string(dir.join("place")).ok()?;

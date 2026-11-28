@@ -178,6 +178,88 @@ fn app_in(name: &str) -> (App, std::path::PathBuf) {
     (app, dir)
 }
 
+/// The Tasks tab with its task states, and the habits, drawn as the sweep's page at this size.
+fn draw_tasks_and_habits(app: &mut App, screen: &mut Headless, size: Size) {
+    // The Tasks tab with a late task, a priority, a task with subtasks, and the tools out.
+    let row = |line: usize, depth: usize, parent: Option<usize>, text: &str| super::TaskRow {
+        note_id: "tasks".to_owned(),
+        note_title: "Tasks".to_owned(),
+        line,
+        done: false,
+        due: super::due::Due::of(text),
+        priority: super::markdown::task_priority(text),
+        depth,
+        parent,
+        kids: (0, usize::from(line == 0) * 2),
+        text: text.to_owned(),
+    };
+    app.tasks = vec![
+        row(
+            0,
+            0,
+            None,
+            "plan a trip with a rather long name to wrap !1 2026-01-01",
+        ),
+        row(1, 1, Some(0), "book the hotel"),
+        row(2, 1, Some(0), "pack !2"),
+        row(3, 0, None, "water plants !3 2099-01-01 repeat:weekly"),
+    ];
+    for view in [super::TaskView::Today, super::TaskView::Open] {
+        let _ = app.update(Message::ShowTaskView(view));
+        let _ = app.update(Message::ShowTasks);
+        screen.draw(app, size);
+        let _ = app.update(Message::RowHover("tasks:0".to_owned(), true));
+        let _ = app.update(Message::SnoozeToggle {
+            id: "tasks".to_owned(),
+            line: 0,
+        });
+        let _ = app.update(Message::SubtaskOpen {
+            id: "tasks".to_owned(),
+            line: 0,
+        });
+        screen.draw(app, size);
+        let _ = app.update(Message::SubtaskCancel);
+        let _ = app.update(Message::SnoozeToggle {
+            id: "tasks".to_owned(),
+            line: 0,
+        });
+        let _ = app.update(Message::RowHover("tasks:0".to_owned(), false));
+    }
+    // Habits: on the Today page, and on their own page with one month open.
+    app.habits = vec![
+        super::habits::Habit {
+            name: "Meditate".to_owned(),
+            schedule: super::habits::Schedule::DAILY,
+            target: 1,
+            line: 0,
+        },
+        super::habits::Habit {
+            name: "Water".to_owned(),
+            schedule: super::habits::Schedule::PerWeek(3),
+            target: 8,
+            line: 1,
+        },
+    ];
+    let today = app.clock.today;
+    let mut counts = std::collections::BTreeMap::new();
+    for back in [1_i64, 2, 4] {
+        if let Some(day) = today.plus_days(-back) {
+            counts.insert(day.to_string(), 1);
+        }
+    }
+    app.habit_log.insert("meditate".to_owned(), counts);
+    for view in [super::TaskView::Today, super::TaskView::Habits] {
+        let _ = app.update(Message::ShowTaskView(view));
+        let _ = app.update(Message::ShowTasks);
+        screen.draw(app, size);
+    }
+    let _ = app.update(Message::HabitOpen("meditate".to_owned()));
+    screen.draw(app, size);
+    let _ = app.update(Message::HabitOpen("meditate".to_owned()));
+    app.habits.clear();
+    app.habit_log.clear();
+}
+
 #[test]
 fn every_screen_lays_out_and_draws_at_every_width() {
     let _turn = super::tests_support::one_at_a_time();
@@ -209,51 +291,7 @@ fn every_screen_lays_out_and_draws_at_every_width() {
             screen.draw(&app, size);
             let _ = app.update(Message::CloseOverlays);
         }
-        // The Tasks tab with a late task, a priority, a task with subtasks, and the tools out.
-        let row = |line: usize, depth: usize, parent: Option<usize>, text: &str| super::TaskRow {
-            note_id: "tasks".to_owned(),
-            note_title: "Tasks".to_owned(),
-            line,
-            done: false,
-            due: super::due::Due::of(text),
-            priority: super::markdown::task_priority(text),
-            depth,
-            parent,
-            kids: (0, usize::from(line == 0) * 2),
-            text: text.to_owned(),
-        };
-        app.tasks = vec![
-            row(
-                0,
-                0,
-                None,
-                "plan a trip with a rather long name to wrap !1 2026-01-01",
-            ),
-            row(1, 1, Some(0), "book the hotel"),
-            row(2, 1, Some(0), "pack !2"),
-            row(3, 0, None, "water plants !3 2099-01-01 repeat:weekly"),
-        ];
-        for view in [super::TaskView::Today, super::TaskView::Open] {
-            let _ = app.update(Message::ShowTaskView(view));
-            let _ = app.update(Message::ShowTasks);
-            screen.draw(&app, size);
-            let _ = app.update(Message::RowHover("tasks:0".to_owned(), true));
-            let _ = app.update(Message::SnoozeToggle {
-                id: "tasks".to_owned(),
-                line: 0,
-            });
-            let _ = app.update(Message::SubtaskOpen {
-                id: "tasks".to_owned(),
-                line: 0,
-            });
-            screen.draw(&app, size);
-            let _ = app.update(Message::SubtaskCancel);
-            let _ = app.update(Message::SnoozeToggle {
-                id: "tasks".to_owned(),
-                line: 0,
-            });
-            let _ = app.update(Message::RowHover("tasks:0".to_owned(), false));
-        }
+        draw_tasks_and_habits(&mut app, &mut screen, size);
         // The graph, with a group in view and zoomed in, and the panel with its list of facts.
         let _ = app.update(Message::ShowNotes);
         let _ = app.update(Message::ToggleGraph);

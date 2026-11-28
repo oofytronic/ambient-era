@@ -100,6 +100,14 @@ See [platforms.md](platforms.md).
 - **A parent task does not show its `1/3` in the note,** only in the Tasks tab. Drawing it in the line is not done.
 - **Habits are not started.** See the discussion in the session notes: where check-ins live is a decision to make first.
 
+## Habits
+
+- **Check-ins are on this computer only.** The habits are in the Habits note and sync. The check-ins do not, so a second computer shows the habits with an empty history. Making them sync is a decision for an ADR before any code: a check-in is "done on this day", which two computers must merge as a union. Notes merge by keeping both versions, which is the wrong rule for it.
+- **A habit is keyed by its name.** Renaming it in the note starts a new history. The old one stays in the file.
+- **No reminders and no timeline.** A habit with a time of day is not announced, and there is no day view of habits and tasks together. Both need the system's notifications or a bigger piece of design.
+- **A habit with a count asks for it in one day.** There is no "per week" total for counts.
+- **Removing a habit keeps its check-ins,** so adding it again brings them back. There is no way yet to erase them from the window.
+
 ## Offered, not built
 
 Small things that would help daily use.

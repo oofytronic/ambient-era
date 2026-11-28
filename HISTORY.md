@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-30 — habits, phase one
+
+Habits are in the Tasks tab. A habit is a line in a note called Habits, so it is text and a note like any other. It can be every day, some weekdays, or some days a week, and it can ask for a count a day, like eight glasses. Today shows the habits that are asked for, each with a round button. A Habits view shows the week as seven dots, how the last seven days went, and a month to look back over and fill in. Check-ins are kept on this computer only. How they should sync is not decided, and nothing was built that would make it harder to decide. There is no visual day timeline and no reminders yet.
+
 ## 2026-11-29 — a task line reads better in its note, and a long subtask no longer breaks
 
 A task's priority and day are drawn in color in the note, and a subtask is moved in under its task. The saved text is unchanged. A long indented line with the caret in it used to put its checkbox alone on one row and its words on the next, because the wrapper made a row of the leading space. That is fixed and held by a test. A count of done subtasks drawn at the end of the parent's line is not done yet.

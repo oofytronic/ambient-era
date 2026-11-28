@@ -79,3 +79,9 @@ The saved line is unchanged: `- [ ] words !1 2026-11-21 15:00 repeat:weekly`. Th
 
 `wrap_by` must not begin an indented line with a row of its own made of the leading space. It did, and a long subtask with the caret in it showed its checkbox alone and the words on the next row. The headless test `a_long_subtask_with_the_caret_in_it_starts_its_words_beside_its_checkbox` holds it.
 
+## Habits, phase one
+
+A habit is a line in a note titled Habits: `- Run habit:3/week`, `- Meditate habit:daily`, `- Stretch habit:mon,wed,fri`, `- Water habit:daily*8` (`habits::parse_note`, `Habit::write`). The `habit:` word is last on the line, and a line without it is just words, so the note can hold anything else. It is an ordinary note and syncs like one. The check-ins are not in it. They are in a plain `habitlog` file in the notebook folder, by the habit's lowercase name and the day, and they are **on this computer only**. A second computer shows the same habits with no history. Do not make them sync without the decision in `docs/open-items.md`: a check-in is "done on this day", and two computers must combine as a union, which is not the keep-both rule notes use.
+
+`habits.rs` has no clock and no file. It has the schedule (days of the week, or some days a week), when a habit is due, the dots (`Day`), how the last seven days went, and the runs. It is built to be kind: today is not a miss until it is over, a day it was not asked for does not break a run, and a habit of some days a week misses nothing in the middle of a week. Say "5 of the last 7", not a count of failures. `habit_view.rs` draws it: the Today page, and the Habits view in the Tasks tab with a month for each. A name is the key, so renaming a habit in the note starts a new history.
+
