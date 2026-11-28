@@ -438,3 +438,68 @@ fn the_edge_check_sees_a_box_that_runs_off_and_lets_a_scroll_area_have_its_conte
     past_the_right_edge(&wide_child, Point::ORIGIN, 100.0, &[content], 0, &mut found);
     assert!(found.is_empty(), "{found:?}");
 }
+
+/// A task indented under another, long enough to wrap, with the caret in it. The row it is drawn
+/// in held the checkbox and nothing else, and the words began on a row below.
+#[test]
+fn a_long_subtask_with_the_caret_in_it_starts_its_words_beside_its_checkbox() {
+    fn rows(node: &Node, at: Point, out: &mut Vec<(f32, f32, f32)>) {
+        let b = node.bounds();
+        let (x, y) = (at.x + b.x, at.y + b.y);
+        if b.width > 600.0 && b.height > 20.0 && b.height < 200.0 && y > 230.0 {
+            let first = node.children().first().map_or(0.0, |c| c.bounds().width);
+            out.push((y, b.height, first));
+        }
+        for child in node.children() {
+            rows(child, Point::new(x, y), out);
+        }
+    }
+    fn boxes(node: &Node, at: Point, out: &mut Vec<f32>) {
+        let b = node.bounds();
+        let (x, y) = (at.x + b.x, at.y + b.y);
+        if (b.width - 16.0).abs() < 0.5 && (b.height - 16.0).abs() < 0.5 && y > 230.0 {
+            out.push(x);
+        }
+        for child in node.children() {
+            boxes(child, Point::new(x, y), out);
+        }
+    }
+    let _turn = super::tests_support::one_at_a_time();
+    let (mut app, dir) = app_in("headless-subtask-wrap");
+    let size = Size::new(1100.0, 760.0);
+    let _ = app.update(Message::Resized(size));
+    let _ = app.update(Message::ShowNotes);
+    app.body.load(
+        "- [ ] parent task\n  - [ ] book hotel 2026-11-21 and also a much longer line that has to wrap around the width of the page\n- [ ] other",
+    );
+    app.body.place(iced::widget::text_editor::Cursor {
+        position: iced::widget::text_editor::Position {
+            line: 1,
+            column: 12,
+        },
+        selection: None,
+    });
+    let _ = app.update(Message::Resized(size));
+    let mut screen = Headless::new();
+    let (node, _) = screen.layout(&app, size);
+    // Every box the width of the page, in the editor, and the first box inside it that has a
+    // checkbox beside words: the words must not be on a row of their own below it.
+    let mut found = Vec::new();
+    rows(&node, Point::ORIGIN, &mut found);
+    assert!(!found.is_empty());
+    // The line of the subtask is two text rows tall, and not three: no row of only a checkbox.
+    // The checkbox of the subtask is moved in from its task's.
+    let mut lefts = Vec::new();
+    boxes(&node, Point::ORIGIN, &mut lefts);
+    let least = lefts.iter().copied().fold(f32::MAX, f32::min);
+    assert!(
+        lefts.iter().any(|x| *x > least + 10.0),
+        "the subtask's box is not moved in: {lefts:?}"
+    );
+    let tallest = found
+        .iter()
+        .map(|(_, height, _)| *height)
+        .fold(0.0_f32, f32::max);
+    assert!(tallest < 60.0, "the subtask is {tallest} tall: {found:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

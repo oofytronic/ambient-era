@@ -102,6 +102,10 @@ enum Face {
     Math,
     Meta,
     Callout(u8),
+    /// A task's day, time, or repeat, written at the end of its line.
+    Due,
+    /// A task's `!1`, `!2`, or `!3`.
+    Priority(u8),
 }
 
 const STRONG: u8 = 1;
@@ -870,7 +874,7 @@ fn mark_format(mark: &Mark, theme: &Theme) -> highlighter::Format<Font> {
         };
     }
     let mut color = match mark.face {
-        Face::Marker | Face::Meta => Some(marker),
+        Face::Marker | Face::Meta | Face::Due => Some(marker),
         Face::Link | Face::Image | Face::Check | Face::Quote => Some(accent),
         Face::Wiki => Some(if mark.flags & MISSING == 0 {
             accent
@@ -881,6 +885,7 @@ fn mark_format(mark: &Mark, theme: &Theme) -> highlighter::Format<Font> {
         Face::Checked => Some(done),
         Face::Callout(kind) => Some(callout_color(kind, dark)),
         Face::Code | Face::Math => Some(code),
+        Face::Priority(level) => Some(crate::priority_color(priority_of(level))),
     };
     if mark.flags & HIGH != 0 {
         color = Some(gold);
@@ -897,7 +902,9 @@ fn mark_format(mark: &Mark, theme: &Theme) -> highlighter::Format<Font> {
     } else {
         match mark.face {
             Face::Heading(level) if level <= 2 => Some(serif()),
-            Face::Heading(_) | Face::Check | Face::Checked | Face::Image => Some(sans_bold()),
+            Face::Heading(_) | Face::Check | Face::Checked | Face::Image | Face::Priority(_) => {
+                Some(sans_bold())
+            }
             _ => None,
         }
     };
@@ -1091,8 +1098,132 @@ fn paint_in(line: &str, carry: Carry, at_start: bool) -> (Vec<(Range<usize>, Mar
         from = abs;
     }
     let (inner, next) = paint_inline(line, from, line.len(), carry, lead.base);
-    spans.extend(inner);
+    if lead.box_at.is_some() {
+        spans.extend(with_task_tokens(line, from, inner, lead.base));
+    } else {
+        spans.extend(inner);
+    }
     (spans, finish_line(next))
+}
+
+/// The priority a face's number stands for.
+fn priority_of(level: u8) -> crate::taskmeta::Priority {
+    match level {
+        1 => crate::taskmeta::Priority::One,
+        2 => crate::taskmeta::Priority::Two,
+        _ => crate::taskmeta::Priority::Three,
+    }
+}
+
+/// Where a task's priority token and its day, time, and repeat are in its line, from `from` on.
+/// Note citations are not looked into, and a day in the middle of the words is only words: the
+/// day is the last words, which is where `Due::split` reads it.
+fn task_token_ranges(line: &str, from: usize) -> Vec<(Range<usize>, Face)> {
+    let Some(label) = line.get(from..) else {
+        return Vec::new();
+    };
+    let mut masked = label.to_owned();
+    for (start, end) in cite_spans(label) {
+        if let Some(hole) = masked.get_mut(start..end) {
+            // Same length, so every place in it is still a place in the line.
+            let blank = " ".repeat(hole.len());
+            masked.replace_range(start..end, &blank);
+        }
+    }
+    let lead = masked.len().saturating_sub(masked.trim_start().len());
+    let (words, due) = crate::due::Due::split(&masked);
+    let words_end = if words.is_empty() {
+        lead
+    } else {
+        lead.saturating_add(words.len())
+    };
+    let mut found = Vec::new();
+    let mut place = |text: &str, offset: usize, face_of: &dyn Fn(&str) -> Option<Face>| {
+        let mut at = 0;
+        while at < text.len() {
+            let rest = text.get(at..).unwrap_or("");
+            let skip = rest.len().saturating_sub(rest.trim_start().len());
+            at = at.saturating_add(skip);
+            let token = text
+                .get(at..)
+                .and_then(|rest| rest.split_whitespace().next())
+                .unwrap_or("");
+            if token.is_empty() {
+                break;
+            }
+            if let Some(face) = face_of(token) {
+                let start = from.saturating_add(offset).saturating_add(at);
+                found.push((start..start.saturating_add(token.len()), face));
+            }
+            at = at.saturating_add(token.len());
+        }
+    };
+    let priority = |token: &str| match token {
+        "!1" => Some(Face::Priority(1)),
+        "!2" => Some(Face::Priority(2)),
+        "!3" => Some(Face::Priority(3)),
+        _ => None,
+    };
+    place(masked.get(..words_end).unwrap_or(""), 0, &priority);
+    if due.is_some() {
+        place(masked.get(words_end..).unwrap_or(""), words_end, &|_| {
+            Some(Face::Due)
+        });
+    }
+    found
+}
+
+/// The spans of a task line's words, with its priority and due tokens given their own face. The
+/// letters are the same, so only color and weight change, and wrapping does not.
+fn with_task_tokens(
+    line: &str,
+    from: usize,
+    mut inner: Vec<(Range<usize>, Mark)>,
+    base: Mark,
+) -> Vec<(Range<usize>, Mark)> {
+    let tokens = task_token_ranges(line, from);
+    if tokens.is_empty() {
+        return inner;
+    }
+    inner.sort_by_key(|(range, _)| range.start);
+    // Every letter from `from` on is in a span first, so a token can be cut out of any of them.
+    let mut whole: Vec<(Range<usize>, Mark)> = Vec::new();
+    let mut at = from;
+    for (range, mark) in inner {
+        if range.start > at {
+            whole.push((at..range.start, base));
+        }
+        at = at.max(range.end);
+        whole.push((range, mark));
+    }
+    if at < line.len() {
+        whole.push((at..line.len(), base));
+    }
+    let mut out = Vec::new();
+    for (range, mark) in whole {
+        let mut start = range.start;
+        for (token, face) in &tokens {
+            if token.end <= start || token.start >= range.end {
+                continue;
+            }
+            if token.start > start {
+                out.push((start..token.start, mark));
+            }
+            let cut = token.start.max(start)..token.end.min(range.end);
+            out.push((
+                cut.clone(),
+                Mark {
+                    face: *face,
+                    flags: mark.flags,
+                },
+            ));
+            start = cut.end;
+        }
+        if start < range.end {
+            out.push((start..range.end, mark));
+        }
+    }
+    out
 }
 
 fn finish_line(mut carry: Carry) -> Carry {
@@ -4901,7 +5032,7 @@ fn look_of(mark: Mark, dark: bool) -> Look {
     }
     look.color = match mark.face {
         Face::Text => None,
-        Face::Marker | Face::Meta => Some(marker),
+        Face::Marker | Face::Meta | Face::Due => Some(marker),
         Face::Link | Face::Image | Face::Check | Face::Quote => Some(accent),
         Face::Wiki => Some(if mark.flags & MISSING == 0 {
             accent
@@ -4915,6 +5046,7 @@ fn look_of(mark: Mark, dark: bool) -> Look {
         Face::Checked => Some(done),
         Face::Callout(kind) => Some(callout_color(kind, dark)),
         Face::Code | Face::Math => Some(code),
+        Face::Priority(level) => Some(crate::priority_color(priority_of(level))),
     };
     if mark.flags & STRIKE != 0 {
         look.strike = true;
@@ -4928,7 +5060,9 @@ fn look_of(mark: Mark, dark: bool) -> Look {
     } else {
         match mark.face {
             Face::Heading(level) if level <= 2 => serif(),
-            Face::Heading(_) | Face::Check | Face::Checked | Face::Image => sans_bold(),
+            Face::Heading(_) | Face::Check | Face::Checked | Face::Image | Face::Priority(_) => {
+                sans_bold()
+            }
             _ => sans(),
         }
     };
@@ -5628,7 +5762,13 @@ fn active_line<'a>(
     if show_box {
         let done = lead.box_at.is_some_and(|(_, done)| done);
         row![
-            checkbox(done).on_toggle(move |done| Message::SetOpenTask { line: index, done }),
+            container(
+                checkbox(done).on_toggle(move |done| Message::SetOpenTask { line: index, done })
+            )
+            .padding(Padding {
+                left: task_indent(line),
+                ..Padding::ZERO
+            }),
             body_row,
         ]
         .spacing(8)
@@ -5701,7 +5841,13 @@ fn settled_line(
         && let Some((_, done)) = lead.box_at
     {
         row![
-            checkbox(done).on_toggle(move |done| Message::SetOpenTask { line: index, done }),
+            container(
+                checkbox(done).on_toggle(move |done| Message::SetOpenTask { line: index, done })
+            )
+            .padding(Padding {
+                left: task_indent(line),
+                ..Padding::ZERO
+            }),
             body,
         ]
         .spacing(8)
@@ -6054,6 +6200,16 @@ fn line_face(line: &str) -> (Font, f32) {
     (sans(), BODY)
 }
 
+/// How far a task is moved in from the left edge, a step for each two spaces it is indented.
+fn task_indent(line: &str) -> f32 {
+    if lead(line).box_at.is_none() {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let steps = leading_indent(line).div_ceil(2).min(4) as f32;
+    steps * 22.0
+}
+
 /// Room left for the words after a quote bar or a checkbox.
 fn content_measure(line: &str, measure: f32) -> f32 {
     let mut chrome = 0.0;
@@ -6061,7 +6217,7 @@ fn content_measure(line: &str, measure: f32) -> f32 {
         chrome += 11.0;
     }
     if lead(line).box_at.is_some() {
-        chrome += 26.0;
+        chrome += 26.0 + task_indent(line);
     }
     (measure - chrome).max(48.0)
 }
@@ -6223,6 +6379,12 @@ fn wrap_by(
         let mut row_end = start;
         let mut pushed_split = false;
         while cursor < line.len() {
+            // The space an indented line begins with belongs to its first row. Taken as a row
+            // of its own, it left a task's checkbox alone on a line and the words below it.
+            if row_start == 0 && cursor == 0 && is_space_at(line, 0) {
+                cursor = skip_spaces(line, cursor, &atomic);
+                continue;
+            }
             if cursor > row_start && is_space_at(line, cursor) {
                 cursor = skip_spaces(line, cursor, &atomic);
                 continue;
@@ -6238,11 +6400,11 @@ fn wrap_by(
             }
             if row_end == row_start && width > measure {
                 if exact {
-                    rows.push(cursor..word_end);
+                    rows.push(row_start..word_end);
                     start = word_end;
                 } else {
                     let cut = split_to_fit(line, cursor, word_end, measure, &width_of);
-                    rows.push(cursor..cut);
+                    rows.push(row_start..cut);
                     start = cut;
                 }
                 pushed_split = true;
@@ -6957,6 +7119,7 @@ mod tests {
     use super::{
         Carry, EM, Face, HIGH, Mark, STRIKE, STRONG, add_subtask, check_mark, code_mark, em,
         heading_mark, marker, math_mark, paint, set_task_line, strike_mark, strong, task_lines,
+        wrap_by,
     };
 
     #[test]
@@ -8740,6 +8903,98 @@ mod tests {
         assert_eq!(
             body.selection_origin(4_000.0),
             Some((0.0, super::line_px("alpha")))
+        );
+    }
+
+    #[test]
+    fn an_indented_line_that_wraps_does_not_begin_with_a_row_of_only_space() {
+        let line = "  - [ ] book the hotel and then the flights and the car for the whole trip";
+        let rows = wrap_by(line, 120.0, 0..0, |slice, _| {
+            #[allow(clippy::cast_precision_loss)]
+            let width = slice.chars().count() as f32 * 8.0;
+            width
+        });
+        assert!(rows.len() > 1, "{rows:?}");
+        let first = rows.first().expect("a row");
+        assert_eq!(first.start, 0, "{rows:?}");
+        let words = line.get(first.clone()).unwrap_or("");
+        assert!(
+            words.trim().len() > 2,
+            "the first row has words in it: {words:?}"
+        );
+        // Every row has something in it, and none is only space.
+        for row in &rows {
+            assert!(
+                !line.get(row.clone()).unwrap_or("").trim().is_empty(),
+                "{rows:?}"
+            );
+        }
+        // The same words, cut at the same places, as when the line is not indented.
+        let plain = wrap_by(line.trim_start(), 120.0, 0..0, |slice, _| {
+            #[allow(clippy::cast_precision_loss)]
+            let width = slice.chars().count() as f32 * 8.0;
+            width
+        });
+        assert!(rows.len() <= plain.len() + 1);
+    }
+
+    /// The text each face covers in a painted line.
+    fn faces(line: &str) -> Vec<(String, super::Face)> {
+        paint(line, Carry::default())
+            .0
+            .into_iter()
+            .filter(|(_, mark)| matches!(mark.face, super::Face::Due | super::Face::Priority(_)))
+            .map(|(range, mark)| (line.get(range).unwrap_or("").to_owned(), mark.face))
+            .collect()
+    }
+
+    #[test]
+    fn a_tasks_priority_and_day_are_drawn_in_their_own_color() {
+        use super::Face;
+        assert_eq!(
+            faces("- [ ] call !1 2026-11-21 15:00 repeat:weekly"),
+            [
+                ("!1".to_owned(), Face::Priority(1)),
+                ("2026-11-21".to_owned(), Face::Due),
+                ("15:00".to_owned(), Face::Due),
+                ("repeat:weekly".to_owned(), Face::Due),
+            ]
+        );
+        // A day that is not the last words is words. A citation after the day does not stop it.
+        assert!(faces("- [ ] meet 2026-11-21 about plans").is_empty());
+        assert_eq!(
+            faces("  - [ ] pack !3 2026-11-21 [[abcd|Plan 2026-12-01]]"),
+            [
+                ("!3".to_owned(), Face::Priority(3)),
+                ("2026-11-21".to_owned(), Face::Due),
+            ]
+        );
+        // A line that is not a task is left alone, and so is a done task's strike.
+        assert!(faces("- plain !1 2026-11-21").is_empty());
+        let done = paint("- [x] call !2 2026-11-21", Carry::default()).0;
+        assert!(
+            done.iter()
+                .any(|(_, mark)| mark.face == Face::Priority(2) && mark.flags & STRIKE != 0),
+            "{done:?}"
+        );
+        // Every letter of the line is in a span, in order, so nothing is drawn twice.
+        let line = "- [ ] call !1 now 2026-11-21 15:00";
+        let spans = paint(line, Carry::default()).0;
+        let mut end = 0;
+        for (range, _) in &spans {
+            assert!(range.start >= end, "{spans:?}");
+            end = range.end;
+        }
+    }
+
+    #[test]
+    fn a_task_is_moved_in_a_step_for_each_two_spaces() {
+        assert!(super::task_indent("- [ ] a").abs() < f32::EPSILON);
+        assert!(super::task_indent("  - [ ] a") > 0.0);
+        assert!(super::task_indent("    - [ ] a") > super::task_indent("  - [ ] a"));
+        assert!(
+            super::task_indent("  - plain").abs() < f32::EPSILON,
+            "not a task"
         );
     }
 

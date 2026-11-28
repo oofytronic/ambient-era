@@ -97,6 +97,7 @@ See [platforms.md](platforms.md).
 - **Checking a task does not check its subtasks,** and checking the last subtask does not check the task.
 - **A repeating task with subtasks** repeats the task line only. Its done subtasks stay done.
 - **Priority is not a sort order yet.** It shows and can be set. The list is still ordered by day.
+- **A parent task does not show its `1/3` in the note,** only in the Tasks tab. Drawing it in the line is not done.
 - **Habits are not started.** See the discussion in the session notes: where check-ins live is a decision to make first.
 
 ## Offered, not built

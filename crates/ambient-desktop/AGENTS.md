@@ -73,3 +73,9 @@ A subtask is a task line indented under another. `markdown::task_lines` gives ea
 
 Rewrite a task's label through `LabelParts` (words, priority, due, citations), so the line keeps its one order. Anything that rebuilds a label from `task_words` alone loses the priority. Snooze (`SnoozeTo`) only sets the due moment and keeps its time and repeat. The Today view is what is late and what is due today. It is where the tab opens.
 
+## How a task line is drawn in a note
+
+The saved line is unchanged: `- [ ] words !1 2026-11-21 15:00 repeat:weekly`. The editor draws the `!1` to `!3` token in its priority color and weight, and the day, time, and repeat in the muted marker color (`Face::Priority`, `Face::Due`, from `task_token_ranges`). Only color and weight change, never the letters or the size, so wrapping stays exact. A day in the middle of the words is words, because the day is read from the end of the line. A subtask's checkbox is moved in a step for each two spaces it is indented (`task_indent`, which `content_measure` also takes off the width).
+
+`wrap_by` must not begin an indented line with a row of its own made of the leading space. It did, and a long subtask with the caret in it showed its checkbox alone and the words on the next row. The headless test `a_long_subtask_with_the_caret_in_it_starts_its_words_beside_its_checkbox` holds it.
+

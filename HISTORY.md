@@ -4,6 +4,10 @@ A log of meaningful decisions. Newest first. This is not a commit changelog.
 
 When a turn changes direction, scope, or a locked design choice, add an entry here in the same change. Link the ADR or spec that records it. Do not relitigate an entry in a later one; supersede it.
 
+## 2026-11-29 — a task line reads better in its note, and a long subtask no longer breaks
+
+A task's priority and day are drawn in color in the note, and a subtask is moved in under its task. The saved text is unchanged. A long indented line with the caret in it used to put its checkbox alone on one row and its words on the next, because the wrapper made a row of the leading space. That is fixed and held by a test. A count of done subtasks drawn at the end of the parent's line is not done yet.
+
 ## 2026-11-28 — tasks: Today, plain-language adding, subtasks, priority, snooze
 
 The Tasks tab opens on Today: what is late, what is due today, and what was checked off today. Typing `call vet tomorrow 3pm every week !2` in the add field reads the day, time, repeat, and priority out of the words, shows what it read, and can be turned off for that one task. A task can have subtasks, which are tasks indented under it in its note. A task has a priority, `!1` to `!3`, written as a token in its words. A task can be put off to later today, tomorrow, next week, or a picked day. All of it is words in the task's own line. Nothing is a new record, and nothing changes on the wire. Habits are not started.
